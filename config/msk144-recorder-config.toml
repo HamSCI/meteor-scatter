@@ -1,0 +1,57 @@
+# msk144-recorder configuration
+# See https://github.com/mijahauan/msk144-recorder for documentation.
+#
+# Monitors meteor-scatter activity via WSJT-X's MSK144 protocol, decodes
+# heard "pings" with the bundled `jt9` binary, and uploads heard spots to
+# wsprdaemon.org under the shared station reporter_id.
+
+[station]
+callsign    = "AC0G"
+grid_square = "EM38ww"
+# Optional PSWS identifiers (not required for msk144-recorder operation):
+# psws_station_id    = "S000000"
+# psws_instrument_id = "0"
+
+[paths]
+spool_dir   = "/var/lib/msk144-recorder"
+log_dir     = "/var/log/msk144-recorder"
+keep_wav    = false
+
+# Decoder.  msk144-recorder decodes with WSJT-X's `jt9` in MSK144 mode
+# (`jt9 --msk144 -p 15`).  The arch-specific binary is bundled in-repo at
+# bin/decoders/jt9-{x86,arm32,arm64}-v27 and resolved automatically; set
+# `decoder_jt9` only to override that resolution with an explicit path.
+decoder_kind = "jt9"
+# decoder_jt9 = "/opt/git/sigmond/msk144-recorder/bin/decoders/jt9-x86-v27"
+
+# Optional standalone fallback for chain-delay correction (contract v0.3 §8).
+# Overridden by RADIOD_<id>_CHAIN_DELAY_NS in coordination.env when present.
+# [timing]
+# chain_delay_ns = 0
+
+[[radiod]]
+# REQUIRED: the mDNS control/status multicast name of the radiod to
+# consume from.  Discover available radiods on the LAN with:
+#   msk144-recorder config init   (interactive wizard, picks one)
+#   ka9q-python list              (raw discovery)
+status = "sigma-rx888mk2-status.local"
+
+# MSK144 meteor-scatter monitoring.  Standard WSJT-X dial frequencies (USB):
+#   10 m → 28.130 MHz   (RX888 HF direct-sampling path)
+#   6 m  → 50.260 MHz   (same RX888 path that serves 6 m FT8/FT4 today)
+# The standard MSK144 T/R sequence is 15 s; we record 15 s T/R-aligned
+# slots and decode each once with jt9 --msk144.
+#
+# Bandwidth: MSK144 occupies ~2.4-2.5 kHz (2000 baud MSK), centered on the
+# 1500 Hz audio Tx point → roughly 300-2750 Hz.  The `usb` preset's filter
+# (low=+50, high=+3k → 2950 Hz passband) covers it fully — the same full
+# SSB audio width a real WSJT-X station receives on.  Do NOT narrow this;
+# a tighter filter would clip the MSK144 sidebands and kill decodes.
+[radiod.msk144]
+sample_rate = 12000
+preset      = "usb"
+encoding    = "s16be"
+freqs_hz    = [
+  28_130_000,
+  50_260_000,
+]

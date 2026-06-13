@@ -1,0 +1,315 @@
+# msk144-recorder operator-help sidecar.
+#
+# Same schema as mag-recorder's help.toml: per-key title / help body /
+# example / validator_hint / required.  Loaded by
+# scripts/config-wizard.sh for each whiptail dialog.
+#
+# Sections covered: [station], [paths], [processing].  [[radiod]]
+# arrays-of-tables are NOT modifiable via the wizard -- the wizard's
+# main menu has an "Edit raw TOML in $EDITOR" item that opens the
+# config file directly for the rare cases (multi-radiod, custom
+# freqs_hz lists) where TOML hand-editing is the right answer.
+
+# --- Station -------------------------------------------------------
+
+[station.callsign]
+title          = "Amateur callsign"
+help           = """Your amateur radio callsign (uppercase).
+
+Used as the PSKReporter reporter identity for every spot uploaded.
+If sigmond's coordination.env already records a callsign for this
+host, that value is pre-filled."""
+example        = "AC0G"
+validator_hint = "1-9 letters/digits/slashes"
+required       = true
+
+[station.grid_square]
+title          = "Maidenhead grid square (6-10 chars)"
+help           = """Your Maidenhead locator -- 6 characters minimum,
+up to 10 characters supported by PSKReporter for fine-grained location.
+
+Pre-filled from coordination.env STATION_GRID if available.
+Online converters: https://www.giangrandi.org/electronics/radio/qthloccalc.shtml"""
+example        = "EM38ww40pk"
+validator_hint = "2 letters + 2 digits + 2-8 alphanumeric chars"
+required       = true
+
+[station.antenna]
+title          = "Antenna description (optional)"
+help           = """Free-form antenna text reported to PSKReporter
+alongside each spot.  Some operators put their antenna type and
+direction here (e.g. "G5RV @ 10m, NW").  Leave empty if you don't
+care to publish it."""
+example        = "G5RV @ 10m"
+required       = false
+
+# --- Paths ---------------------------------------------------------
+#
+# 2026-05-29 three-tier audit:
+#   * spool_dir, log_dir, decoder*, pskreporter, pskreporter_tcp
+#     are tier-1 install-canonical (FHS dirs / install-canonical
+#     binary paths / protocol detail) and are marked `hidden = true`
+#     so the Textual wizard skips them.  Bodies are kept intact so
+#     whiptail / $EDITOR users still see the help when editing the
+#     file directly.
+#   * decoder_kind is tier-2 (operator picks decode_ft8 vs jt9).
+#   * keep_wav is tier-2 (debug flag).
+
+[paths.spool_dir]
+hidden = true
+title          = "WAV spool directory"
+help           = """Where msk144-recorder writes raw FT8/FT4 audio slices
+before decoding.  One sub-directory per radiod ID and mode, e.g.
+``/var/lib/msk144-recorder/<radiod_id>/{ft8,ft4}/``.
+
+Files are deleted after decode unless keep_wav = true (below)."""
+example        = "/var/lib/msk144-recorder"
+required       = false
+
+[paths.log_dir]
+hidden = true
+title          = "Spot-log directory"
+help           = """Where msk144-recorder writes per-radiod, per-mode spot
+logs (``<radiod_id>-{ft8,ft4}.log``).  These are append-only text logs
+with one line per decoded spot."""
+example        = "/var/log/msk144-recorder"
+required       = false
+
+[paths.decoder_kind]
+title          = "Decoder kind"
+help           = """Which FT8/FT4 decoder msk144-recorder invokes per
+slot:
+
+  decode_ft8   ka9q/ft8_lib decoder; streams to stdout, reports an
+               ft8_lib-internal score (not a calibrated dB SNR),
+               costs ~0.05 s CPU and ~4 MB RSS per slot per band.
+  jt9          WSJT-X's jt9 decoder; calibrated dB SNR, slower but
+               more accurate signal-quality reporting.
+
+Rows in psk.spots self-identify via the decoder_kind column."""
+example        = "decode_ft8"
+validator_hint = '"decode_ft8" or "jt9"'
+required       = false
+
+[paths.decoder_decode_ft8]
+hidden = true
+title          = "decode_ft8 binary path"
+help           = """Absolute path to the ``decode_ft8`` binary from
+https://github.com/ka9q/ft8_lib.  Must be on PATH or absolute.
+
+The wizard previously asked for [paths].decoder here, which the
+template uses but the code never reads -- always use
+decoder_decode_ft8."""
+example        = "/usr/local/bin/decode_ft8"
+validator_hint = "absolute path to an executable file"
+required       = false
+
+[paths.decoder]
+hidden = true
+
+[paths.decoder_jt9]
+hidden = true
+
+[paths.pskreporter]
+hidden = true
+title          = "pskreporter binary path"
+help           = """Absolute path to the ``pskreporter`` binary (or
+the local ``pskreporter-sender`` wrapper) from
+https://github.com/pjsg/ftlib-pskreporter -- the long-running
+subprocess msk144-recorder feeds spots to via stdin (TCP or UDP
+depending on paths.pskreporter_tcp)."""
+example        = "/usr/local/bin/pskreporter-sender"
+validator_hint = "absolute path to an executable file"
+required       = false
+
+[paths.pskreporter_tcp]
+hidden = true
+title          = "Use TCP transport to pskreporter-sender?"
+help           = """How msk144-recorder feeds spots into the
+pskreporter-sender subprocess:
+
+  true   (default) write each spot to the sender's stdin
+                   via a long-lived TCP socket.  Reliable;
+                   recommended.
+  false            spawn one sender per cycle and write via UDP.
+                   Lighter-weight but lossy under load."""
+example        = "true"
+validator_hint = "true or false"
+required       = false
+
+[paths.keep_wav]
+title          = "Keep WAV slices after decode?"
+help           = """Default false: WAV files are deleted right after
+decode to keep the spool dir bounded.  Set true for debugging or
+offline re-decode, but accept that the spool grows ~30 MB/hour per
+band per mode at the default 12 kHz sample rate."""
+example        = "false"
+validator_hint = "true or false"
+required       = false
+
+# --- Optional PSWS identifiers (tier 2, only used if PSWS-uploading) -
+
+[station.psws_station_id]
+title          = "PSWS station ID (optional)"
+help           = """The PSWS-assigned station ID, if this msk144-recorder
+also feeds PSWS.  Leave empty for pskreporter-only operation."""
+required       = false
+
+[station.psws_instrument_id]
+title          = "PSWS instrument ID (optional)"
+help           = """Per-instrument PSWS identifier, if PSWS-uploading."""
+required       = false
+
+# --- Radiod per-mode protocol constants (tier 1, hidden) ------------
+#
+# [radiod.ft8] / [radiod.ft4] sample_rate (12 kHz), preset (usb),
+# encoding (s16be) are WSJT-X protocol requirements.  freqs_hz is
+# the band list — wizard-skipped today (list-of-int), but operators
+# can edit raw TOML via "Edit raw TOML in $EDITOR".
+
+[radiod.ft8.sample_rate]
+hidden = true
+
+[radiod.ft8.preset]
+hidden = true
+
+[radiod.ft8.encoding]
+hidden = true
+
+[radiod.ft4.sample_rate]
+hidden = true
+
+[radiod.ft4.preset]
+hidden = true
+
+[radiod.ft4.encoding]
+hidden = true
+
+# --- Processing (advanced) -----------------------------------------
+
+[processing.radiod_lifetime_frames]
+title          = "radiod LIFETIME tag (frames)"
+help           = """How many radiod main-loop frames a msk144-recorder
+channel survives without a keep-alive (ka9q-python ≥3.13.0,
+ka9q-radio ≥0f8b622).  Channels self-destruct after this many
+frames so a crashed recorder leaves no residual channels on radiod.
+
+Default 6000 ≈ 2 minutes at radiod's default 20 ms blocktime
+(~50 Hz).  The recorder refreshes the lifetime every (frames / 4)
+seconds while running.
+
+Special value: 0 = infinite (no LIFETIME tag, no keep-alive --
+radiod owns the channel for its full template default).  Use only
+when you truly want a channel to outlive the recorder."""
+example        = "6000"
+validator_hint = "non-negative integer (frames; 0 = infinite)"
+required       = false
+
+# --- Radiod (one entry per [[radiod]] block; arrays-of-tables) -----
+
+[radiod.id]
+title          = "Radiod block id"
+help           = """Short identifier for this [[radiod]] block.
+Matches systemd's msk144-recorder@<id>.service instance suffix and the
+per-instance env file at /etc/msk144-recorder/env/<id>.env.
+
+Conventionally <hostname>-<sdr>, e.g. bee1-rx888."""
+example        = "bee1-rx888"
+validator_hint = "1-64 letters/digits/hyphens/underscores"
+required       = true
+
+[radiod.radiod_status]
+title          = "Radiod status address (mDNS)"
+help           = """The mDNS hostname radiod publishes its status RTP
+control channel on -- always a .local hostname, never an IP.
+Format: <radiod-id>-status.local."""
+example        = "bee1-status.local"
+validator_hint = "<hostname>.local"
+required       = true
+
+# --- Timing (advanced) ---------------------------------------------
+
+[timing.chain_delay_ns]
+title          = "Chain delay (nanoseconds)"
+help           = """CONTRACT v0.3 §8 fallback: how many nanoseconds
+later than wall-clock the RTP audio actually arrives at msk144-recorder,
+accounting for SDR + radiod + multicast latency.  Subtracted from
+slot timestamps so spots align to true UTC.
+
+Almost always overridden by RADIOD_<id>_CHAIN_DELAY_NS in
+/etc/sigmond/coordination.env (sigmond measures this empirically
+per radiod and writes it there).  Set here only as a standalone
+fallback when sigmond isn't running or hasn't filled it in yet."""
+example        = "0"
+validator_hint = "integer nanoseconds (typically 0..1_000_000_000)"
+required       = false
+
+# === Per-instance env file =========================================
+#
+# /etc/msk144-recorder/env/<radiod_id>.env holds the upload-destination
+# knobs (MSK144_DELIVERY_PIPELINES etc.).  The wizard's "Delivery"
+# section walks these and writes the env file via
+# `msk144-recorder env apply`.  Keys are env-var names with a
+# leading "env." path component in this help-toml schema.
+
+[env.MSK144_DELIVERY_PIPELINES]
+title          = "Upload pipelines (where spots go)"
+help           = """Comma-separated list of upload pipelines; order
+doesn't matter.
+
+  direct         client POSTs spots directly to pskreporter.info
+                 (cross-receiver dedup via HsPskReporterUploader).
+                 No server involvement on the upload side.
+
+  server-merge   ship every row to wsprdaemon-server with the
+                 forward_to_pskreporter flag set.  The server's
+                 elected pskreporter_forwarder picks one
+                 representative row per (call, freq, time) tuple
+                 and POSTs that one to pskreporter.info.
+
+  server-raw    ship every row to wsprdaemon-server with the
+                 forward_to_pskreporter flag CLEARED, so the
+                 server doesn't double-post.  Use when 'direct'
+                 is also enabled (the wizard auto-downgrades
+                 server-merge -> server-raw in that case).
+
+Typical settings:
+  Standalone host:                          direct
+  Site contributing to wsprdaemon network:  server-merge
+  Both:                                     direct,server-raw
+
+Legacy MSK144_DELIVERY_MODE (server / direct / both) is still
+honoured for backward compatibility."""
+example        = "direct"
+validator_hint = "comma-separated subset of {direct,server-merge,server-raw}"
+required       = false
+
+[env.MSK144_USE_HS_UPLOADER]
+title          = "Enable the hs-uploader pipeline?"
+help           = """When 1 (the recommended setting on this fleet),
+msk144-recorder runs the in-process hs-uploader Pipeline that ships
+spots through the chosen MSK144_DELIVERY_PIPELINES.
+
+When 0 / unset, no uploads happen -- msk144-recorder records and
+decodes locally but ships nothing to pskreporter.info or wsprdaemon.
+Useful for offline debugging."""
+example        = "1"
+validator_hint = "0 or 1"
+required       = false
+
+[env.MSK144_DIRECT_DEDUP]
+title          = "Direct-pipeline dedup CTE (advanced)"
+help           = """When 1, the 'direct' pipeline runs a window-function
+CTE to deduplicate spots across receivers before POSTing to
+pskreporter.info -- one row per (call, freq, ~time) tuple wins.
+
+Default 0 because on hosts where /var/lib/sigmond/sink.db is also
+being written to by wspr-recorder, the CTE materialisation trips
+sqlite3.OperationalError: disk I/O error every 30 s and the direct
+pipeline stalls.
+
+Enable on a multi-source host that is NOT sharing sink.db with
+wspr-recorder, or where the IOERR has been verified not to occur."""
+example        = "0"
+validator_hint = "0 or 1"
+required       = false

@@ -1,0 +1,100 @@
+[package]
+name             = "msk144-recorder"
+version          = "0.4.0"
+contract_version = "0.8"
+license          = "MIT"
+
+# Configuration interview (CONTRACT-v0.5 §14).  Sigmond invokes
+# msk144-recorder's own argparse subcommands; both honor the §14.3 env var
+# bag (STATION_*, SIGMOND_INSTANCE, SIGMOND_RADIOD_STATUS) as defaults.
+[contract.config]
+init = ["/usr/local/bin/msk144-recorder", "config", "init"]
+edit = ["/usr/local/bin/msk144-recorder", "config", "edit"]
+
+[build]
+steps = [
+    "python3 -m venv /opt/git/sigmond/msk144-recorder/venv",
+    "/opt/git/sigmond/msk144-recorder/venv/bin/pip install --upgrade pip setuptools wheel",
+    "/opt/git/sigmond/msk144-recorder/venv/bin/pip install -e /opt/git/sigmond/msk144-recorder",
+]
+produces = [
+    "/opt/git/sigmond/msk144-recorder/venv/bin/msk144-recorder",
+]
+
+[[install.steps]]
+kind = "link"
+src  = "/opt/git/sigmond/msk144-recorder/venv/bin/msk144-recorder"
+dst  = "/usr/local/bin/msk144-recorder"
+
+[[install.steps]]
+kind = "link"
+src  = "systemd/msk144-recorder@.service"
+dst  = "/etc/systemd/system/msk144-recorder@.service"
+
+[[install.steps]]
+kind     = "render"
+src      = "config/msk144-recorder-config.toml.template"
+dst      = "/etc/msk144-recorder/msk144-recorder-config.toml"
+if_absent = true
+
+[[install.steps]]
+kind = "mkdir"
+dst  = "/var/lib/msk144-recorder"
+owner = "msk144rec:msk144rec"
+mode  = "0755"
+
+[[install.steps]]
+kind = "mkdir"
+dst  = "/var/log/msk144-recorder"
+owner = "msk144rec:msk144rec"
+mode  = "0755"
+
+[systemd]
+units = ["msk144-recorder@.service"]
+
+[[deps.git]]
+name       = "ft8_lib"
+url        = "https://github.com/ka9q/ft8_lib.git"
+note       = "provides /usr/local/bin/decode_ft8 — msk144-recorder's FT4/FT8 decoder"
+
+[[deps.git]]
+name       = "ftlib-pskreporter"
+url        = "https://github.com/pjsg/ftlib-pskreporter.git"
+note       = "provides /usr/local/bin/pskreporter-sender (pip-installable)"
+
+# decode_ft8 / pskreporter-sender used to be cloned by wsprdaemon-client's
+# deps.conf — that's a v3 legacy.  In v4 these binaries belong to
+# msk144-recorder's install pipeline alone; wsprdaemon-client decodes only
+# WSPR (W2/F2/F5/F15/F30) and never invokes them.
+
+[[deps.pypi]]
+name    = "ka9q-python"
+version = "3.6.0"
+venv    = "/opt/git/sigmond/msk144-recorder/venv"
+
+[[deps.apt]]
+name = "whiptail"
+note = "optional UI for `msk144-recorder config init|edit` interactive wizard; absent → stdin-prompt fallback in configurator.py"
+
+# ---------------------------------------------------------------------------
+# Sigmond UI hooks (drop-in registration for `smd watch` + TUI Activity).
+# Consumed by lib/sigmond/client_features.py.
+# ---------------------------------------------------------------------------
+
+[client_features.watch]
+verb         = "psk"
+description  = "PSK Reporter ft8/ft4 cycles + flushes"
+verbose      = true
+per_instance = true
+
+[client_features.verifier]
+verb         = "psk"
+description  = "PSK Reporter upload audit (lost / in-flight / delivered / cadence)"
+kind         = "spot_queue"
+per_instance = true
+
+[client_features.receiver_channels]
+description  = "FT4/FT8 spot channels (per-mode freqs_hz)"
+per_instance = true
+parser_file  = "src/msk144_recorder/sigmond_tui.py"
+parser_attr  = "parse_receiver_channels"

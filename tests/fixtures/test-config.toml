@@ -1,0 +1,17 @@
+[station]
+callsign    = "AC0G"
+grid_square = "EM38ww40pk"
+
+[paths]
+spool_dir   = "/tmp/msk144-recorder-test/spool"
+log_dir     = "/tmp/msk144-recorder-test/log"
+keep_wav    = false
+
+[[radiod]]
+status = "test-status.local"
+
+[radiod.msk144]
+sample_rate = 12000
+preset      = "usb"
+encoding    = "s16be"
+freqs_hz    = [28130000, 50260000]

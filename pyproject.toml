@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=68.0", "setuptools-scm"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "msk144-recorder"
+version = "0.1.0"
+description = "MSK144 meteor-scatter spot recorder and wsprdaemon.org uploader for ka9q-radio"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [
+    {name = "Michael Hauan", email = "mjh@hauan.org"},
+]
+dependencies = [
+    "ka9q-python>=3.14.0",
+    "callhash>=1.0.0",
+    "hs-uploader>=0.1.0",
+    "numpy>=1.24.0",
+    "tomli>=2.0; python_version < '3.11'",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+]
+
+[project.scripts]
+msk144-recorder = "msk144_recorder.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.uv.sources]
+# editable=true so a `git pull` of any sibling propagates to this consumer's
+# venv without a reinstall.  Matches the suite-wide "one source tree, many
+# editable consumers" convention; see sigmond/CLAUDE.md "Fleet upgrade pattern".
+# ka9q-python listed here too because the existing convention on bee1 has it
+# editable in every consumer venv -- declaring it explicitly preserves that
+# behavior under uv sync (which would otherwise resolve >=3.14.0 from PyPI
+# as a non-editable wheel).  The base "ka9q-python>=3.14.0" dependency above
+# still controls what published version PyPI consumers get.
+callhash    = { path = "../callhash",    editable = true }
+hs-uploader = { path = "../hs-uploader", editable = true }
+ka9q-python = { path = "../ka9q-python", editable = true }
