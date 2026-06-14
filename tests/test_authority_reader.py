@@ -90,5 +90,54 @@ class TestAuthorityReader(unittest.TestCase):
         self.assertAlmostEqual(s.offset_seconds, -0.001234567, places=9)
 
 
+class TestCanonicalTimingAuthority(unittest.TestCase):
+    """The unified timing-provenance block stamped into every spot row
+    (authority_reader.to_timing_authority / standalone fallback). Shape
+    must match across wspr/psk/msk144/codar."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.path = self.tmp / "authority.json"
+        self.now = datetime(2026, 4, 23, 12, 0, 0, tzinfo=timezone.utc)
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _snap(self, **overrides) -> AuthoritySnapshot:
+        with self.path.open("w") as f:
+            json.dump(_good(**overrides), f)
+        s = AuthorityReader(path=self.path, now_fn=lambda: self.now).read()
+        assert s is not None
+        return s
+
+    def test_to_timing_authority_block(self) -> None:
+        b = self._snap(
+            t_level_active="T6", rtp_to_utc_offset_ns=4250, sigma_ns=1000,
+            t_level_witnesses=["T5"], disagreement_flags=["TIMING_DISAGREEMENT"],
+            governor_radiod="bee3-rx888",
+        ).to_timing_authority(client_radiod="bee3-rx888")
+        self.assertEqual(b["source"], "hf-timestd-authority")
+        self.assertEqual(b["t_level_active"], "T6")
+        self.assertEqual(b["rtp_to_utc_offset_ns"], 4250)
+        self.assertEqual(b["sigma_ns"], 1000)
+        self.assertEqual(b["disagreement_flags"], ["TIMING_DISAGREEMENT"])
+        self.assertEqual(b["client_radiod"], "bee3-rx888")
+
+    def test_standalone_block(self) -> None:
+        from msk144_recorder.core.authority_reader import standalone_timing_authority
+        b = standalone_timing_authority(client_radiod="bee3-rx888")
+        self.assertEqual(b["source"], "standalone-fallback")
+        self.assertIsNone(b["t_level_active"])
+        self.assertIsNone(b["rtp_to_utc_offset_ns"])
+        self.assertEqual(b["client_radiod"], "bee3-rx888")
+
+    def test_both_blocks_share_keys(self) -> None:
+        from msk144_recorder.core.authority_reader import standalone_timing_authority
+        self.assertEqual(
+            set(self._snap().to_timing_authority("r").keys()),
+            set(standalone_timing_authority("r").keys()),
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -426,11 +426,31 @@ class ChTailer:
                 logger.warning("ch_tailer %s: callhash observe failed: %s",
                                self._mode, exc)
 
+        # Canonical timing-provenance block (CLIENT-CONTRACT §18), read
+        # once per chunk — all decodes in a chunk share the slot's
+        # authority state. Sourced from hf-timestd's adjudicated
+        # authority.json; degrades to the standalone-fallback marker when
+        # hf-timestd is absent/stale. Identical shape across all clients.
+        from msk144_recorder.core.authority_reader import (
+            AuthorityReader, standalone_timing_authority,
+        )
+        try:
+            _snap = AuthorityReader().read()
+        except Exception as exc:
+            logger.debug("authority.json read failed: %s", exc)
+            _snap = None
+        timing_authority = (
+            _snap.to_timing_authority(self._radiod_id)
+            if _snap is not None
+            else standalone_timing_authority(self._radiod_id)
+        )
+
         rows: list[dict] = []
         for line in text.splitlines():
             row = parse_decoder_line(line, mode=self._mode)
             if row is None:
                 continue
+            row["timing_authority"] = timing_authority
             row["host_call"] = self._host_call
             row["host_grid"] = self._host_grid
             row["radiod_id"] = self._radiod_id

@@ -62,6 +62,34 @@ class AuthoritySnapshot:
         when `offset_usable` is False."""
         return (self.rtp_to_utc_offset_ns or 0) / 1_000_000_000.0
 
+    def to_timing_authority(
+        self, client_radiod: Optional[str] = None,
+    ) -> dict:
+        """Canonical timing-provenance block for data records.
+
+        Identical across all sigmond clients (wspr/psk/msk144/codar): the
+        single authoritative record of how a sample's UTC label was
+        derived, sourced entirely from hf-timestd's adjudicated
+        authority.json — never from a secondary status feed. Carries tier
+        provenance, the applied offset, the honest sigma (including the
+        cross-check uncertainty widening), the disagreement flags, and
+        multi-radiod attribution. See CLIENT-CONTRACT §18 / METROLOGY
+        §4.5. Use standalone_timing_authority() when no snapshot is
+        available (hf-timestd absent / stale)."""
+        return {
+            "source": "hf-timestd-authority",
+            "schema": "v1",
+            "a_level": self.a_level,
+            "t_level_active": self.t_level_active,
+            "t_level_witnesses": list(self.t_level_witnesses),
+            "rtp_to_utc_offset_ns": self.rtp_to_utc_offset_ns,
+            "sigma_ns": self.sigma_ns,
+            "disagreement_flags": list(self.disagreement_flags),
+            "governor_radiod": self.governor_radiod,
+            "client_radiod": client_radiod,
+            "authority_utc_published": self.utc_published.isoformat(),
+        }
+
 
 class AuthorityReader:
     """Atomic reader for /run/hf-timestd/authority.json.
@@ -132,6 +160,32 @@ class AuthorityReader:
         except (KeyError, TypeError, ValueError) as e:
             logger.debug("authority.json field error: %s", e)
             return None
+
+
+def standalone_timing_authority(
+    client_radiod: Optional[str] = None,
+) -> dict:
+    """Canonical timing-provenance block when authority.json is
+    unavailable (hf-timestd absent or stale) — the standalone fallback.
+
+    Records explicitly that no hf-timestd offset was applied, so
+    downstream analysis sees the provenance directly instead of inferring
+    it from a missing block. Shape matches
+    AuthoritySnapshot.to_timing_authority so the record key is uniform
+    across both states and across all clients."""
+    return {
+        "source": "standalone-fallback",
+        "schema": "v1",
+        "a_level": None,
+        "t_level_active": None,
+        "t_level_witnesses": [],
+        "rtp_to_utc_offset_ns": None,
+        "sigma_ns": None,
+        "disagreement_flags": [],
+        "governor_radiod": None,
+        "client_radiod": client_radiod,
+        "authority_utc_published": None,
+    }
 
 
 def _parse_iso_z(s: str) -> datetime:
