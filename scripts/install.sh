@@ -1,16 +1,16 @@
 #!/bin/bash
-# install.sh — first-run bootstrap for msk144-recorder (Pattern A editable install)
+# install.sh — first-run bootstrap for meteor-scatter (Pattern A editable install)
 #
 # Usage: sudo ./scripts/install.sh [--pull] [--yes]
 #
 # What it does:
-#   1. Creates service user msk144rec:msk144rec
-#   2. Clones/links repo to /opt/git/sigmond/msk144-recorder
-#   3. Creates venv at /opt/git/sigmond/msk144-recorder/venv with editable install
+#   1. Creates service user meteorscat:meteorscat
+#   2. Clones/links repo to /opt/git/sigmond/meteor-scatter
+#   3. Creates venv at /opt/git/sigmond/meteor-scatter/venv with editable install
 #   4. Verifies the bundled jt9 MSK144 decoder for this arch
 #   5. Renders config template (non-destructive — never overwrites)
 #   6. Installs systemd unit template
-#   7. Enables msk144-recorder@<radiod_id> instances from config
+#   7. Enables meteor-scatter@<radiod_id> instances from config
 #
 # The MSK144 decoder (WSJT-X's jt9) is bundled in-repo at
 # bin/decoders/jt9-{x86,arm32,arm64}-v* — no build step.  Upload to
@@ -21,14 +21,14 @@
 
 set -euo pipefail
 
-SERVICE_USER="msk144rec"
-SERVICE_GROUP="msk144rec"
-REPO_SOURCE="/opt/git/sigmond/msk144-recorder"
-VENV_DIR="/opt/git/sigmond/msk144-recorder/venv"
-CONFIG_DIR="/etc/msk144-recorder"
-CONFIG_FILE="${CONFIG_DIR}/msk144-recorder-config.toml"
-SPOOL_DIR="/var/lib/msk144-recorder"
-LOG_DIR="/var/log/msk144-recorder"
+SERVICE_USER="meteorscat"
+SERVICE_GROUP="meteorscat"
+REPO_SOURCE="/opt/git/sigmond/meteor-scatter"
+VENV_DIR="/opt/git/sigmond/meteor-scatter/venv"
+CONFIG_DIR="/etc/meteor-scatter"
+CONFIG_FILE="${CONFIG_DIR}/meteor-scatter-config.toml"
+SPOOL_DIR="/var/lib/meteor-scatter"
+LOG_DIR="/var/log/meteor-scatter"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
@@ -59,7 +59,7 @@ if ! id -u "$SERVICE_USER" &>/dev/null; then
             "$SERVICE_USER"
 fi
 
-# Add SERVICE_USER to the sigmond supplementary group so msk144-recorder can
+# Add SERVICE_USER to the sigmond supplementary group so meteor-scatter can
 # write to /var/lib/hs-uploader/watermarks.db and /var/lib/sigmond/sink.db.
 # (The sigmond group is created by sigmond/install.sh, and the shared
 # /var/lib/hs-uploader dir is provisioned by hs-uploader/install.sh's
@@ -158,9 +158,9 @@ if [[ ! -d "$REPO_SOURCE" ]]; then
 fi
 
 # Traversability check (Pattern A defense)
-if ! sudo -u "$SERVICE_USER" test -r "$REPO_SOURCE/src/msk144_recorder/__init__.py"; then
-    ui_error "Service user $SERVICE_USER cannot read $REPO_SOURCE/src/msk144_recorder/__init__.py"
-    ui_error "Fix: ensure the repo is at /opt/git/sigmond/msk144-recorder (not under a mode-700 home)"
+if ! sudo -u "$SERVICE_USER" test -r "$REPO_SOURCE/src/meteor_scatter/__init__.py"; then
+    ui_error "Service user $SERVICE_USER cannot read $REPO_SOURCE/src/meteor_scatter/__init__.py"
+    ui_error "Fix: ensure the repo is at /opt/git/sigmond/meteor-scatter (not under a mode-700 home)"
     ui_error "  or: chmod g+rx the path and add $SERVICE_USER to the owner's group"
     exit 1
 fi
@@ -184,15 +184,15 @@ fi
 
 # uv sync reads pyproject.toml + uv.lock, resolves [tool.uv.sources]
 # (callhash, hs-uploader, ka9q-python all editable from sibling paths),
-# installs msk144-recorder itself editable into the venv, and pins exactly
+# installs meteor-scatter itself editable into the venv, and pins exactly
 # what's in uv.lock.  --no-dev skips dev extras (pytest etc.); --frozen
 # requires uv.lock to be current (regenerate locally with `uv lock` if
 # siblings or deps have shifted).
-ui_info "Syncing msk144-recorder + siblings (callhash, hs-uploader, ka9q-python) into $VENV_DIR"
+ui_info "Syncing meteor-scatter + siblings (callhash, hs-uploader, ka9q-python) into $VENV_DIR"
 UV_PROJECT_ENVIRONMENT="$VENV_DIR" \
     uv sync --project "$REPO_SOURCE" --frozen --no-dev --quiet
 
-# sigmond is the host-wide orchestrator; msk144-recorder lazy-imports
+# sigmond is the host-wide orchestrator; meteor-scatter lazy-imports
 # sigmond.wizard_dispatch from configurator.py for the whiptail wizard
 # plumbing (helpers shared with mag-recorder / wspr-recorder via
 # sigmond's lib).  Falls back to a local implementation when absent
@@ -210,14 +210,14 @@ else
 fi
 
 # Post-install verify: the daemon imports as the service user.
-if ! sudo -u "$SERVICE_USER" "$VENV_DIR/bin/python3" -c 'import msk144_recorder' 2>/dev/null; then
-    ui_error "Post-install verify failed: $SERVICE_USER cannot import msk144_recorder"
+if ! sudo -u "$SERVICE_USER" "$VENV_DIR/bin/python3" -c 'import meteor_scatter' 2>/dev/null; then
+    ui_error "Post-install verify failed: $SERVICE_USER cannot import meteor_scatter"
     exit 1
 fi
 ui_info "Post-install verify OK"
 
 # --- Phase 2.5: verify the bundled jt9 MSK144 decoder ---
-# msk144-recorder decodes with WSJT-X's jt9 (`jt9 --msk144`), bundled
+# meteor-scatter decodes with WSJT-X's jt9 (`jt9 --msk144`), bundled
 # in-repo at bin/decoders/jt9-{x86,arm32,arm64}-v*.  No build step — just
 # confirm the arch-specific binary is present, executable, and advertises
 # the MSK144 mode.  Non-fatal: the recorder still records slots without a
@@ -247,8 +247,8 @@ _verify_jt9
 
 # --- Phase 3: config ---
 mkdir -p "$CONFIG_DIR"
-# The config is created by `msk144-recorder config init` (or `smd config init
-# msk144-recorder`), which fills callsign/grid/radiod from the sigmond CONTRACT
+# The config is created by `meteor-scatter config init` (or `smd config init
+# meteor-scatter`), which fills callsign/grid/radiod from the sigmond CONTRACT
 # §14 env bag.  The installer no longer pre-renders a placeholder here: a
 # placeholder made `config init` refuse ("already exists, pass --reconfig")
 # and made Phase 7 enable a phantom @default instance whose radiod id never
@@ -256,7 +256,7 @@ mkdir -p "$CONFIG_DIR"
 if [[ -f "$CONFIG_FILE" ]]; then
     ui_info "Config exists at $CONFIG_FILE — leaving it untouched"
 else
-    ui_info "No config yet — run: smd config init msk144-recorder  (or: msk144-recorder config init)"
+    ui_info "No config yet — run: smd config init meteor-scatter  (or: meteor-scatter config init)"
 fi
 
 # --- Phase 4: directories ---
@@ -268,22 +268,22 @@ done
 # --- Phase 5: systemd ---
 ui_info "Installing systemd unit template"
 install -o root -g root -m 644 \
-    "$REPO_SOURCE/systemd/msk144-recorder@.service" \
-    /etc/systemd/system/msk144-recorder@.service
+    "$REPO_SOURCE/systemd/meteor-scatter@.service" \
+    /etc/systemd/system/meteor-scatter@.service
 systemctl daemon-reload
 
 # --- Phase 6: (none) ---
-# Unlike psk/wspr-recorder, msk144-recorder does NOT replace any native
+# Unlike psk/wspr-recorder, meteor-scatter does NOT replace any native
 # ka9q-radio decoder service: MSK144 monitors its own dial frequencies
 # (28.130 / 50.260 MHz) and does not overlap the FT8/FT4 services those
 # siblings own.  Nothing to disable here.
 
 # --- Phase 7: instances ---
 # Instance enablement follows configuration, not installation.  `config init`
-# enables msk144-recorder@<radiod-id> for the id(s) it writes, so sigmond's
+# enables meteor-scatter@<radiod-id> for the id(s) it writes, so sigmond's
 # lifecycle discovers and starts the right instance.  There is nothing to
 # enable here until at least one radiod has been configured.
 
 ui_info "Install complete. Configure + start with:"
-ui_info "  smd config init msk144-recorder   # or: sudo msk144-recorder config init"
-ui_info "  smd start --components msk144-recorder"
+ui_info "  smd config init meteor-scatter   # or: sudo meteor-scatter config init"
+ui_info "  smd start --components meteor-scatter"

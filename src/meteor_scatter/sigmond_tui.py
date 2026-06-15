@@ -1,9 +1,9 @@
-"""sigmond Receiver Channels TUI parser for msk144-recorder.
+"""sigmond Receiver Channels TUI parser for meteor-scatter.
 
 Loaded by sigmond at TUI time via ``[client_features.receiver_channels]``
 in ``deploy.toml`` (parser_file / parser_attr).  Pure function over a
-parsed config dict — no msk144-recorder runtime state required, no
-imports from msk144_recorder internals.  See
+parsed config dict — no meteor-scatter runtime state required, no
+imports from meteor_scatter internals.  See
 ``sigmond/docs/ADD-A-CLIENT.md`` and ``sigmond/lib/sigmond/
 client_features.py`` for the contract.
 """
@@ -19,9 +19,9 @@ def parse_receiver_channels(
     cfg: dict,
 ) -> tuple[str, set[int], Optional[int]]:
     """Return ``(status_dns, configured_freqs_hz, encoding_int)`` from
-    a msk144-recorder per-instance config.
+    a meteor-scatter per-instance config.
 
-    msk144-recorder lays out one or more [[radiod]] blocks; each radiod
+    meteor-scatter lays out one or more [[radiod]] blocks; each radiod
     binds a single ``[radiod.msk144]`` sub-block with its own
     ``freqs_hz`` list (the 10 m / 6 m MSK144 dial frequencies).
     Encoding may be set per-mode; defaults to s16be when unset.

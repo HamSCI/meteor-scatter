@@ -1,4 +1,4 @@
-"""Tests for `msk144-recorder config init|edit` (CONTRACT-v0.5 §14)."""
+"""Tests for `meteor-scatter config init|edit` (CONTRACT-v0.5 §14)."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ SRC_DIR = str(REPO_ROOT / "src")
 if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
-from msk144_recorder import configurator
+from meteor_scatter import configurator
 
 
 def _ns(**kwargs):
@@ -91,7 +91,7 @@ class FieldSubstitutionTests(unittest.TestCase):
 
 
 class ReporterDefaultTests(unittest.TestCase):
-    """CONTRACT-v0.5 §14.6: reporter naming convention for msk144-recorder."""
+    """CONTRACT-v0.5 §14.6: reporter naming convention for meteor-scatter."""
 
     def _clear(self):
         for k in ('SIGMOND_RADIOD_COUNT', 'SIGMOND_RADIOD_INDEX'):
@@ -319,7 +319,7 @@ class DiscoveryFlowTests(unittest.TestCase):
         self.assertEqual(values['radiod_status'], 'operator-set.local')
 
     def test_derive_label_from_status_strips_suffixes(self):
-        from msk144_recorder.configurator import _derive_label_from_status
+        from meteor_scatter.configurator import _derive_label_from_status
         self.assertEqual(_derive_label_from_status('bee1-status.local'), 'bee1')
         self.assertEqual(_derive_label_from_status('rx888.local'), 'rx888')
         self.assertEqual(_derive_label_from_status('plain-name'), 'plain-name')

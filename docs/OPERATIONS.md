@@ -1,18 +1,18 @@
 # Operations guide
 
-Running msk144-recorder day-to-day: starting/stopping, reading logs,
+Running meteor-scatter day-to-day: starting/stopping, reading logs,
 verifying upload health, troubleshooting.
 
 ## Service control
 
 ```bash
-sudo systemctl start    msk144-recorder@<radiod_id>
-sudo systemctl stop     msk144-recorder@<radiod_id>
-sudo systemctl restart  msk144-recorder@<radiod_id>
-sudo systemctl status   msk144-recorder@<radiod_id>
+sudo systemctl start    meteor-scatter@<radiod_id>
+sudo systemctl stop     meteor-scatter@<radiod_id>
+sudo systemctl restart  meteor-scatter@<radiod_id>
+sudo systemctl status   meteor-scatter@<radiod_id>
 
 # All instances at once:
-sudo systemctl restart 'msk144-recorder@*'
+sudo systemctl restart 'meteor-scatter@*'
 ```
 
 The unit is `Type=notify` with `WatchdogSec=120`. The daemon sends
@@ -24,7 +24,7 @@ After repeated start failures, systemd will give up
 (`StartLimitBurst=10` over `StartLimitIntervalSec=300`). Reset with:
 
 ```bash
-sudo systemctl reset-failed msk144-recorder@<radiod_id>
+sudo systemctl reset-failed meteor-scatter@<radiod_id>
 ```
 
 ## Logs
@@ -33,11 +33,11 @@ Three log streams per instance:
 
 | Stream | Written by | Contents |
 |---|---|---|
-| systemd journal (`SyslogIdentifier=msk144-recorder@<id>`) | the daemon's stdout (`StandardOutput=journal`) | Process log: startup, channel provisioning, slot stats, errors. |
-| `/var/log/msk144-recorder/<id>-ft8.log` | the decoder (forked per slot) | One line per FT8 spot. Tailed by `pskreporter-sender`. |
-| `/var/log/msk144-recorder/<id>-ft4.log` | the decoder (forked per slot) | One line per FT4 spot. Tailed by `pskreporter-sender`. |
+| systemd journal (`SyslogIdentifier=meteor-scatter@<id>`) | the daemon's stdout (`StandardOutput=journal`) | Process log: startup, channel provisioning, slot stats, errors. |
+| `/var/log/meteor-scatter/<id>-ft8.log` | the decoder (forked per slot) | One line per FT8 spot. Tailed by `pskreporter-sender`. |
+| `/var/log/meteor-scatter/<id>-ft4.log` | the decoder (forked per slot) | One line per FT4 spot. Tailed by `pskreporter-sender`. |
 
-`journalctl -u msk144-recorder@<id>` (or `smd log msk144-recorder`) shows the
+`journalctl -u meteor-scatter@<id>` (or `smd log meteor-scatter`) shows the
 process log; the per-mode spot logs stay as files. Only the file-based
 spot logs are listed in `inventory --json` `log_paths`.
 
@@ -46,7 +46,7 @@ spot logs are listed in `inventory --json` `log_paths`.
 The recorder emits a line per mode every 60s:
 
 ```
-INFO:msk144_recorder.core.recorder:stats FT8: spots=10 decodes=44/44 slots_empty=0 freqs=11 (60s window)
+INFO:meteor_scatter.core.recorder:stats FT8: spots=10 decodes=44/44 slots_empty=0 freqs=11 (60s window)
 ```
 
 | Field | Meaning |
@@ -63,9 +63,9 @@ half the slots per minute (`freqs×8`) and lower spot density.
 ## Validating and inventorying
 
 ```bash
-msk144-recorder validate --json
-msk144-recorder inventory --json
-msk144-recorder version --json
+meteor-scatter validate --json
+meteor-scatter inventory --json
+meteor-scatter version --json
 ```
 
 These commands keep stdout clean for piping into `jq`. All app logging
@@ -85,7 +85,7 @@ uses for cross-client coordination. See
 ```bash
 ps -ef | grep pskreporter-sender    # one per (radiod_id, mode)
 sudo ss -tnp | grep 4739            # active TCP conn (only during upload window)
-sudo journalctl -u msk144-recorder@<id> -f | grep -E 'tcp_upload|uploading'
+sudo journalctl -u meteor-scatter@<id> -f | grep -E 'tcp_upload|uploading'
 ```
 
 `pskreporter-sender` connects to `report.pskreporter.info:4739` only
@@ -152,7 +152,7 @@ failure (above) or a config validation fault.
 ### `pskreporter-sender` exits and restarts in a loop
 
 The supervisor in `uploader.py` restarts on exit with backoff. Look
-in the journal (`journalctl -u msk144-recorder@<id>`) for
+in the journal (`journalctl -u meteor-scatter@<id>`) for
 `[pskreporter-ft8]` / `[pskreporter-ft4]` stderr lines — the sender's argparse output
 appears there, and any Python tracebacks. A common cause is the
 sender importing the wrong `pskreporter` Python module if the
@@ -168,15 +168,15 @@ exec'ing the real one. Put it under a path in the unit's
 `ReadWritePaths`:
 
 ```bash
-sudo mkdir -p /var/lib/msk144-recorder/debug
-sudo chown msk144rec:msk144rec /var/lib/msk144-recorder/debug
+sudo mkdir -p /var/lib/meteor-scatter/debug
+sudo chown meteorscat:meteorscat /var/lib/meteor-scatter/debug
 sudo tee /usr/local/bin/decode_ft8-shim >/dev/null <<'SH'
 #!/bin/bash
 set -e
 wav="${@: -1}"
 mode=ft8
 for arg in "$@"; do [[ "$arg" == "-4" ]] && mode=ft4; done
-cp -p "$wav" "/var/lib/msk144-recorder/debug/${mode}_$(basename $wav)" 2>/dev/null || true
+cp -p "$wav" "/var/lib/meteor-scatter/debug/${mode}_$(basename $wav)" 2>/dev/null || true
 exec /usr/local/bin/decode_ft8 "$@"
 SH
 sudo chmod 0755 /usr/local/bin/decode_ft8-shim
@@ -186,33 +186,33 @@ Point the config at the shim and restart:
 
 ```bash
 sudo sed -i 's|^decoder.*|decoder     = "/usr/local/bin/decode_ft8-shim"|' \
-    /etc/msk144-recorder/msk144-recorder-config.toml
-sudo systemctl restart msk144-recorder@<radiod_id>
+    /etc/meteor-scatter/meteor-scatter-config.toml
+sudo systemctl restart meteor-scatter@<radiod_id>
 ```
 
 Then inspect:
 
 ```bash
-ls /var/lib/msk144-recorder/debug/ | head
+ls /var/lib/meteor-scatter/debug/ | head
 python3 -c "
 import wave, struct, math
-w = wave.open('/var/lib/msk144-recorder/debug/ft4_XXXXXX_14080.wav')
+w = wave.open('/var/lib/meteor-scatter/debug/ft4_XXXXXX_14080.wav')
 n = w.getnframes(); raw = w.readframes(n)
 s = struct.unpack(f'<{len(raw)//2}h', raw)
 print(f'frames={n} rate={w.getframerate()} '
       f'peak={max(abs(x) for x in s)} '
       f'rms={math.sqrt(sum(x*x for x in s)/n):.1f}')
 "
-/usr/local/bin/decode_ft8 -4 -f 14.080000 /var/lib/msk144-recorder/debug/ft4_*_14080.wav
+/usr/local/bin/decode_ft8 -4 -f 14.080000 /var/lib/meteor-scatter/debug/ft4_*_14080.wav
 ```
 
 Clean up when done: point `decoder` back at `/usr/local/bin/decode_ft8`,
-restart, `rm -rf /var/lib/msk144-recorder/debug /usr/local/bin/decode_ft8-shim`.
+restart, `rm -rf /var/lib/meteor-scatter/debug /usr/local/bin/decode_ft8-shim`.
 The shim dir fills fast — a full FT8+FT4 install across many bands is
 on the order of GB/hour.
 
 This pattern is how the April 2026 "silent FT4" investigation caught
-the low-amplitude bug ([src/msk144_recorder/core/wav.py](../src/msk144_recorder/core/wav.py)
+the low-amplitude bug ([src/meteor_scatter/core/wav.py](../src/meteor_scatter/core/wav.py)
 RMS-target normalization): radiod was delivering real audio at
 `peak ≈ 30` out of an int16 range of 32767, below what `decode_ft8`
 could reliably find FT4 signals in.

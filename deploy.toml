@@ -1,61 +1,61 @@
 [package]
-name             = "msk144-recorder"
+name             = "meteor-scatter"
 version          = "0.4.0"
 contract_version = "0.8"
 license          = "MIT"
 
 # Configuration interview (CONTRACT-v0.5 §14).  Sigmond invokes
-# msk144-recorder's own argparse subcommands; both honor the §14.3 env var
+# meteor-scatter's own argparse subcommands; both honor the §14.3 env var
 # bag (STATION_*, SIGMOND_INSTANCE, SIGMOND_RADIOD_STATUS) as defaults.
 [contract.config]
-init = ["/usr/local/bin/msk144-recorder", "config", "init"]
-edit = ["/usr/local/bin/msk144-recorder", "config", "edit"]
+init = ["/usr/local/bin/meteor-scatter", "config", "init"]
+edit = ["/usr/local/bin/meteor-scatter", "config", "edit"]
 
 [build]
 steps = [
-    "python3 -m venv /opt/git/sigmond/msk144-recorder/venv",
-    "/opt/git/sigmond/msk144-recorder/venv/bin/pip install --upgrade pip setuptools wheel",
-    "/opt/git/sigmond/msk144-recorder/venv/bin/pip install -e /opt/git/sigmond/msk144-recorder",
+    "python3 -m venv /opt/git/sigmond/meteor-scatter/venv",
+    "/opt/git/sigmond/meteor-scatter/venv/bin/pip install --upgrade pip setuptools wheel",
+    "/opt/git/sigmond/meteor-scatter/venv/bin/pip install -e /opt/git/sigmond/meteor-scatter",
 ]
 produces = [
-    "/opt/git/sigmond/msk144-recorder/venv/bin/msk144-recorder",
+    "/opt/git/sigmond/meteor-scatter/venv/bin/meteor-scatter",
 ]
 
 [[install.steps]]
 kind = "link"
-src  = "/opt/git/sigmond/msk144-recorder/venv/bin/msk144-recorder"
-dst  = "/usr/local/bin/msk144-recorder"
+src  = "/opt/git/sigmond/meteor-scatter/venv/bin/meteor-scatter"
+dst  = "/usr/local/bin/meteor-scatter"
 
 [[install.steps]]
 kind = "link"
-src  = "systemd/msk144-recorder@.service"
-dst  = "/etc/systemd/system/msk144-recorder@.service"
+src  = "systemd/meteor-scatter@.service"
+dst  = "/etc/systemd/system/meteor-scatter@.service"
 
 [[install.steps]]
 kind     = "render"
-src      = "config/msk144-recorder-config.toml.template"
-dst      = "/etc/msk144-recorder/msk144-recorder-config.toml"
+src      = "config/meteor-scatter-config.toml.template"
+dst      = "/etc/meteor-scatter/meteor-scatter-config.toml"
 if_absent = true
 
 [[install.steps]]
 kind = "mkdir"
-dst  = "/var/lib/msk144-recorder"
-owner = "msk144rec:msk144rec"
+dst  = "/var/lib/meteor-scatter"
+owner = "meteorscat:meteorscat"
 mode  = "0755"
 
 [[install.steps]]
 kind = "mkdir"
-dst  = "/var/log/msk144-recorder"
-owner = "msk144rec:msk144rec"
+dst  = "/var/log/meteor-scatter"
+owner = "meteorscat:meteorscat"
 mode  = "0755"
 
 [systemd]
-units = ["msk144-recorder@.service"]
+units = ["meteor-scatter@.service"]
 
 [[deps.git]]
 name       = "ft8_lib"
 url        = "https://github.com/ka9q/ft8_lib.git"
-note       = "provides /usr/local/bin/decode_ft8 — msk144-recorder's FT4/FT8 decoder"
+note       = "provides /usr/local/bin/decode_ft8 — meteor-scatter's FT4/FT8 decoder"
 
 [[deps.git]]
 name       = "ftlib-pskreporter"
@@ -64,17 +64,17 @@ note       = "provides /usr/local/bin/pskreporter-sender (pip-installable)"
 
 # decode_ft8 / pskreporter-sender used to be cloned by wsprdaemon-client's
 # deps.conf — that's a v3 legacy.  In v4 these binaries belong to
-# msk144-recorder's install pipeline alone; wsprdaemon-client decodes only
+# meteor-scatter's install pipeline alone; wsprdaemon-client decodes only
 # WSPR (W2/F2/F5/F15/F30) and never invokes them.
 
 [[deps.pypi]]
 name    = "ka9q-python"
 version = "3.6.0"
-venv    = "/opt/git/sigmond/msk144-recorder/venv"
+venv    = "/opt/git/sigmond/meteor-scatter/venv"
 
 [[deps.apt]]
 name = "whiptail"
-note = "optional UI for `msk144-recorder config init|edit` interactive wizard; absent → stdin-prompt fallback in configurator.py"
+note = "optional UI for `meteor-scatter config init|edit` interactive wizard; absent → stdin-prompt fallback in configurator.py"
 
 # ---------------------------------------------------------------------------
 # Sigmond UI hooks (drop-in registration for `smd watch` + TUI Activity).
@@ -96,5 +96,5 @@ per_instance = true
 [client_features.receiver_channels]
 description  = "FT4/FT8 spot channels (per-mode freqs_hz)"
 per_instance = true
-parser_file  = "src/msk144_recorder/sigmond_tui.py"
+parser_file  = "src/meteor_scatter/sigmond_tui.py"
 parser_attr  = "parse_receiver_channels"

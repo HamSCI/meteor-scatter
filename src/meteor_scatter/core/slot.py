@@ -30,9 +30,9 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from msk144_recorder.core import decoder as _decoder
-from msk144_recorder.core.ring import Ring
-from msk144_recorder.core.wav import write_wav
+from meteor_scatter.core import decoder as _decoder
+from meteor_scatter.core.ring import Ring
+from meteor_scatter.core.wav import write_wav
 
 logger = logging.getLogger(__name__)
 

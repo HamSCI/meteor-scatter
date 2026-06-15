@@ -1,6 +1,6 @@
-"""Tests for msk144_recorder.config helpers.
+"""Tests for meteor_scatter.config helpers.
 
-Covers the Phase A plumbing for multi-source msk144-recorder:
+Covers the Phase A plumbing for multi-source meteor-scatter:
   * ``derive_source_key`` — canonical ``radiod:<status_address>`` form
     matching wspr-recorder's ``SourceConfig.key`` and
     ``sigmond.sources.SourceKey``.
@@ -20,7 +20,7 @@ SRC_DIR = REPO_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from msk144_recorder.config import (
+from meteor_scatter.config import (
     DEFAULT_CONFIG_PATH,
     PER_INSTANCE_CONFIG_DIR,
     derive_source_key,
@@ -113,14 +113,14 @@ class TestResolveConfigPath(unittest.TestCase):
     """Per-instance config resolution per sigmond MULTI-INSTANCE-ARCHITECTURE.md §4."""
 
     def setUp(self):
-        self._old_env = os.environ.get("MSK144_RECORDER_CONFIG")
-        os.environ.pop("MSK144_RECORDER_CONFIG", None)
+        self._old_env = os.environ.get("METEOR_SCATTER_CONFIG")
+        os.environ.pop("METEOR_SCATTER_CONFIG", None)
 
     def tearDown(self):
         if self._old_env is None:
-            os.environ.pop("MSK144_RECORDER_CONFIG", None)
+            os.environ.pop("METEOR_SCATTER_CONFIG", None)
         else:
-            os.environ["MSK144_RECORDER_CONFIG"] = self._old_env
+            os.environ["METEOR_SCATTER_CONFIG"] = self._old_env
 
     def test_explicit_path_wins(self):
         explicit = Path("/tmp/some-config.toml")
@@ -128,7 +128,7 @@ class TestResolveConfigPath(unittest.TestCase):
         self.assertEqual(result, explicit)
 
     def test_env_var_wins_over_instance(self):
-        os.environ["MSK144_RECORDER_CONFIG"] = "/tmp/from-env.toml"
+        os.environ["METEOR_SCATTER_CONFIG"] = "/tmp/from-env.toml"
         result = resolve_config_path(instance="AC0G-B1")
         self.assertEqual(result, Path("/tmp/from-env.toml"))
 
@@ -138,7 +138,7 @@ class TestResolveConfigPath(unittest.TestCase):
             instance_file = Path(tmp) / "AC0G-B1.toml"
             instance_file.write_text("[instance]\nreporter_id = 'AC0G-B1'\n")
             # Monkey-patch PER_INSTANCE_CONFIG_DIR for the test
-            from msk144_recorder import config as cfg_mod
+            from meteor_scatter import config as cfg_mod
             old = cfg_mod.PER_INSTANCE_CONFIG_DIR
             cfg_mod.PER_INSTANCE_CONFIG_DIR = Path(tmp)
             try:

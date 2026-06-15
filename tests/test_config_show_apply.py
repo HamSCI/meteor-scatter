@@ -5,7 +5,7 @@ HEAD on the mag-recorder repo) -- if/when the show/apply/serialize
 machinery moves into a sigmond-provided library these tests carry
 over with minimal changes.
 
-msk144-recorder's apply is intentionally narrower than mag-recorder's:
+meteor-scatter's apply is intentionally narrower than mag-recorder's:
 only [station], [paths], [processing] are writable.  [[radiod]] arrays
 of tables pass through unchanged from the existing file but cannot
 be set via apply.
@@ -22,8 +22,8 @@ from pathlib import Path
 
 import pytest
 
-from msk144_recorder import configurator
-from msk144_recorder.config import DEFAULTS
+from meteor_scatter import configurator
+from meteor_scatter.config import DEFAULTS
 
 
 def _ns(**kw) -> argparse.Namespace:
@@ -80,8 +80,8 @@ callsign = "AC0G"
 grid_square = "EM38ww40pk"
 
 [paths]
-spool_dir = "/var/lib/msk144-recorder"
-log_dir = "/var/log/msk144-recorder"
+spool_dir = "/var/lib/meteor-scatter"
+log_dir = "/var/log/meteor-scatter"
 keep_wav = false
 
 [processing]
@@ -241,7 +241,7 @@ def test_serialize_toml_inline_arrays() -> None:
 
 def test_wizard_available_false_without_tty() -> None:
     """In pytest stdout isn't a TTY; the dispatcher must NOT try to exec
-    the wizard.  Otherwise piping `msk144-recorder config init` would hang."""
+    the wizard.  Otherwise piping `meteor-scatter config init` would hang."""
     assert configurator._wizard_available() is False
 
 
@@ -286,9 +286,9 @@ def test_wizard_dispatch_falls_back_when_sigmond_absent(monkeypatch, tmp_path) -
 
 
 def test_exec_wizard_threads_env_through_sigmond(monkeypatch, tmp_path) -> None:
-    """Pins the env-var contract (MSK144_RECORDER_HELP_TOML,
-    MSK144_RECORDER_CLI, SIGMOND_WIZARD_LIB_SH) + extra_args shape +
-    parse=None semantics for msk144-recorder."""
+    """Pins the env-var contract (METEOR_SCATTER_HELP_TOML,
+    METEOR_SCATTER_CLI, SIGMOND_WIZARD_LIB_SH) + extra_args shape +
+    parse=None semantics for meteor-scatter."""
     captured = {}
     fake_lib_sh = tmp_path / "wizard_dispatch.sh"
     fake_lib_sh.write_text("# fake\n")
@@ -310,17 +310,17 @@ def test_exec_wizard_threads_env_through_sigmond(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(configurator, "_SIGMOND_WIZARD_LIB_SH", fake_lib_sh)
 
     args = argparse.Namespace(non_interactive=False,
-                              config=Path("/etc/msk144-recorder/msk144-recorder-config.toml"))
+                              config=Path("/etc/meteor-scatter/meteor-scatter-config.toml"))
     rc = configurator._exec_wizard(args, "edit")
     assert rc == 0
     assert captured["extra_args"] == [
-        "edit", "--config", "/etc/msk144-recorder/msk144-recorder-config.toml",
+        "edit", "--config", "/etc/meteor-scatter/meteor-scatter-config.toml",
     ]
-    # parse=None: msk144-recorder's wizard pipes JSON to `config apply` itself
+    # parse=None: meteor-scatter's wizard pipes JSON to `config apply` itself
     assert captured["parse"] is None
     env = captured["extra_env"]
-    assert "MSK144_RECORDER_HELP_TOML" in env
-    assert "MSK144_RECORDER_CLI"       in env
+    assert "METEOR_SCATTER_HELP_TOML" in env
+    assert "METEOR_SCATTER_CLI"       in env
     assert env["SIGMOND_WIZARD_LIB_SH"] == str(fake_lib_sh)
 
 
@@ -342,7 +342,7 @@ def test_exec_wizard_falls_back_to_legacy_when_sigmond_absent(monkeypatch) -> No
     assert rc == 7
     assert captured["cmd"][0] == str(configurator._WIZARD_PATH)
     assert captured["cmd"][1] == "init"
-    assert captured["env"]["MSK144_RECORDER_HELP_TOML"] == str(configurator._HELP_TOML_PATH)
+    assert captured["env"]["METEOR_SCATTER_HELP_TOML"] == str(configurator._HELP_TOML_PATH)
 
 
 def test_exec_wizard_surfaces_sigmond_error(monkeypatch) -> None:
@@ -481,7 +481,7 @@ def _env_apply(payload, tmp_path: Path, monkeypatch, *,
 # payload key, so a stale knob can't silently do nothing.
 
 def test_env_apply_rejects_any_key(tmp_path: Path, monkeypatch, capsys) -> None:
-    rv = _env_apply({"MSK144_ANYTHING": "value"}, tmp_path, monkeypatch)
+    rv = _env_apply({"METEOR_SCATTER_ANYTHING": "value"}, tmp_path, monkeypatch)
     assert rv == 2
     assert "unknown / unmanaged" in capsys.readouterr().err.lower()
 

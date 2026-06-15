@@ -20,7 +20,7 @@ from unittest import mock
 
 import numpy as np
 
-from msk144_recorder.core.stream import ChannelSink
+from meteor_scatter.core.stream import ChannelSink
 
 
 @dataclass
@@ -71,7 +71,7 @@ class TestAnchorOnce(unittest.TestCase):
         try:
             samples = np.zeros(2400, dtype=np.float32)   # 200 ms at 12 kHz
             q = _FakeQuality(total_samples_delivered=2400, first_rtp_timestamp=0)
-            with mock.patch("msk144_recorder.core.stream.time.time",
+            with mock.patch("meteor_scatter.core.stream.time.time",
                             return_value=1_700_000_000.0):
                 with mock.patch.object(sink._ring, "push") as push:
                     sink.on_samples(samples, q)
@@ -96,7 +96,7 @@ class TestAnchorOnce(unittest.TestCase):
                              first_rtp_timestamp=1_000_000)
             with mock.patch("ka9q.rtp_to_wallclock",
                             return_value=1_700_000_500.0):
-                with mock.patch("msk144_recorder.core.stream.time.time",
+                with mock.patch("meteor_scatter.core.stream.time.time",
                                 return_value=1_700_000_500.0):
                     with mock.patch.object(sink._ring, "push"):
                         sink.on_samples(samples, q)
@@ -131,7 +131,7 @@ class TestAnchorOnce(unittest.TestCase):
                              first_rtp_timestamp=1_000_000)
             with mock.patch("ka9q.rtp_to_wallclock",
                             return_value=1_700_000_500.0):
-                with mock.patch("msk144_recorder.core.stream.time.time",
+                with mock.patch("meteor_scatter.core.stream.time.time",
                                 return_value=1_700_000_500.0):
                     with mock.patch.object(sink._ring, "push"):
                         sink.on_samples(samples, q)
@@ -151,7 +151,7 @@ class TestAnchorOnce(unittest.TestCase):
             sr = sink.sample_rate
             with mock.patch.object(sink._ring, "push") as push:
                 # Anchor at wall_now=1000.0 with 1 sec of samples.
-                with mock.patch("msk144_recorder.core.stream.time.time",
+                with mock.patch("meteor_scatter.core.stream.time.time",
                                 return_value=1000.0):
                     sink.on_samples(
                         np.zeros(sr, dtype=np.float32),
@@ -162,7 +162,7 @@ class TestAnchorOnce(unittest.TestCase):
                 # projection — push another 0.5 s of samples and verify
                 # we see anchor + 1.0 s (since anchor accounted for the
                 # FIRST 1 s and the new batch's first sample is at +1.0 s).
-                with mock.patch("msk144_recorder.core.stream.time.time",
+                with mock.patch("meteor_scatter.core.stream.time.time",
                                 return_value=999_999_999.0):  # absurd
                     sink.on_samples(
                         np.zeros(sr // 2, dtype=np.float32),

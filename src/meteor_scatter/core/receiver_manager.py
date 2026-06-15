@@ -1,7 +1,7 @@
 """ReceiverManager: per-radiod channels, streams, and tailers.
 
 One ReceiverManager per source (= one radiod control plane).  A
-Msk144Recorder process holds N of these — one for single-radiod
+MeteorScatterRecorder process holds N of these — one for single-radiod
 deployments (legacy ``--radiod-id`` mode) or several for multi-source
 deployments where the same process drives a local radiod plus remote
 radiods over the LAN (mirrors wspr-recorder's multi-source pattern).
@@ -16,7 +16,7 @@ The class owns everything radiod-specific:
   * Per-mode log file descriptors and ``ChTailer`` instances
   * Spool dir under ``<spool_root>/<radiod_id>``
 
-Msk144Recorder remains the process-global orchestrator: chrony settle gate,
+MeteorScatterRecorder remains the process-global orchestrator: chrony settle gate,
 uploader fanout, stats aggregation, main loop, and watchdog.
 """
 
@@ -28,15 +28,15 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
-from msk144_recorder.config import (
+from meteor_scatter.config import (
     derive_source_key,
     get_freqs,
     get_mode_params,
     resolve_radiod_status,
 )
-from msk144_recorder.core.ch_tailer import ChTailer
+from meteor_scatter.core.ch_tailer import ChTailer
 
-# ChannelSink imports numpy via msk144_recorder.core.stream; defer the
+# ChannelSink imports numpy via meteor_scatter.core.stream; defer the
 # import so this module stays importable in lightweight test
 # environments that don't carry numpy.  All annotation references go
 # through the TYPE_CHECKING block (``from __future__ import
@@ -44,7 +44,7 @@ from msk144_recorder.core.ch_tailer import ChTailer
 # and provision_channels does its own local import before
 # instantiating sinks.
 if TYPE_CHECKING:  # pragma: no cover
-    from msk144_recorder.core.stream import ChannelSink
+    from meteor_scatter.core.stream import ChannelSink
 
 logger = logging.getLogger(__name__)
 
@@ -58,8 +58,8 @@ logger = logging.getLogger(__name__)
 # treat a still-unverifiable channel as a skip (warn + continue) rather than
 # a fatal error.  Both knobs are env-overridable for tuning without a
 # redeploy.
-_VERIFY_TIMEOUT_S = float(os.environ.get("MSK144_CHANNEL_VERIFY_TIMEOUT_S", "10"))
-_VERIFY_RETRIES = int(os.environ.get("MSK144_CHANNEL_VERIFY_RETRIES", "1"))
+_VERIFY_TIMEOUT_S = float(os.environ.get("METEOR_SCATTER_CHANNEL_VERIFY_TIMEOUT_S", "10"))
+_VERIFY_RETRIES = int(os.environ.get("METEOR_SCATTER_CHANNEL_VERIFY_RETRIES", "1"))
 _VERIFY_RETRY_BACKOFF_S = 1.5
 # Total wall-clock budget for the whole provisioning sweep.  psk notifies
 # systemd READY only AFTER provisioning every channel (recorder.py:_run),
@@ -68,7 +68,7 @@ _VERIFY_RETRY_BACKOFF_S = 1.5
 # we stop verifying and skip the remaining channels so the daemon still
 # comes up (degraded) with whatever verified — the keepalive/refresh path
 # can pick up stragglers later.
-_VERIFY_BUDGET_S = float(os.environ.get("MSK144_CHANNEL_VERIFY_BUDGET_S", "120"))
+_VERIFY_BUDGET_S = float(os.environ.get("METEOR_SCATTER_CHANNEL_VERIFY_BUDGET_S", "120"))
 
 
 def _resolve_encoding(enc_str: str) -> int:
@@ -123,13 +123,13 @@ class ReceiverManager:
         self._sinks: list[ChannelSink] = []
         self._multi_streams: list = []
         # (MultiStream, ssrc) pairs the process-global keepalive
-        # thread refreshes.  Msk144Recorder.start_lifetime_keepalive
+        # thread refreshes.  MeteorScatterRecorder.start_lifetime_keepalive
         # gathers these across all ReceiverManagers.
         self._lifetime_entries: list[tuple[object, int]] = []
         self._ch_tailers: list[ChTailer] = []
         self._log_fds: dict[str, object] = {}
 
-    # --- accessors used by Msk144Recorder ---------------------------------
+    # --- accessors used by MeteorScatterRecorder ---------------------------------
 
     @property
     def radiod_id(self) -> str:
@@ -170,7 +170,7 @@ class ReceiverManager:
         """
         from ka9q import MultiStream, RadiodControl
         # Lazy: stream.py imports numpy.  See module docstring.
-        from msk144_recorder.core.stream import ChannelSink
+        from meteor_scatter.core.stream import ChannelSink
 
         status = resolve_radiod_status(self._radiod)
         # Re-derive the source key now that status is guaranteed
@@ -185,12 +185,12 @@ class ReceiverManager:
         # a multicast group with peer clients on the same radiod
         # (wspr-recorder, hfdl-recorder, hf-timestd, etc.).  CONTRACT
         # v0.3 §7 / ka9q-python ≥ 3.14.0.
-        self._control = RadiodControl(status, client_id="msk144-recorder")
+        self._control = RadiodControl(status, client_id="meteor-scatter")
 
         # Surface the Fusion governor identity at startup so the journal
         # record makes multi-radiod attribution clear.
         try:
-            from msk144_recorder.core.authority_reader import AuthorityReader
+            from meteor_scatter.core.authority_reader import AuthorityReader
             snap = AuthorityReader().read()
             governor = snap.governor_radiod if snap is not None else None
         except Exception as e:
@@ -306,7 +306,7 @@ class ReceiverManager:
         False if it could not be verified (retries exhausted, or the budget
         ran out) — the caller logs a summary and skips it instead of
         aborting the whole daemon.  A momentarily-busy radiod must neither
-        take msk144-recorder down nor make it miss systemd's start deadline.
+        take meteor-scatter down nor make it miss systemd's start deadline.
         """
         attempts = _VERIFY_RETRIES + 1
         for attempt in range(1, attempts + 1):
@@ -510,7 +510,7 @@ class ReceiverManager:
                     self._radiod_id,
                 )
         # Sinks intentionally kept in self._sinks so a final
-        # stats_snapshot in Msk144Recorder's stats thread can still
+        # stats_snapshot in MeteorScatterRecorder's stats thread can still
         # read them.
 
         for fd in self._log_fds.values():

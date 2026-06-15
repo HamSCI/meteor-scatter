@@ -1,4 +1,4 @@
-"""Contract v0.3 compliance tests for msk144-recorder.
+"""Contract v0.3 compliance tests for meteor-scatter.
 
 Tests that inventory --json and validate --json:
 1. Emit clean JSON to stdout (no banners, no logging lines)
@@ -29,10 +29,10 @@ class StdoutCleanlinessTests(unittest.TestCase):
 
     def _run_subcommand(self, *args: str) -> subprocess.CompletedProcess:
         env = os.environ.copy()
-        env["MSK144_RECORDER_CONFIG"] = str(TEST_CONFIG)
+        env["METEOR_SCATTER_CONFIG"] = str(TEST_CONFIG)
         env["PYTHONPATH"] = SRC_DIR + os.pathsep + env.get("PYTHONPATH", "")
         return subprocess.run(
-            [sys.executable, "-m", "msk144_recorder", *args,
+            [sys.executable, "-m", "meteor_scatter", *args,
              "--config", str(TEST_CONFIG)],
             capture_output=True, text=True, timeout=10,
             env=env,
@@ -64,7 +64,7 @@ class StdoutCleanlinessTests(unittest.TestCase):
         proc = self._run_subcommand("version", "--json")
         self.assertEqual(proc.returncode, 0, f"stderr: {proc.stderr}")
         data = json.loads(proc.stdout)
-        self.assertEqual(data["client"], "msk144-recorder")
+        self.assertEqual(data["client"], "meteor-scatter")
 
 
 class InventoryV03Tests(unittest.TestCase):
@@ -73,10 +73,10 @@ class InventoryV03Tests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         env = os.environ.copy()
-        env["MSK144_RECORDER_CONFIG"] = str(TEST_CONFIG)
+        env["METEOR_SCATTER_CONFIG"] = str(TEST_CONFIG)
         env["PYTHONPATH"] = SRC_DIR + os.pathsep + env.get("PYTHONPATH", "")
         proc = subprocess.run(
-            [sys.executable, "-m", "msk144_recorder",
+            [sys.executable, "-m", "meteor_scatter",
              "inventory", "--json", "--config", str(TEST_CONFIG)],
             capture_output=True, text=True, timeout=10,
             env=env,
@@ -85,14 +85,14 @@ class InventoryV03Tests(unittest.TestCase):
         cls.data = json.loads(proc.stdout)
 
     def test_client_name(self):
-        self.assertEqual(self.data["client"], "msk144-recorder")
+        self.assertEqual(self.data["client"], "meteor-scatter")
 
     def test_contract_version(self):
         self.assertEqual(self.data["contract_version"], "0.8")
 
     def test_timing_authority_applied_explicit_null(self):
         """CONTRACT v0.7 §3/§18 — runtime-state field for the §18
-        subscription. msk144-recorder runs in RTP-default mode (PSK
+        subscription. meteor-scatter runs in RTP-default mode (PSK
         decoding is ms-tolerant; no hard-deadline scheduling), so
         the field is present and explicitly None — distinguishes
         contract-aware-in-default-mode from a pre-v0.7 client."""
@@ -108,7 +108,7 @@ class InventoryV03Tests(unittest.TestCase):
         kinds = {s["kind"] for s in sinks}
         # File sinks always declared (spool + log dir).
         self.assertIn("file", kinds)
-        # msk144-recorder writes to the local SQLite sink (file-based);
+        # meteor-scatter writes to the local SQLite sink (file-based);
         # there is no ClickHouse sink.
         self.assertNotIn("clickhouse", kinds)
         for sink in sinks:
@@ -152,7 +152,7 @@ class InventoryV03Tests(unittest.TestCase):
         systemd unit), so the ``process`` key intentionally does not
         appear in log_paths — only file-based logs are listed (for
         ``smd log --files``).  See the log_paths builder in
-        ``src/msk144_recorder/contract.py`` for the design rationale.
+        ``src/meteor_scatter/contract.py`` for the design rationale.
         """
         self.assertIn("log_paths", self.data)
         log_paths = self.data["log_paths"]
@@ -180,10 +180,10 @@ class ValidateTests(unittest.TestCase):
 
     def _run_validate(self, config_path=TEST_CONFIG):
         env = os.environ.copy()
-        env["MSK144_RECORDER_CONFIG"] = str(config_path)
+        env["METEOR_SCATTER_CONFIG"] = str(config_path)
         env["PYTHONPATH"] = SRC_DIR + os.pathsep + env.get("PYTHONPATH", "")
         return subprocess.run(
-            [sys.executable, "-m", "msk144_recorder",
+            [sys.executable, "-m", "meteor_scatter",
              "validate", "--json", "--config", str(config_path)],
             capture_output=True, text=True, timeout=10,
             env=env,
@@ -207,30 +207,30 @@ class ConfigTests(unittest.TestCase):
     """Config loader tests."""
 
     def test_load_test_config(self):
-        from msk144_recorder.config import load_config
+        from meteor_scatter.config import load_config
         config = load_config(TEST_CONFIG)
         self.assertEqual(config["station"]["callsign"], "AC0G")
 
     def test_resolve_radiod_block(self):
-        from msk144_recorder.config import load_config, resolve_radiod_block
+        from meteor_scatter.config import load_config, resolve_radiod_block
         config = load_config(TEST_CONFIG)
         block = resolve_radiod_block(config, "test-status.local")
         self.assertEqual(block["status"], "test-status.local")
 
     def test_resolve_radiod_block_missing(self):
-        from msk144_recorder.config import load_config, resolve_radiod_block
+        from meteor_scatter.config import load_config, resolve_radiod_block
         config = load_config(TEST_CONFIG)
         with self.assertRaises(ValueError):
             resolve_radiod_block(config, "nonexistent")
 
     def test_single_radiod_no_id_required(self):
-        from msk144_recorder.config import load_config, resolve_radiod_block
+        from meteor_scatter.config import load_config, resolve_radiod_block
         config = load_config(TEST_CONFIG)
         block = resolve_radiod_block(config, None)
         self.assertEqual(block["status"], "test-status.local")
 
     def test_get_freqs(self):
-        from msk144_recorder.config import get_freqs, load_config, resolve_radiod_block
+        from meteor_scatter.config import get_freqs, load_config, resolve_radiod_block
         config = load_config(TEST_CONFIG)
         block = resolve_radiod_block(config, "test-status.local")
         msk144 = get_freqs(block, "msk144")
@@ -243,17 +243,17 @@ class RadiodSchemaTests(unittest.TestCase):
     acceptance and the RADIOD_<ID>_STATUS env override)."""
 
     def test_resolve_status_reads_canonical_field(self):
-        from msk144_recorder.config import resolve_radiod_status
+        from meteor_scatter.config import resolve_radiod_status
         block = {"status": "bee1-status.local"}
         self.assertEqual(resolve_radiod_status(block), "bee1-status.local")
 
     def test_resolve_status_missing_raises(self):
-        from msk144_recorder.config import resolve_radiod_status
+        from meteor_scatter.config import resolve_radiod_status
         with self.assertRaises(ValueError):
             resolve_radiod_status({})
 
     def test_resolve_block_matches_status_field(self):
-        from msk144_recorder.config import resolve_radiod_block
+        from meteor_scatter.config import resolve_radiod_block
         config = {"radiod": [
             {"status": "bee1-status.local", "msk144": {"freqs_hz": [28130000]}},
             {"status": "other.local", "msk144": {"freqs_hz": [50260000]}},
@@ -262,7 +262,7 @@ class RadiodSchemaTests(unittest.TestCase):
         self.assertEqual(block["status"], "bee1-status.local")
 
     def test_resolve_block_missing_status_raises(self):
-        from msk144_recorder.config import resolve_radiod_block
+        from meteor_scatter.config import resolve_radiod_block
         config = {"radiod": [{"status": "only.local"}]}
         with self.assertRaises(ValueError):
             resolve_radiod_block(config, "nonexistent.local")

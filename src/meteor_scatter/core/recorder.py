@@ -1,13 +1,13 @@
-"""Msk144Recorder: orchestrates one or more radiod sources.
+"""MeteorScatterRecorder: orchestrates one or more radiod sources.
 
-A single Msk144Recorder process drives one ``ReceiverManager`` per
+A single MeteorScatterRecorder process drives one ``ReceiverManager`` per
 source (= one radiod control plane).  Legacy single-radiod
 deployments pass a one-element list and behavior is unchanged.
 Multi-source deployments pass several blocks and the same process
 talks to a local radiod plus remote radiods over the LAN — mirrors
 wspr-recorder's multi-source pattern.
 
-Msk144Recorder remains responsible for the process-global concerns
+MeteorScatterRecorder remains responsible for the process-global concerns
 (chrony settle gate, spot deposit to the SQLite sink via the cycle
 batcher, lifetime keepalive thread, stats aggregator, main loop,
 watchdog, signal handling).  Per-radiod provisioning lives in
@@ -26,26 +26,26 @@ import time
 from pathlib import Path
 from typing import Optional, Union
 
-from msk144_recorder.config import (
+from meteor_scatter.config import (
     derive_source_key,
     get_freqs,
     resolve_radiod_status,
 )
-# ChannelSink imports numpy via msk144_recorder.core.stream — kept under
+# ChannelSink imports numpy via meteor_scatter.core.stream — kept under
 # TYPE_CHECKING so this module imports cleanly in lightweight test
 # environments without numpy.  The real instantiation lives in
 # ReceiverManager.provision_channels which lazy-imports stream.
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:  # pragma: no cover
-    from msk144_recorder.core.stream import ChannelSink
-from msk144_recorder.core.ch_tailer import ChTailer, _default_writer_factory
-from msk144_recorder.core.cycle_batcher import Msk144CycleBatcher
+    from meteor_scatter.core.stream import ChannelSink
+from meteor_scatter.core.ch_tailer import ChTailer, _default_writer_factory
+from meteor_scatter.core.cycle_batcher import MeteorScatterCycleBatcher
 # Upload transport is DEFERRED (Phase 3): spots are deposited into
 # sigmond's local SQLite sink (msk144.spots) by the ChTailer →
-# Msk144CycleBatcher path; the wsprdaemon.org SFTP uploader is not wired
+# MeteorScatterCycleBatcher path; the wsprdaemon.org SFTP uploader is not wired
 # yet (pending confirmation that wsprdaemon ingests MSK144 spots — see
 # docs/MSK144-RECORDER-DESIGN.md §5.3).  No uploader is imported here.
-from msk144_recorder.core.receiver_manager import (
+from meteor_scatter.core.receiver_manager import (
     ReceiverManager,
     _resolve_encoding,  # re-exported for any external importer
 )
@@ -139,7 +139,7 @@ def _env_float(name: str, default: float, *, scale: float = 1.0) -> float:
         return v
     except (ValueError, TypeError):
         logger.warning(
-            "msk144-recorder: ignoring invalid %s=%r (using default %g)",
+            "meteor-scatter: ignoring invalid %s=%r (using default %g)",
             name, raw, default,
         )
         return default * scale
@@ -156,7 +156,7 @@ def _env_int(name: str, default: int) -> int:
         return v
     except (ValueError, TypeError):
         logger.warning(
-            "msk144-recorder: ignoring invalid %s=%r (using default %d)",
+            "meteor-scatter: ignoring invalid %s=%r (using default %d)",
             name, raw, default,
         )
         return default
@@ -177,7 +177,7 @@ def _sqlite_sink_available() -> bool:
     return Path("/var/lib/sigmond/sink.db").exists()
 
 
-class Msk144Recorder:
+class MeteorScatterRecorder:
     """Orchestrates one or more ReceiverManagers from a single process.
 
     Accepts either a single ``radiod_block`` (legacy single-source
@@ -202,7 +202,7 @@ class Msk144Recorder:
             self._radiod_blocks = list(radiod_blocks)
         if not self._radiod_blocks:
             raise ValueError(
-                "Msk144Recorder requires at least one [[radiod]] block"
+                "MeteorScatterRecorder requires at least one [[radiod]] block"
             )
         # Convenience handles for code that pre-dated multi-source.
         # ``_radiod`` / ``_radiod_id`` refer to the FIRST block — only
@@ -217,9 +217,9 @@ class Msk144Recorder:
         self._station = config.get("station", {})
 
         spool_root = Path(
-            self._paths.get("spool_dir", "/var/lib/msk144-recorder"),
+            self._paths.get("spool_dir", "/var/lib/meteor-scatter"),
         )
-        log_dir = Path(self._paths.get("log_dir", "/var/log/msk144-recorder"))
+        log_dir = Path(self._paths.get("log_dir", "/var/log/meteor-scatter"))
 
         # radiod LIFETIME tag (ka9q-python ≥3.13.0).  0 = no LIFETIME tag
         # sent + no keep-alive; >0 = self-destruct after N frames,
@@ -259,10 +259,10 @@ class Msk144Recorder:
         self._lifetime_entries: list[tuple[object, int]] = []
         self._lifetime_thread: Optional[threading.Thread] = None
 
-        # Phase C: one Msk144CycleBatcher per process; all
+        # Phase C: one MeteorScatterCycleBatcher per process; all
         # ReceiverManagers' ChTailers feed it.  Started in run()
         # before tailers spawn; stopped in _shutdown() after them.
-        self._cycle_batcher: Optional[Msk144CycleBatcher] = None
+        self._cycle_batcher: Optional[MeteorScatterCycleBatcher] = None
 
     # --- Per-source iteration helpers ---------------------------------
 
@@ -292,14 +292,14 @@ class Msk144Recorder:
     # chrony tracks within tens of µs.  On VMs and hosts with looser
     # discipline, chrony's Last offset may stably sit at 200-500 µs
     # — the 100 µs default would always time out.  Each constant
-    # below is overridable via the matching `MSK144_SETTLE_*` env var:
+    # below is overridable via the matching `METEOR_SCATTER_SETTLE_*` env var:
     #
-    #   MSK144_SETTLE_MAX_OFFSET_US     ceiling on |Last offset| (µs).
+    #   METEOR_SCATTER_SETTLE_MAX_OFFSET_US     ceiling on |Last offset| (µs).
     #                                Set to e.g. 1000 on a VM.
-    #   MSK144_SETTLE_REQUIRED_CYCLES   consecutive settled polls before
+    #   METEOR_SCATTER_SETTLE_REQUIRED_CYCLES   consecutive settled polls before
     #                                we consider chrony stable.
-    #   MSK144_SETTLE_POLL_SEC          poll interval (s).
-    #   MSK144_SETTLE_TIMEOUT_SEC       overall wait cap (s) before
+    #   METEOR_SCATTER_SETTLE_POLL_SEC          poll interval (s).
+    #   METEOR_SCATTER_SETTLE_TIMEOUT_SEC       overall wait cap (s) before
     #                                proceeding with degraded anchors.
     #
     # All env reads happen at class-load time (process start), so a
@@ -307,16 +307,16 @@ class Msk144Recorder:
     # the conservative default and log a warning at gate time.
     # Resolved at module-load time; env overrides apply per process.
     SETTLE_MAX_OFFSET_S = _env_float(
-        "MSK144_SETTLE_MAX_OFFSET_US", 100.0, scale=1e-6,
+        "METEOR_SCATTER_SETTLE_MAX_OFFSET_US", 100.0, scale=1e-6,
     )
     SETTLE_REQUIRED_CYCLES = _env_int(
-        "MSK144_SETTLE_REQUIRED_CYCLES", 3,
+        "METEOR_SCATTER_SETTLE_REQUIRED_CYCLES", 3,
     )
     SETTLE_POLL_SEC = _env_float(
-        "MSK144_SETTLE_POLL_SEC", 5.0,
+        "METEOR_SCATTER_SETTLE_POLL_SEC", 5.0,
     )
     SETTLE_TIMEOUT_SEC = _env_float(
-        "MSK144_SETTLE_TIMEOUT_SEC", 60.0,
+        "METEOR_SCATTER_SETTLE_TIMEOUT_SEC", 60.0,
     )
 
     def run(self) -> None:
@@ -395,13 +395,13 @@ class Msk144Recorder:
         callsign = self._station.get("callsign", "")
         grid = self._station.get("grid_square", "")
         try:
-            from msk144_recorder.version import GIT_INFO
+            from meteor_scatter.version import GIT_INFO
             short = (GIT_INFO or {}).get("short", "")
         except Exception:
             short = ""
         try:
             from importlib.metadata import version as pkg_version
-            ver = pkg_version("msk144-recorder")
+            ver = pkg_version("meteor-scatter")
         except Exception:
             ver = "0.1.0"
         proc_version = f"{ver}+{short}" if short else ver
@@ -416,7 +416,7 @@ class Msk144Recorder:
         # tailers receive the same batcher reference, so spots collapse
         # into one batch per (cycle, source) before the SQLite write.
         if self._cycle_batcher is None:
-            self._cycle_batcher = Msk144CycleBatcher(
+            self._cycle_batcher = MeteorScatterCycleBatcher(
                 writer_factory=_default_writer_factory,
             )
             self._cycle_batcher.start()
@@ -453,7 +453,7 @@ class Msk144Recorder:
             _sub.run(['chronyc', '-h'], capture_output=True, timeout=2.0)
         except (FileNotFoundError, OSError, _sub.TimeoutExpired):
             logger.warning(
-                "msk144-recorder settled-capture gate: chronyc unavailable — "
+                "meteor-scatter settled-capture gate: chronyc unavailable — "
                 "channel anchors will be captured without verification "
                 "(ε_0 may be non-zero, V1 not prevented; "
                 "slot timestamps may be silently wrong)"
@@ -464,7 +464,7 @@ class Msk144Recorder:
         wait_start = time.monotonic()
         deadline = wait_start + self.SETTLE_TIMEOUT_SEC
         logger.info(
-            "msk144-recorder settled-capture gate: waiting for chrony "
+            "meteor-scatter settled-capture gate: waiting for chrony "
             "(threshold |Last offset| <= %.0f µs, need %d consecutive readings, "
             "timeout %.0fs)",
             self.SETTLE_MAX_OFFSET_S * 1e6,
@@ -478,7 +478,7 @@ class Msk144Recorder:
                     capture_output=True, text=True, timeout=5.0,
                 )
             except (_sub.TimeoutExpired, OSError) as exc:
-                logger.debug("msk144-recorder settled-capture: chronyc failed: %s", exc)
+                logger.debug("meteor-scatter settled-capture: chronyc failed: %s", exc)
                 time.sleep(self.SETTLE_POLL_SEC)
                 consecutive = 0
                 continue
@@ -490,7 +490,7 @@ class Msk144Recorder:
             last_offset = self._parse_chronyc_last_offset(proc.stdout)
             if last_offset is None:
                 logger.debug(
-                    "msk144-recorder settled-capture: could not parse "
+                    "meteor-scatter settled-capture: could not parse "
                     "Last offset from chronyc tracking output"
                 )
                 time.sleep(self.SETTLE_POLL_SEC)
@@ -500,7 +500,7 @@ class Msk144Recorder:
             if abs(last_offset) <= self.SETTLE_MAX_OFFSET_S:
                 consecutive += 1
                 logger.info(
-                    "msk144-recorder settled-capture: chrony Last offset "
+                    "meteor-scatter settled-capture: chrony Last offset "
                     "%+.1f µs OK (%d/%d)",
                     last_offset * 1e6,
                     consecutive,
@@ -509,14 +509,14 @@ class Msk144Recorder:
                 if consecutive >= self.SETTLE_REQUIRED_CYCLES:
                     elapsed = time.monotonic() - wait_start
                     logger.info(
-                        "msk144-recorder settled-capture: chrony settled after "
+                        "meteor-scatter settled-capture: chrony settled after "
                         "%.1fs — proceeding to provision channels", elapsed,
                     )
                     return True
             else:
                 if consecutive > 0:
                     logger.info(
-                        "msk144-recorder settled-capture: chrony Last offset "
+                        "meteor-scatter settled-capture: chrony Last offset "
                         "%+.1f µs > threshold; resetting counter",
                         last_offset * 1e6,
                     )
@@ -524,7 +524,7 @@ class Msk144Recorder:
             time.sleep(self.SETTLE_POLL_SEC)
 
         logger.warning(
-            "msk144-recorder settled-capture: timeout after %.0fs — "
+            "meteor-scatter settled-capture: timeout after %.0fs — "
             "proceeding with degraded anchors (slot timestamps may "
             "be wrong on some channels; visible as future-dated "
             "WAV filenames per docs/TIMING-PIPELINE-WIRING.md §6.6)",
@@ -556,7 +556,7 @@ class Msk144Recorder:
     def _start_uploaders(self) -> None:
         # DEFERRED (Phase 3).  No upload transport runs yet: decoded MSK144
         # spots are deposited into sigmond's local SQLite sink
-        # (``msk144.spots``) by the ChTailer → Msk144CycleBatcher path and
+        # (``msk144.spots``) by the ChTailer → MeteorScatterCycleBatcher path and
         # accumulate there.  The wsprdaemon.org SFTP uploader
         # (wspr-recorder's WsprdaemonTarSftp transport) is wired only once
         # wsprdaemon's MSK144 ingest is confirmed — see
@@ -648,7 +648,7 @@ class Msk144Recorder:
         (the normalized jt9 lines slot.py writes and the ChTailer reads).
         Decode count comes from each SlotWorker's own counters.
         """
-        log_dir = Path(self._paths.get("log_dir", "/var/log/msk144-recorder"))
+        log_dir = Path(self._paths.get("log_dir", "/var/log/meteor-scatter"))
         prev_ok: dict[str, int] = {}
         prev_fail: dict[str, int] = {}
         prev_empty: dict[str, int] = {}
@@ -825,6 +825,6 @@ class Msk144Recorder:
 
 
 # ``_resolve_encoding`` is re-exported from ``receiver_manager`` at
-# the top of this module so existing ``from msk144_recorder.core.recorder
+# the top of this module so existing ``from meteor_scatter.core.recorder
 # import _resolve_encoding`` lines keep working.  No new definition
 # here — single source of truth lives in receiver_manager.py.

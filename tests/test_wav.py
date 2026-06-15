@@ -7,7 +7,7 @@ from pathlib import Path
 
 import numpy as np
 
-from msk144_recorder.core.wav import write_wav
+from meteor_scatter.core.wav import write_wav
 
 
 class WavWriterTests(unittest.TestCase):

@@ -8,8 +8,8 @@ from unittest import mock
 
 import numpy as np
 
-from msk144_recorder.core.ring import Ring
-from msk144_recorder.core.slot import SlotWorker
+from meteor_scatter.core.ring import Ring
+from meteor_scatter.core.slot import SlotWorker
 
 
 class CadenceAlignmentTests(unittest.TestCase):

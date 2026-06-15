@@ -3,7 +3,7 @@ AuthorityReader — reads /run/hf-timestd/authority.json published by
 hf-timestd's authority manager. Consumer side of the schema v1 contract
 documented in hf-timestd/docs/METROLOGY.md §4.5.2.
 
-Under the RTP-reference labeling invariant, msk144-recorder anchors the
+Under the RTP-reference labeling invariant, meteor-scatter anchors the
 UTC of each sample from RTP counters plus a published offset. This
 module produces that offset; it is wire-compatible with the
 wspr-recorder sibling (same JSON schema).

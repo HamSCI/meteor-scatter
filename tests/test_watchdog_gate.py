@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import unittest
 
-from msk144_recorder.core.recorder import _ProgressGate
+from meteor_scatter.core.recorder import _ProgressGate
 
 
 class ProgressGateTests(unittest.TestCase):

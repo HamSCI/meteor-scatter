@@ -1,6 +1,6 @@
 """Tests for radiod channel-lifetime keep-alive (ka9q-python ≥3.13.0).
 
-msk144-recorder opts into ka9q-python / radiod's LIFETIME tag so a crashed
+meteor-scatter opts into ka9q-python / radiod's LIFETIME tag so a crashed
 or killed recorder can't leave channels lingering on radiod beyond
 ~`radiod_lifetime_frames / 50` seconds (≈2 min at the default).
 
@@ -31,7 +31,7 @@ SRC_DIR = str(REPO_ROOT / "src")
 if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
-from msk144_recorder.config import DEFAULTS, load_config
+from meteor_scatter.config import DEFAULTS, load_config
 
 
 class ConfigDefaultsTests(unittest.TestCase):
@@ -100,16 +100,16 @@ class ConfigDefaultsTests(unittest.TestCase):
 
 
 class _RecorderForKeepAliveTests:
-    """Constructs Msk144Recorder with a stub config + manually populated
+    """Constructs MeteorScatterRecorder with a stub config + manually populated
     private state so we can exercise the lifetime-keepalive paths
     without hitting `_provision_channels` (which imports ka9q).
     """
 
     @staticmethod
     def make(lifetime_frames: int):
-        # Import is lazy because Msk144Recorder lives in core.recorder which
+        # Import is lazy because MeteorScatterRecorder lives in core.recorder which
         # itself only does `from ka9q import ...` inside provisioning.
-        from msk144_recorder.core.recorder import Msk144Recorder
+        from meteor_scatter.core.recorder import MeteorScatterRecorder
         cfg = {
             "paths": {
                 "spool_dir": "/tmp/psk-test", "log_dir": "/tmp/psk-test",
@@ -118,7 +118,7 @@ class _RecorderForKeepAliveTests:
             "processing": {"radiod_lifetime_frames": lifetime_frames},
         }
         radiod = {"status": "host"}
-        return Msk144Recorder(cfg, radiod)
+        return MeteorScatterRecorder(cfg, radiod)
 
 
 class KeepAliveLoopTests(unittest.TestCase):

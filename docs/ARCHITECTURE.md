@@ -10,7 +10,7 @@ radiod (ka9q-radio)
 RTP multicast
   │  one MultiStream per radiod (shared socket, demux on SSRC)
   ▼
-msk144-recorder daemon (one per radiod)
+meteor-scatter daemon (one per radiod)
   │
   ├── ChannelSink (per channel)
   │     ├─ Ring buffer (collections.deque + Lock)
@@ -25,21 +25,21 @@ msk144-recorder daemon (one per radiod)
               (long-running, tails the spot log)
 ```
 
-One `msk144-recorder@<radiod_id>.service` per radiod. One uploader
+One `meteor-scatter@<radiod_id>.service` per radiod. One uploader
 subprocess per mode (so two: FT8 and FT4). N decoder forks per minute,
 where N = (channels × slots-per-min).
 
 ## Source layout
 
 ```
-src/msk144_recorder/
+src/meteor_scatter/
   cli.py              # argparse, log-level resolution, stdout-cleanliness guard
   config.py           # TOML loader, defaults, radiod block resolution
   contract.py         # inventory/validate JSON builders (sigmond contract v0.4)
   version.py          # GIT_INFO dict (sha, ref, dirty)
-  daemon.py           # daemon entrypoint: load config, build Msk144Recorder, run
+  daemon.py           # daemon entrypoint: load config, build MeteorScatterRecorder, run
   core/
-    recorder.py       # Msk144Recorder: orchestrates one radiod's channels
+    recorder.py       # MeteorScatterRecorder: orchestrates one radiod's channels
     stream.py         # ChannelSink: ring + slot worker driven by RTP callbacks
     ring.py           # Ring: process-local audio + timestamp deque
     slot.py           # SlotWorker: cadence math, WAV write, fork decoder
@@ -57,14 +57,14 @@ sink is present, the per-slot `.spots.txt` spool (`FileTreeSource`).
 `(radiod, mode)` tails the same spot log, parses each line, and inserts
 into `psk.spots` via `sigmond.hamsci_sink.Writer.from_env()` — sigmond's
 local SQLite sink (`/var/lib/sigmond/sink.db`) by default. It resolves
-to a no-op when the sink path is unwritable, so msk144-recorder still runs
+to a no-op when the sink path is unwritable, so meteor-scatter still runs
 standalone with no sigmond present.
 
-### Delivery mode (`MSK144_DELIVERY_MODE`)
+### Delivery mode (`METEOR_SCATTER_DELIVERY_MODE`)
 
 Three operator-selectable routes for how a spot reaches PSKReporter:
 
-| `MSK144_DELIVERY_MODE` | Direct uploader | ChTailer (→ local sink → wsprdaemon tar) | Row tag `forward_to_pskreporter` |
+| `METEOR_SCATTER_DELIVERY_MODE` | Direct uploader | ChTailer (→ local sink → wsprdaemon tar) | Row tag `forward_to_pskreporter` |
 |---|---|---|---|
 | `server` (default) | off          | on   | true (server posts on our behalf) |
 | `direct`           | on           | off  | n/a (no row written) |
@@ -83,7 +83,7 @@ so an operator typo doesn't silently disable delivery.
 
 ## Per-module responsibilities
 
-### `core/recorder.py` — `Msk144Recorder`
+### `core/recorder.py` — `MeteorScatterRecorder`
 
 Owns one radiod's connection. Calls `RadiodControl.ensure_channel(...)`
 for each `(freq, mode)` configured, captures the resolved
@@ -131,19 +131,19 @@ The PSK Reporter upload path. Runs a daemon thread that pumps
 
 ### `cli.py` and `daemon.py`
 
-`cli.py` is the only entrypoint (`msk144-recorder = msk144_recorder.cli:main`).
+`cli.py` is the only entrypoint (`meteor-scatter = meteor_scatter.cli:main`).
 It dispatches to `inventory`, `validate`, `version`, `daemon`, or
 `status`. The first three keep stdout pristine for JSON consumers; the
 last two log normally.
 
 `daemon.py` is the loop entered by `cli daemon`: load config, resolve
-the `[[radiod]]` block, build `Msk144Recorder`, run until signal.
+the `[[radiod]]` block, build `MeteorScatterRecorder`, run until signal.
 
 ## Key design decisions
 
 - **One unit instance per radiod**, not per host. Templated unit
-  `msk144-recorder@<radiod_id>.service`, parameterized by `--radiod-id`.
-- **ka9q-python owns the multicast destination.** msk144-recorder never
+  `meteor-scatter@<radiod_id>.service`, parameterized by `--radiod-id`.
+- **ka9q-python owns the multicast destination.** meteor-scatter never
   passes `destination=` to `ensure_channel()`; it reads the resolved
   address from the returned `ChannelInfo` for the inventory output.
   Required by [SIGMOND-CONTRACT.md §7](SIGMOND-CONTRACT.md).
@@ -151,7 +151,7 @@ the `[[radiod]]` block, build `Msk144Recorder`, run until signal.
   source of truth for radiod presence on the LAN.
 - **Process-local ring buffer.** No SysV IPC, no shared memory — the
   recorder is the only consumer.
-- **Subprocess decoder and uploader.** msk144-recorder shells out to
+- **Subprocess decoder and uploader.** meteor-scatter shells out to
   `decode_ft8` and `pskreporter-sender` rather than reimplementing
   either. This keeps the Python side small and makes upgrades
   independent.
@@ -172,11 +172,11 @@ the `[[radiod]]` block, build `Msk144Recorder`, run until signal.
    boundary, calls `Ring.extract_slot(...)`, gets a clean
    180_000-sample (or 90_000-sample) `np.float32` array.
 5. `wav.write_wav(...)` writes
-   `/var/lib/msk144-recorder/<id>/<mode>/YYMMDD_HHMMSS_<freqkhz>.wav`.
+   `/var/lib/meteor-scatter/<id>/<mode>/YYMMDD_HHMMSS_<freqkhz>.wav`.
 6. `subprocess.Popen(["/usr/local/bin/decode_ft8", "-f", "14.074000",
    wav])` forks. The decoder writes spot lines to stdout, which the
    slot worker captures and appends to
-   `/var/log/msk144-recorder/<id>-ft8.log`.
+   `/var/log/meteor-scatter/<id>-ft8.log`.
 7. The long-running `pskreporter-sender` (started at recorder
    startup) is `tail -f`-ing that log. New lines accumulate in its
    in-memory spot list.

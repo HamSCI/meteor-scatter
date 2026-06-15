@@ -1,6 +1,6 @@
-"""Tests for msk144_recorder.core.receiver_manager.
+"""Tests for meteor_scatter.core.receiver_manager.
 
-Covers the Phase B refactor of per-radiod state out of Msk144Recorder
+Covers the Phase B refactor of per-radiod state out of MeteorScatterRecorder
 into ReceiverManager.  These tests deliberately avoid importing
 ka9q (the heavy provisioning path requires the C extension) — they
 exercise the construction, accessor, and shutdown surfaces only.
@@ -17,7 +17,7 @@ SRC_DIR = REPO_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from msk144_recorder.core.receiver_manager import ReceiverManager
+from meteor_scatter.core.receiver_manager import ReceiverManager
 
 
 def _make_rx(radiod_block, *, lifetime=0):
@@ -93,8 +93,8 @@ class StopIsIdempotentTests(unittest.TestCase):
             self.assertEqual(rx._log_fds, {})
 
 
-class Msk144RecorderMultiSourceTests(unittest.TestCase):
-    """Verify Msk144Recorder accepts both the single-block and
+class MeteorScatterRecorderMultiSourceTests(unittest.TestCase):
+    """Verify MeteorScatterRecorder accepts both the single-block and
     list-of-blocks signature, and creates one ReceiverManager per
     source.
     """
@@ -110,8 +110,8 @@ class Msk144RecorderMultiSourceTests(unittest.TestCase):
         }
 
     def test_single_dict_signature(self):
-        from msk144_recorder.core.recorder import Msk144Recorder
-        rec = Msk144Recorder(
+        from meteor_scatter.core.recorder import MeteorScatterRecorder
+        rec = MeteorScatterRecorder(
             self._cfg(),
             {"status": "solo.local"},
         )
@@ -119,8 +119,8 @@ class Msk144RecorderMultiSourceTests(unittest.TestCase):
         self.assertEqual(rec.receivers[0].radiod_id, "solo.local")
 
     def test_list_of_blocks_multi_source(self):
-        from msk144_recorder.core.recorder import Msk144Recorder
-        rec = Msk144Recorder(
+        from meteor_scatter.core.recorder import MeteorScatterRecorder
+        rec = MeteorScatterRecorder(
             self._cfg(),
             [
                 {"status": "local.local"},
@@ -144,9 +144,9 @@ class Msk144RecorderMultiSourceTests(unittest.TestCase):
         )
 
     def test_empty_list_rejected(self):
-        from msk144_recorder.core.recorder import Msk144Recorder
+        from meteor_scatter.core.recorder import MeteorScatterRecorder
         with self.assertRaises(ValueError):
-            Msk144Recorder(self._cfg(), [])
+            MeteorScatterRecorder(self._cfg(), [])
 
 
 if __name__ == "__main__":

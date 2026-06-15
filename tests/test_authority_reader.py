@@ -8,7 +8,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from msk144_recorder.core.authority_reader import AuthorityReader, AuthoritySnapshot
+from meteor_scatter.core.authority_reader import AuthorityReader, AuthoritySnapshot
 
 
 def _good(**overrides) -> dict:
@@ -124,7 +124,7 @@ class TestCanonicalTimingAuthority(unittest.TestCase):
         self.assertEqual(b["client_radiod"], "bee3-rx888")
 
     def test_standalone_block(self) -> None:
-        from msk144_recorder.core.authority_reader import standalone_timing_authority
+        from meteor_scatter.core.authority_reader import standalone_timing_authority
         b = standalone_timing_authority(client_radiod="bee3-rx888")
         self.assertEqual(b["source"], "standalone-fallback")
         self.assertIsNone(b["t_level_active"])
@@ -132,7 +132,7 @@ class TestCanonicalTimingAuthority(unittest.TestCase):
         self.assertEqual(b["client_radiod"], "bee3-rx888")
 
     def test_both_blocks_share_keys(self) -> None:
-        from msk144_recorder.core.authority_reader import standalone_timing_authority
+        from meteor_scatter.core.authority_reader import standalone_timing_authority
         self.assertEqual(
             set(self._snap().to_timing_authority("r").keys()),
             set(standalone_timing_authority("r").keys()),

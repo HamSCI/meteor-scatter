@@ -3,8 +3,8 @@ callsign    = "AC0G"
 grid_square = "EM38ww40pk"
 
 [paths]
-spool_dir   = "/tmp/msk144-recorder-test/spool"
-log_dir     = "/tmp/msk144-recorder-test/log"
+spool_dir   = "/tmp/meteor-scatter-test/spool"
+log_dir     = "/tmp/meteor-scatter-test/log"
 keep_wav    = false
 
 [[radiod]]

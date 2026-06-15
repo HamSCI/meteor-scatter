@@ -1,4 +1,4 @@
-"""TOML config loader and defaults for msk144-recorder."""
+"""TOML config loader and defaults for meteor-scatter."""
 
 from __future__ import annotations
 
@@ -13,8 +13,8 @@ except ModuleNotFoundError:
     import tomli as tomllib  # type: ignore[no-redef]
 
 
-DEFAULT_CONFIG_PATH = Path("/etc/msk144-recorder/msk144-recorder-config.toml")
-PER_INSTANCE_CONFIG_DIR = Path("/etc/msk144-recorder")
+DEFAULT_CONFIG_PATH = Path("/etc/meteor-scatter/meteor-scatter-config.toml")
+PER_INSTANCE_CONFIG_DIR = Path("/etc/meteor-scatter")
 
 
 def resolve_config_path(
@@ -25,20 +25,20 @@ def resolve_config_path(
 
     Resolution order (most → least specific):
       1. `explicit_path` (operator passed --config) — always wins.
-      2. `$MSK144_RECORDER_CONFIG` env var — explicit override.
-      3. `/etc/msk144-recorder/<instance>.toml` when `instance` is given
+      2. `$METEOR_SCATTER_CONFIG` env var — explicit override.
+      3. `/etc/meteor-scatter/<instance>.toml` when `instance` is given
          and the file exists — the per-instance v0.8 world
          (sigmond's MULTI-INSTANCE-ARCHITECTURE.md §4).
-      4. `/etc/msk144-recorder/msk144-recorder-config.toml` (legacy shared)
+      4. `/etc/meteor-scatter/meteor-scatter-config.toml` (legacy shared)
          — emits a DeprecationWarning when `instance` was given but
          the per-instance file does not exist (operator hasn't run
          `sudo smd instance migrate` yet).
-      5. `/etc/msk144-recorder/msk144-recorder-config.toml` (legacy shared)
+      5. `/etc/meteor-scatter/meteor-scatter-config.toml` (legacy shared)
          silently when no instance was given (pre-instance world).
     """
     if explicit_path is not None:
         return Path(explicit_path)
-    env_override = os.environ.get("MSK144_RECORDER_CONFIG")
+    env_override = os.environ.get("METEOR_SCATTER_CONFIG")
     if env_override:
         return Path(env_override)
     if instance:
@@ -76,8 +76,8 @@ def extract_reporter_id(config: dict) -> Optional[str]:
 
 DEFAULTS: dict[str, Any] = {
     "paths": {
-        "spool_dir": "/var/lib/msk144-recorder",
-        "log_dir": "/var/log/msk144-recorder",
+        "spool_dir": "/var/lib/meteor-scatter",
+        "log_dir": "/var/log/meteor-scatter",
         # Empty by default — the jt9 MSK144 binary is bundled in-repo and
         # arch-resolved at runtime (see core.decoder._resolve_decoder_binary).
         # Set paths.decoder_jt9 to override that resolution.
@@ -113,7 +113,7 @@ DEFAULT_ENCODING = "s16be"
 def load_config(path: Path | None = None) -> dict:
     """Load and merge config with defaults."""
     config_path = path or Path(
-        os.environ.get("MSK144_RECORDER_CONFIG", str(DEFAULT_CONFIG_PATH))
+        os.environ.get("METEOR_SCATTER_CONFIG", str(DEFAULT_CONFIG_PATH))
     )
     if not config_path.exists():
         raise FileNotFoundError(f"Config not found: {config_path}")
@@ -223,7 +223,7 @@ def resolve_radiod_status(radiod_block: dict) -> str:
             "[[radiod]] block has no `status` field.  Run "
             "`sudo smd radiod migrate --yes` if this config still "
             "uses the legacy `radiod_status` field, or run "
-            "`msk144-recorder config init` for a fresh config."
+            "`meteor-scatter config init` for a fresh config."
         )
     return status
 

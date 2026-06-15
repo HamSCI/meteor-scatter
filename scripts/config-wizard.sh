@@ -1,11 +1,11 @@
 #!/bin/bash
 #
-# msk144-recorder config wizard (whiptail).
+# meteor-scatter config wizard (whiptail).
 #
-# Called by `msk144-recorder config init` and `msk144-recorder config edit`
+# Called by `meteor-scatter config init` and `meteor-scatter config edit`
 # when stdout is a TTY and whiptail is installed.  Drives the operator
 # through Station / Paths / Processing dialogs, validates inline, and
-# writes the result through `msk144-recorder config apply --json -` so
+# writes the result through `meteor-scatter config apply --json -` so
 # the schema / type / range checks happen in Python.
 #
 # [[radiod]] arrays-of-tables and per-band freqs_hz lists are NOT
@@ -18,8 +18,8 @@
 #   config-wizard.sh edit [--config <path>]
 #
 # Env (set by configurator.py before exec):
-#   MSK144_RECORDER_CLI         path to the msk144-recorder binary to use
-#   MSK144_RECORDER_HELP_TOML   path to config/help.toml
+#   METEOR_SCATTER_CLI         path to the meteor-scatter binary to use
+#   METEOR_SCATTER_HELP_TOML   path to config/help.toml
 #
 # Reads (read-only) for pre-fills:
 #   /etc/sigmond/coordination.env   STATION_CALL / STATION_GRID / etc. (§14.3)
@@ -36,15 +36,15 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-MSK144_RECORDER="${MSK144_RECORDER_CLI:-msk144-recorder}"
-HELP_TOML="${MSK144_RECORDER_HELP_TOML:-/opt/git/sigmond/msk144-recorder/config/help.toml}"
+METEOR_SCATTER="${METEOR_SCATTER_CLI:-meteor-scatter}"
+HELP_TOML="${METEOR_SCATTER_HELP_TOML:-/opt/git/sigmond/meteor-scatter/config/help.toml}"
 COORD_ENV="/etc/sigmond/coordination.env"
 
 # -------- shared shell helpers ----------------------------------------
 #
 # Source sigmond's Tier-1 wizard helpers (preflight_or_exit_2, _info /
 # _warn / _err, recommended HEIGHT/WIDTH/LIST_HEIGHT/BACKTITLE
-# defaults).  The Python dispatcher (msk144_recorder.configurator
+# defaults).  The Python dispatcher (meteor_scatter.configurator
 # ._exec_wizard) sets SIGMOND_WIZARD_LIB_SH in the env; the :- default
 # below covers direct-invocation safety (e.g. running this script by
 # hand during development).
@@ -70,13 +70,13 @@ fi
 
 # Override BACKTITLE to be client-specific (the lib's default is
 # generic for the rare case where a client forgets).
-BACKTITLE="msk144-recorder configuration"
+BACKTITLE="meteor-scatter configuration"
 
 # -------- preflight ----------------------------------------------------
 
 if ! command -v whiptail >/dev/null 2>&1; then
     cat <<EOF >&2
-msk144-recorder config: whiptail is not installed on this host.
+meteor-scatter config: whiptail is not installed on this host.
 
 The interactive wizard requires it.  Install with:
 
@@ -84,7 +84,7 @@ The interactive wizard requires it.  Install with:
 
 Or use the legacy stdin-prompt path with:
 
-    msk144-recorder config $MODE --non-interactive
+    meteor-scatter config $MODE --non-interactive
 EOF
     exit 1
 fi
@@ -103,7 +103,7 @@ seed_from_coord_env() {
 # Read one scalar out of the current effective config via JSON.
 config_get() {
     local section="$1" key="$2"
-    "$MSK144_RECORDER" config show --json --defaults ${CONFIG_PATH:+--config "$CONFIG_PATH"} 2>/dev/null \
+    "$METEOR_SCATTER" config show --json --defaults ${CONFIG_PATH:+--config "$CONFIG_PATH"} 2>/dev/null \
         | python3 -c "
 import json, sys
 d = json.load(sys.stdin)
@@ -189,7 +189,7 @@ valid_always()         { return 0; }   # for free-form text / no-validate fields
 #
 # Whiptail mis-parses defaults starting with '-' as flags.  Workaround:
 # pass an empty default and surface the current value in the body when
-# the pre-fill starts with '-'.  (msk144-recorder's fields don't normally
+# the pre-fill starts with '-'.  (meteor-scatter's fields don't normally
 # carry leading dashes, but reusing the mag-recorder fix keeps the
 # wizard scaffolding consistent in case someone sets a negative
 # radiod_lifetime_frames or similar future field.)
@@ -264,7 +264,7 @@ ask_yesno() {
 welcome_screen() {
     local body
     if [[ "$MODE" == "init" ]]; then
-        body="Welcome to the msk144-recorder configuration wizard.
+        body="Welcome to the meteor-scatter configuration wizard.
 
 You'll see a menu of sections (Station, Paths, Processing); pick
 any section to fill in, then return to the menu.  Pick 'Apply'
@@ -272,7 +272,7 @@ when you're done to write everything in one go, or 'Cancel' to
 discard pending changes and exit.
 
 Pre-fills come from /etc/sigmond/coordination.env (if present) and
-your current /etc/msk144-recorder/msk144-recorder-config.toml.  Inside a
+your current /etc/meteor-scatter/meteor-scatter-config.toml.  Inside a
 section, pressing Cancel drops back to the menu (not all the way
 out) -- effectively a 'back' button.
 
@@ -280,7 +280,7 @@ out) -- effectively a 'back' button.
 here -- pick 'Edit raw TOML' from the menu to open the file in
 \$EDITOR (or hand-edit it later)."
     else
-        body="Edit the current msk144-recorder configuration.
+        body="Edit the current meteor-scatter configuration.
 
 You'll see a menu of sections (Station, Paths, Processing) with
 current values shown inline.  Pick any section to edit, then
@@ -291,7 +291,7 @@ to the menu (not out).
 For [[radiod]] blocks and per-band freqs_hz lists, pick 'Edit
 raw TOML' from the menu to open the file in \$EDITOR."
     fi
-    whiptail --title "msk144-recorder configuration wizard" \
+    whiptail --title "meteor-scatter configuration wizard" \
              --backtitle "$BACKTITLE" \
              --yesno "$body"$'\n\n'"Continue?" \
              "$HEIGHT" "$WIDTH"
@@ -416,7 +416,7 @@ print(json.dumps(d))
 # CONFIG_PATH was empty -- env-var passing avoids the whole class
 # of bug.
 radiod_ids_summary() {
-    SCRATCH="$SCRATCH_JSON" CFG="$CONFIG_PATH" PSK="$MSK144_RECORDER" python3 <<'PYEOF' 2>/dev/null
+    SCRATCH="$SCRATCH_JSON" CFG="$CONFIG_PATH" PSK="$METEOR_SCATTER" python3 <<'PYEOF' 2>/dev/null
 import json, os, subprocess
 try:
     scratch = json.loads(os.environ.get('SCRATCH') or '{}')
@@ -441,7 +441,7 @@ PYEOF
 # Pull the current full [[radiod]] list (from SCRATCH_JSON or disk)
 # as a JSON array on stdout.
 radiod_list_json() {
-    SCRATCH="$SCRATCH_JSON" CFG="$CONFIG_PATH" PSK="$MSK144_RECORDER" python3 <<'PYEOF'
+    SCRATCH="$SCRATCH_JSON" CFG="$CONFIG_PATH" PSK="$METEOR_SCATTER" python3 <<'PYEOF'
 import json, os, subprocess
 try:
     scratch = json.loads(os.environ.get('SCRATCH') or '{}')
@@ -657,7 +657,7 @@ PYEOF
     esac
 }
 
-# msk144-recorder's radiod id has the same shape as a callsign in spirit
+# meteor-scatter's radiod id has the same shape as a callsign in spirit
 # -- letters, digits, hyphens.  Let's not block legitimate values.
 valid_radiod_id()   { [[ "$1" =~ ^[A-Za-z0-9_-]{1,64}$ ]]; }
 valid_mdns_host()   { [[ "$1" =~ ^[A-Za-z0-9._-]{1,253}$ ]]; }
@@ -820,7 +820,7 @@ PYEOF
     done
     whiptail --title "Pick instance for env" \
              --backtitle "$BACKTITLE" \
-             --menu "Which [[radiod]] instance do you want to edit /etc/msk144-recorder/env/<id>.env for?" \
+             --menu "Which [[radiod]] instance do you want to edit /etc/meteor-scatter/env/<id>.env for?" \
              "$HEIGHT" "$WIDTH" "$LIST_HEIGHT" \
              "${menu_items[@]}" 3>&1 1>&2 2>&3 || return 1
 }
@@ -831,11 +831,11 @@ delivery_summary() {
     first_id=$(radiod_ids_summary | cut -d, -f1)
     [[ -z "$first_id" || "$first_id" == "(none)" ]] && { echo "(no radiod blocks)"; return; }
     local env_file pipelines
-    env_file=$("$MSK144_RECORDER" env show --json --instance "$first_id" 2>/dev/null)
+    env_file=$("$METEOR_SCATTER" env show --json --instance "$first_id" 2>/dev/null)
     pipelines=$(ENV_JSON="${env_file:-{}}" python3 <<'PYEOF' 2>/dev/null
 import json, os
 d = json.loads(os.environ.get('ENV_JSON') or '{}')
-print(d.get('MSK144_DELIVERY_PIPELINES') or d.get('MSK144_DELIVERY_MODE') or '(unset)')
+print(d.get('METEOR_SCATTER_DELIVERY_PIPELINES') or d.get('METEOR_SCATTER_DELIVERY_MODE') or '(unset)')
 PYEOF
 )
     echo "${pipelines:-(unset)}"
@@ -868,42 +868,42 @@ collect_delivery() {
   STATION_CALL:       $(sigmond_coord_get STATION_CALL)
   STATION_GRID:       $(sigmond_coord_get STATION_GRID)
 
-The next screens edit /etc/msk144-recorder/env/$instance.env -- the per-instance upload-destination knobs msk144-recorder reads at start (via systemd EnvironmentFile=)." \
+The next screens edit /etc/meteor-scatter/env/$instance.env -- the per-instance upload-destination knobs meteor-scatter reads at start (via systemd EnvironmentFile=)." \
              16 "$WIDTH"
 
-    # Read current env file via `msk144-recorder env show`.
+    # Read current env file via `meteor-scatter env show`.
     local current_env
-    current_env=$("$MSK144_RECORDER" env show --json --instance "$instance" 2>/dev/null)
+    current_env=$("$METEOR_SCATTER" env show --json --instance "$instance" 2>/dev/null)
     local cur_pipelines cur_hs_upload cur_dedup
     cur_pipelines=$(ENV_JSON="${current_env:-{}}" python3 <<'PYEOF' 2>/dev/null
 import json, os
 d = json.loads(os.environ.get('ENV_JSON') or '{}')
-print(d.get('MSK144_DELIVERY_PIPELINES', d.get('MSK144_DELIVERY_MODE', 'direct')))
+print(d.get('METEOR_SCATTER_DELIVERY_PIPELINES', d.get('METEOR_SCATTER_DELIVERY_MODE', 'direct')))
 PYEOF
 )
     cur_hs_upload=$(ENV_JSON="${current_env:-{}}" python3 <<'PYEOF' 2>/dev/null
 import json, os
 d = json.loads(os.environ.get('ENV_JSON') or '{}')
-print(d.get('MSK144_USE_HS_UPLOADER', '1'))
+print(d.get('METEOR_SCATTER_USE_HS_UPLOADER', '1'))
 PYEOF
 )
     cur_dedup=$(ENV_JSON="${current_env:-{}}" python3 <<'PYEOF' 2>/dev/null
 import json, os
 d = json.loads(os.environ.get('ENV_JSON') or '{}')
-print(d.get('MSK144_DIRECT_DEDUP', '0'))
+print(d.get('METEOR_SCATTER_DIRECT_DEDUP', '0'))
 PYEOF
 )
 
-    # MSK144_DELIVERY_PIPELINES: checklist of three options.
+    # METEOR_SCATTER_DELIVERY_PIPELINES: checklist of three options.
     local p_direct p_merge p_raw
     p_direct=$([[ ",$cur_pipelines," == *",direct,"*       ]] && echo "on" || echo "off")
     p_merge=$([[  ",$cur_pipelines," == *",server-merge,"* ]] && echo "on" || echo "off")
     p_raw=$([[    ",$cur_pipelines," == *",server-raw,"*   ]] && echo "on" || echo "off")
     local pick
-    if ! pick=$(whiptail --title "$(help_get env.MSK144_DELIVERY_PIPELINES title)" \
+    if ! pick=$(whiptail --title "$(help_get env.METEOR_SCATTER_DELIVERY_PIPELINES title)" \
                          --backtitle "$BACKTITLE" \
                          --separate-output \
-                         --checklist "$(help_get env.MSK144_DELIVERY_PIPELINES help)" \
+                         --checklist "$(help_get env.METEOR_SCATTER_DELIVERY_PIPELINES help)" \
                          "$HEIGHT" "$WIDTH" 3 \
                          "direct"       "POST direct to pskreporter.info"             "$p_direct" \
                          "server-merge" "ship to wsprdaemon, server forwards one"     "$p_merge" \
@@ -928,55 +928,55 @@ PYEOF
 
     # Booleans as yesno.
     local new_hs new_dedup
-    if ask_yesno "$(help_get env.MSK144_USE_HS_UPLOADER title)" \
-                 "$(help_get env.MSK144_USE_HS_UPLOADER help)"$'\n\n'"Current: $cur_hs_upload"; then
+    if ask_yesno "$(help_get env.METEOR_SCATTER_USE_HS_UPLOADER title)" \
+                 "$(help_get env.METEOR_SCATTER_USE_HS_UPLOADER help)"$'\n\n'"Current: $cur_hs_upload"; then
         new_hs=1
     else
         new_hs=0
     fi
-    if ask_yesno "$(help_get env.MSK144_DIRECT_DEDUP title)" \
-                 "$(help_get env.MSK144_DIRECT_DEDUP help)"$'\n\n'"Current: $cur_dedup"; then
+    if ask_yesno "$(help_get env.METEOR_SCATTER_DIRECT_DEDUP title)" \
+                 "$(help_get env.METEOR_SCATTER_DIRECT_DEDUP help)"$'\n\n'"Current: $cur_dedup"; then
         new_dedup=1
     else
         new_dedup=0
     fi
 
-    # Write immediately via `msk144-recorder env apply` -- env files are
+    # Write immediately via `meteor-scatter env apply` -- env files are
     # cheap to round-trip; no need to defer until the main Apply step.
     local payload
     payload=$(NEW_PIPES="$new_pipelines" NEW_HS="$new_hs" NEW_DEDUP="$new_dedup" \
               python3 <<'PYEOF' 2>/dev/null
 import json, os
 print(json.dumps({
-    'MSK144_DELIVERY_PIPELINES': os.environ['NEW_PIPES'],
-    'MSK144_USE_HS_UPLOADER':    os.environ['NEW_HS'],
-    'MSK144_DIRECT_DEDUP':       os.environ['NEW_DEDUP'],
+    'METEOR_SCATTER_DELIVERY_PIPELINES': os.environ['NEW_PIPES'],
+    'METEOR_SCATTER_USE_HS_UPLOADER':    os.environ['NEW_HS'],
+    'METEOR_SCATTER_DIRECT_DEDUP':       os.environ['NEW_DEDUP'],
 }))
 PYEOF
 )
     if ! printf '%s' "$payload" | \
-            "$MSK144_RECORDER" env apply --json - --instance "$instance"; then
+            "$METEOR_SCATTER" env apply --json - --instance "$instance"; then
         whiptail --title "env apply failed" \
                  --backtitle "$BACKTITLE" \
-                 --msgbox "Couldn't write /etc/msk144-recorder/env/$instance.env.  See stderr for details.  Existing env file unchanged." \
+                 --msgbox "Couldn't write /etc/meteor-scatter/env/$instance.env.  See stderr for details.  Existing env file unchanged." \
                  12 "$WIDTH"
         return 1
     fi
     whiptail --title "Delivery written" \
              --backtitle "$BACKTITLE" \
-             --msgbox "Wrote /etc/msk144-recorder/env/$instance.env:
+             --msgbox "Wrote /etc/meteor-scatter/env/$instance.env:
 
-  MSK144_DELIVERY_PIPELINES = $new_pipelines
-  MSK144_USE_HS_UPLOADER    = $new_hs
-  MSK144_DIRECT_DEDUP       = $new_dedup
+  METEOR_SCATTER_DELIVERY_PIPELINES = $new_pipelines
+  METEOR_SCATTER_USE_HS_UPLOADER    = $new_hs
+  METEOR_SCATTER_DIRECT_DEDUP       = $new_dedup
 
-Restart 'msk144-recorder@$instance.service' for the change to take effect." \
+Restart 'meteor-scatter@$instance.service' for the change to take effect." \
              14 "$WIDTH"
 }
 
 edit_raw_toml() {
     # Resolve target file path (same logic configurator.py uses).
-    local target="${CONFIG_PATH:-/etc/msk144-recorder/msk144-recorder-config.toml}"
+    local target="${CONFIG_PATH:-/etc/meteor-scatter/meteor-scatter-config.toml}"
     if [[ ! -f "$target" ]]; then
         whiptail --title "Config file not found" \
                  --backtitle "$BACKTITLE" \
@@ -1013,7 +1013,7 @@ What should I do before opening $target in \$EDITOR?" \
                 ;;
             apply-then-open)
                 if ! printf '%s' "$SCRATCH_JSON" | \
-                        "$MSK144_RECORDER" config apply --json - ${CONFIG_PATH:+--config "$CONFIG_PATH"}; then
+                        "$METEOR_SCATTER" config apply --json - ${CONFIG_PATH:+--config "$CONFIG_PATH"}; then
                     whiptail --title "Apply failed" \
                              --backtitle "$BACKTITLE" \
                              --msgbox "Couldn't write pending edits.  Aborting open." \
@@ -1039,16 +1039,16 @@ What should I do before opening $target in \$EDITOR?" \
     # Drop out of the whiptail UI for the editor session.
     clear
     "$editor" "$target"
-    # Re-validate via msk144-recorder validate after the edit.
+    # Re-validate via meteor-scatter validate after the edit.
     local validate_rc=0
-    "$MSK144_RECORDER" validate --json ${CONFIG_PATH:+--config "$CONFIG_PATH"} >/dev/null 2>&1 \
+    "$METEOR_SCATTER" validate --json ${CONFIG_PATH:+--config "$CONFIG_PATH"} >/dev/null 2>&1 \
         || validate_rc=$?
     if [[ $validate_rc -ne 0 ]]; then
         whiptail --title "Validation warnings" \
                  --backtitle "$BACKTITLE" \
-                 --msgbox "msk144-recorder validate reported issues after your edit.  Run
+                 --msgbox "meteor-scatter validate reported issues after your edit.  Run
 
-    msk144-recorder validate --json | jq
+    meteor-scatter validate --json | jq
 
 to see the details.  The file was written as you saved it -- this is just a heads-up." \
                  14 "$WIDTH"
@@ -1078,11 +1078,11 @@ main_menu_loop() {
         cur_timing=$(current_value timing chain_delay_ns)
         # Radiod summary: comma-separated list of ids.
         cur_radiods=$(radiod_ids_summary)
-        # Delivery summary: MSK144_DELIVERY_PIPELINES for the first radiod_id.
+        # Delivery summary: METEOR_SCATTER_DELIVERY_PIPELINES for the first radiod_id.
         cur_pipelines=$(delivery_summary)
 
         local choice
-        choice=$(whiptail --title "msk144-recorder configuration" \
+        choice=$(whiptail --title "meteor-scatter configuration" \
                           --backtitle "$BACKTITLE" \
                           --cancel-button "Exit wizard" \
                           --menu "Pick a section to edit, or Apply when you're done.
@@ -1156,7 +1156,7 @@ print('\n'.join(lines))
 ")
     if ! whiptail --title "Review and write" \
                   --backtitle "$BACKTITLE" \
-                  --yesno "About to apply the following to ${CONFIG_PATH:-/etc/msk144-recorder/msk144-recorder-config.toml}:
+                  --yesno "About to apply the following to ${CONFIG_PATH:-/etc/meteor-scatter/meteor-scatter-config.toml}:
 
 $summary
 
@@ -1164,10 +1164,10 @@ Continue?" "$HEIGHT" "$WIDTH"; then
         return 1
     fi
     if ! printf '%s' "$SCRATCH_JSON" | \
-            "$MSK144_RECORDER" config apply --json - ${CONFIG_PATH:+--config "$CONFIG_PATH"}; then
+            "$METEOR_SCATTER" config apply --json - ${CONFIG_PATH:+--config "$CONFIG_PATH"}; then
         whiptail --title "Apply failed" \
                  --backtitle "$BACKTITLE" \
-                 --msgbox "msk144-recorder config apply rejected the input.  See stderr for details.  Existing config was not modified." \
+                 --msgbox "meteor-scatter config apply rejected the input.  See stderr for details.  Existing config was not modified." \
                  12 "$WIDTH"
         return 1
     fi
@@ -1176,8 +1176,8 @@ Continue?" "$HEIGHT" "$WIDTH"; then
              --msgbox "Configuration written.
 
 Next steps:
-  - Verify:   msk144-recorder validate --json | jq
-  - Restart:  sudo systemctl restart msk144-recorder@<radiod_id>.service
+  - Verify:   meteor-scatter validate --json | jq
+  - Restart:  sudo systemctl restart meteor-scatter@<radiod_id>.service
 
 Note: [[radiod]] blocks and freqs_hz weren't touched by this wizard -- if you need to change those, re-enter the wizard and pick 'Edit raw TOML'." \
              "$HEIGHT" "$WIDTH"

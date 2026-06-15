@@ -58,7 +58,7 @@ _JT9_BY_ARCH = {
 }
 
 # bin/decoders sits at the repo root: this file is
-# src/msk144_recorder/core/decoder.py → parents[3] == repo root.
+# src/meteor_scatter/core/decoder.py → parents[3] == repo root.
 _REPO_DECODER_DIR = Path(__file__).resolve().parents[3] / "bin" / "decoders"
 
 
@@ -106,9 +106,18 @@ def build_jt9_cmd(jt9_path: str, workdir: Path, wav_path: Path) -> list[str]:
     ``-a workdir`` is jt9's writeable data dir (decoded.txt, wisdom,
     timer.out land there); run the process with ``cwd=workdir`` and
     pre-touch ``plotspec``/``decdata`` sentinels (jt9 opens them).
+
+    ``-Y`` makes jt9 emit unresolved compound-callsign hashes as the
+    numeric ``<NNNNNNN>`` form (22-bit) instead of the opaque ``<...>``.
+    The shared callhash table (see ``ch_tailer`` → ``callhash.parse_message``)
+    resolves those back to plaintext from accumulated ``<call>``
+    announcements — the same mechanism wspr-recorder uses for FST4W.
+    Without it, a hashed call the decoder couldn't resolve in-slot would
+    surface as ``<...>`` and the spot would lose its call.
     """
     return [
         jt9_path,
+        "-Y",
         "--msk144",
         "-p", str(MSK144_TR_PERIOD_SEC),
         "-f", str(MSK144_AUDIO_FREQ_HZ),

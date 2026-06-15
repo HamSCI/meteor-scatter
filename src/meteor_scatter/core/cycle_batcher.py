@@ -1,4 +1,4 @@
-"""Msk144CycleBatcher: per-cycle, per-source spot accumulator.
+"""MeteorScatterCycleBatcher: per-cycle, per-source spot accumulator.
 
 Sits between the ChTailers (one per radiod-mode) and the SQLite sink.
 Accepts decoded spots from any thread; flushes once per (cycle, source)
@@ -16,7 +16,7 @@ Why the indirection:
     per ``(band, callsign, cycle)`` require seeing all receivers'
     spots for the same cycle in one place.
   * **Thread-affinity discipline.**  ``sqlite3.Connection`` is bound
-    to the thread that opened it.  Msk144Recorder may eventually
+    to the thread that opened it.  MeteorScatterRecorder may eventually
     parallelise tail processing across sources; centralising the
     writer in this batcher's own thread keeps a single SQLite
     connection irrespective of how many tailers feed it.
@@ -32,7 +32,7 @@ preserves single-source behaviour exactly.
 
 The flush deadline is env-overridable:
 
-  * ``MSK144_CYCLE_DEADLINE_SEC``  default 10.0 s
+  * ``METEOR_SCATTER_CYCLE_DEADLINE_SEC``  default 10.0 s
 
 The deadline is the wall-clock window after the FIRST spot lands in
 a batch before the batch flushes — short enough that latency to
@@ -124,7 +124,7 @@ def _resolve_deadline_sec(env_name: str, default: float) -> float:
         return v
     except (ValueError, TypeError):
         logger.warning(
-            "msk144-recorder: ignoring invalid %s=%r (using default %.1f s)",
+            "meteor-scatter: ignoring invalid %s=%r (using default %.1f s)",
             env_name, raw, default,
         )
         return default
@@ -154,10 +154,10 @@ def _cycle_iso(start: datetime) -> str:
     return start.strftime("%Y-%m-%dT%H:%M:%S.") + f"{start.microsecond // 100_000}Z"
 
 
-class _Msk144CycleBatch:
+class _MeteorScatterCycleBatch:
     """One (mode, cycle_start, rx_source) batch awaiting flush.
 
-    Lives entirely under :class:`Msk144CycleBatcher`'s lock; not thread-
+    Lives entirely under :class:`MeteorScatterCycleBatcher`'s lock; not thread-
     safe on its own.
     """
 
@@ -188,16 +188,16 @@ class _Msk144CycleBatch:
         self.band_counts[band] = self.band_counts.get(band, 0) + 1
 
 
-class Msk144CycleBatcher:
+class MeteorScatterCycleBatcher:
     """Per-cycle, per-source SQLite gateway for MSK144 spots.
 
-    Single instance per :class:`Msk144Recorder` process; all
-    :class:`~msk144_recorder.core.ch_tailer.ChTailer` instances feed it
+    Single instance per :class:`MeteorScatterRecorder` process; all
+    :class:`~meteor_scatter.core.ch_tailer.ChTailer` instances feed it
     via :meth:`add`.
 
     Usage::
 
-        batcher = Msk144CycleBatcher(writer_factory=_default_writer_factory)
+        batcher = MeteorScatterCycleBatcher(writer_factory=_default_writer_factory)
         batcher.start()
         # ... from each tailer thread:
         batcher.add(rows, rx_source="radiod:bee1-status.local",
@@ -215,7 +215,7 @@ class Msk144CycleBatcher:
     ) -> None:
         if cycle_deadline_sec is None:
             cycle_deadline_sec = _resolve_deadline_sec(
-                "MSK144_CYCLE_DEADLINE_SEC", 10.0,
+                "METEOR_SCATTER_CYCLE_DEADLINE_SEC", 10.0,
             )
         self._cycle_deadline_sec = float(cycle_deadline_sec)
         self._writer_factory = writer_factory
@@ -225,7 +225,7 @@ class Msk144CycleBatcher:
         self._lock = threading.Lock()
         self._cond = threading.Condition(self._lock)
         # Batches keyed by ((mode, cycle_iso), rx_source).
-        self._batches: dict[tuple[tuple[str, str], str], _Msk144CycleBatch] = {}
+        self._batches: dict[tuple[tuple[str, str], str], _MeteorScatterCycleBatch] = {}
         self._stop = threading.Event()
         self._wake_callback: Optional[Callable[[], None]] = None
         self._thread: Optional[threading.Thread] = None
@@ -259,7 +259,7 @@ class Msk144CycleBatcher:
     ) -> None:
         """Register (or clear) a wake callback fired after each commit.
 
-        :class:`Msk144Recorder` wires this to the in-process uploader so
+        :class:`MeteorScatterRecorder` wires this to the in-process uploader so
         a cycle commit nudges the uploader to pump immediately
         without waiting for its next poll tick.
         """
@@ -304,7 +304,7 @@ class Msk144CycleBatcher:
                 batch = self._batches.get(key)
                 if batch is None:
                     deadline = now + self._cycle_deadline_sec
-                    batch = _Msk144CycleBatch(
+                    batch = _MeteorScatterCycleBatch(
                         cycle_key=cycle_key,
                         rx_source=rx_source,
                         radiod_id=radiod_id,
@@ -343,7 +343,7 @@ class Msk144CycleBatcher:
             return
 
         while not self._stop.is_set():
-            ready: list[_Msk144CycleBatch] = []
+            ready: list[_MeteorScatterCycleBatch] = []
             with self._cond:
                 while not self._stop.is_set():
                     now = time.monotonic()
@@ -383,7 +383,7 @@ class Msk144CycleBatcher:
         except Exception:
             logger.exception("msk144-cycle-batcher: writer close failed")
 
-    def _flush(self, batch: _Msk144CycleBatch) -> None:
+    def _flush(self, batch: _MeteorScatterCycleBatch) -> None:
         """Write one batch to SQLite + emit the per-rx cycle log line.
 
         Failures are logged and swallowed — one bad batch must not

@@ -1,9 +1,9 @@
-"""Spot-log tailer for msk144-recorder (CONTRACT v0.6 §17).
+"""Spot-log tailer for meteor-scatter (CONTRACT v0.6 §17).
 
 Watches the per-mode spot-log file `<log_dir>/<radiod_id>-msk144.log`,
 parses each new line, and inserts rows into `msk144.spots` via
 `sigmond.hamsci_sink.Writer.from_env()`.  Runs as a daemon thread inside
-the Msk144Recorder process, feeding the cycle batcher → sink → wsprdaemon
+the MeteorScatterRecorder process, feeding the cycle batcher → sink → wsprdaemon
 upload path.
 
 `Writer.from_env()` stages rows into sigmond's local SQLite sink by
@@ -30,44 +30,34 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+from callhash import parse_message
+
 logger = logging.getLogger(__name__)
 
 
 # ── Line parser ─────────────────────────────────────────────────────────────
 
-# Standard callsigns + WSJT-X compound forms:
-#   * standard ITU call:                        K1ABC, AC0G, JA1AAA
-#   * suffix-form compound:                     K1ABC/QRP, K1ABC/MM
-#   * prefix-form compound (region/portable):   VE3/K1ABC, G/K1ABC, KH6/AC0G
-# The regex is intentionally lossy — it's a best-effort filter for
-# the freeform message field; the raw `message` text is always
-# preserved by the caller.
-_CALL_RE = re.compile(
-    r"^"
-    r"(?:[A-Z0-9]{1,3}/)?"               # optional prefix (e.g. "VE3/", "G/")
-    r"[A-Z0-9]{1,3}[0-9][A-Z0-9]{0,4}"    # standard call body (XX[X][D][YY[Y][Y]])
-    r"(?:/[A-Z0-9]{1,4})?"                # optional suffix (e.g. "/QRP", "/MM")
-    r"$"
-)
-# Maidenhead 6-char form has uppercase field+square but lowercase
-# subsquare (per IARU convention).  Tolerate either case for robustness.
-_GRID_RE = re.compile(r"^[A-R]{2}[0-9]{2}(?:[A-Xa-x]{2})?$")
-_REPORT_RE = re.compile(r"^R?([+-]?\d+)$")
-
 # Format-detection regex for the decoder line router.
 _DECODE_LINE_PREFIX = re.compile(r"^\d{4}/\d{2}/\d{2}\s")     # YYYY/MM/DD …
 # MSK144 sync indicator slot.py writes between the numeric head and the
 # freeform message (see core.decoder.normalize_log_line).
-_MSK144_SEP = "&"
+_METEOR_SCATTER_SEP = "&"
 
 
-def parse_decoder_line(line: str, *, mode: Optional[str] = None) -> Optional[dict]:
+def parse_decoder_line(
+    line: str, *, mode: Optional[str] = None, table: Optional[Any] = None,
+) -> Optional[dict]:
     """Detect the normalized MSK144 log-line format and parse.
 
     The per-mode log file (`<radiod_id>-msk144.log`) carries lines that
     ``slot.py`` normalized from jt9's ``decoded.txt`` output (see
     ``core.decoder.normalize_log_line``).  We confirm the leading
     ``YYYY/MM/DD`` structure before parsing.
+
+    ``table`` is the shared :class:`callhash.CallHashTable`; when given,
+    compound-callsign hashes (``<NNNNNNN>`` from jt9 ``-Y``, or
+    already-resolved ``<CALL>`` brackets) are substituted back to
+    plaintext so we don't ship a spot whose call we actually know.
 
     Returns ``None`` on unrecognised structure (header line, blank,
     junk).  Caller should skip silently.
@@ -76,11 +66,13 @@ def parse_decoder_line(line: str, *, mode: Optional[str] = None) -> Optional[dic
     if not stripped:
         return None
     if _DECODE_LINE_PREFIX.match(stripped):
-        return parse_jt9_msk144_line(stripped, mode=mode or "msk144")
+        return parse_jt9_msk144_line(stripped, mode=mode or "msk144", table=table)
     return None
 
 
-def parse_jt9_msk144_line(line: str, *, mode: str) -> Optional[dict]:
+def parse_jt9_msk144_line(
+    line: str, *, mode: str, table: Optional[Any] = None,
+) -> Optional[dict]:
     """Parse one normalized MSK144 log line into a spot row.
 
     Expected shape (emitted by ``core.decoder.normalize_log_line``)::
@@ -90,13 +82,15 @@ def parse_jt9_msk144_line(line: str, *, mode: str) -> Optional[dict]:
     The leading datetime is the RTP-anchored slot UTC; ``<abs_freq_hz>``
     is the true RF frequency (channel dial + jt9 audio offset); the
     value before ``&`` is jt9's SNR in dB (a real calibrated dB, unlike
-    decode_ft8's internal "score").  Returns None on any parse failure —
-    callers should skip silently.
+    decode_ft8's internal "score").  Call/grid extraction and
+    compound-callsign hash substitution are delegated to the shared
+    :func:`callhash.parse_message` so all recorders behave identically.
+    Returns None on any parse failure — callers should skip silently.
     """
     line = line.strip()
-    if not line or _MSK144_SEP not in line:
+    if not line or _METEOR_SCATTER_SEP not in line:
         return None
-    head, _, message = line.partition(_MSK144_SEP)
+    head, _, message = line.partition(_METEOR_SCATTER_SEP)
     parts = head.split()
     if len(parts) < 5:
         return None
@@ -112,8 +106,7 @@ def parse_jt9_msk144_line(line: str, *, mode: str) -> Optional[dict]:
     except (ValueError, IndexError):
         return None
 
-    message = message.strip()
-    parsed = _parse_message(message)
+    parsed = parse_message(message.strip(), table=table)
     return {
         "time":               ts,
         "mode":               mode,
@@ -124,91 +117,12 @@ def parse_jt9_msk144_line(line: str, *, mode: str) -> Optional[dict]:
         "dt":                 dt,
         "frequency":          int(freq),
         "frequency_mhz":      freq / 1_000_000.0,
-        "message":            message,
+        "message":            parsed["message"],   # hash-resolved
         "tx_call":            parsed.get("tx_call", ""),
         "rx_call":            parsed.get("rx_call", ""),
         "grid":               parsed.get("grid", ""),
         "report":             parsed.get("report"),
     }
-
-
-def _parse_message(message: str) -> dict:
-    """Best-effort parse of a decoded MSK144 (WSJT-X) message body.
-
-    Recognized shapes (all approximate; freeform messages return empty):
-      "CQ <tx_call> [<grid>]"           — directed CQ
-      "<rx_call> <tx_call> <grid>"      — first contact w/ grid
-      "<rx_call> <tx_call> [R]<report>" — signal report
-      "<rx_call> <tx_call> [73|RR73]"   — close
-
-    Anything not matching shape returns whatever fields we can pull
-    out, the rest empty.  The raw `message` text is always preserved
-    by the caller.
-    """
-    out: dict[str, Any] = {}
-    tokens = message.split()
-    if not tokens:
-        return out
-
-    # Slice off the first 1–3 tokens for call positions.
-    if tokens[0] == "CQ":
-        # "CQ [target] <tx_call> [grid]" — `target` may be a region
-        # tag like "DX", "EU", "POTA" that isn't a callsign.  Scan
-        # past non-call tokens until we hit the first call-shaped one
-        # (the sender), then look for a grid in the remaining tokens.
-        # Bracketed compound calls (`<K1ABC/QRP>`) are stripped before
-        # the regex match so they land as the tx_call.
-        for i, tok in enumerate(tokens[1:], start=1):
-            candidate = _strip_call_brackets(tok)
-            if candidate is not None and _CALL_RE.match(candidate):
-                out["tx_call"] = candidate
-                for later in tokens[i + 1:]:
-                    if _GRID_RE.match(later):
-                        out["grid"] = later
-                        break
-                break
-    else:
-        # <rx_call> <tx_call> [grid|report|RR73|73]
-        # Compound callsigns may appear bracketed (`<K1ABC/QRP>`) — that's
-        # what a WSJT-X-protocol decoder substitutes when it resolved a
-        # hash from its session table.  Strip the brackets before
-        # matching so the call lands in the row instead of being dropped.
-        rx_candidate = _strip_call_brackets(tokens[0])
-        if rx_candidate is not None and _CALL_RE.match(rx_candidate):
-            out["rx_call"] = rx_candidate
-        if len(tokens) >= 2:
-            tx_candidate = _strip_call_brackets(tokens[1])
-            if tx_candidate is not None and _CALL_RE.match(tx_candidate):
-                out["tx_call"] = tx_candidate
-        if len(tokens) >= 3:
-            tail = tokens[2]
-            if _GRID_RE.match(tail):
-                out["grid"] = tail
-            else:
-                m = _REPORT_RE.match(tail)
-                if m:
-                    try:
-                        out["report"] = int(m.group(1))
-                    except ValueError:
-                        pass
-    return out
-
-
-def _strip_call_brackets(token: str) -> Optional[str]:
-    """Strip surrounding ``<>`` from a token if it matches the WSJT-X
-    bracketed-call shape.
-
-    Returns the stripped call, or the original token if no brackets.
-    Returns ``None`` for the literal "<...>" placeholder (unresolved
-    hash, no recoverable callsign).
-    """
-    if not token:
-        return token
-    if token == "<...>":
-        return None
-    if token.startswith("<") and token.endswith(">") and len(token) > 2:
-        return token[1:-1]
-    return token
 
 
 # ── Tailer ──────────────────────────────────────────────────────────────────
@@ -261,9 +175,9 @@ class ChTailer:
         # for radiod-backed sources.  Defaults to ``radiod:<radiod_id>`` so
         # single-rx deployments and tests get a sensible non-empty value
         # without the caller having to supply one.  Phase A plumbing for
-        # the multi-source pipeline planned in msk144-recorder.
+        # the multi-source pipeline planned in meteor-scatter.
         self._rx_source = rx_source or f"radiod:{radiod_id}"
-        # Optional :class:`Msk144CycleBatcher` reference (Phase C).  When
+        # Optional :class:`MeteorScatterCycleBatcher` reference (Phase C).  When
         # set, rows flow through the batcher (cycle-aligned commit, log
         # line in WSPR-parity format, foundation for cross-rx dedup in
         # Phase D) and the local writer is unused.  When None, this
@@ -431,7 +345,7 @@ class ChTailer:
         # authority state. Sourced from hf-timestd's adjudicated
         # authority.json; degrades to the standalone-fallback marker when
         # hf-timestd is absent/stale. Identical shape across all clients.
-        from msk144_recorder.core.authority_reader import (
+        from meteor_scatter.core.authority_reader import (
             AuthorityReader, standalone_timing_authority,
         )
         try:
@@ -447,7 +361,7 @@ class ChTailer:
 
         rows: list[dict] = []
         for line in text.splitlines():
-            row = parse_decoder_line(line, mode=self._mode)
+            row = parse_decoder_line(line, mode=self._mode, table=self._callhash)
             if row is None:
                 continue
             row["timing_authority"] = timing_authority
@@ -526,7 +440,7 @@ class ChTailer:
         """Construct (or load) the per-radiod CallHashTable.
 
         Returns None when ``callhash`` isn't importable — keeps
-        msk144-recorder runnable on hosts without the callhash library.
+        meteor-scatter runnable on hosts without the callhash library.
         """
         try:
             from callhash import CallHashTable  # type: ignore[import-not-found]

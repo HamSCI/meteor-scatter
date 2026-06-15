@@ -1,4 +1,4 @@
-"""msk144-recorder CLI entry point.
+"""meteor-scatter CLI entry point.
 
 Subcommands:
     inventory   — contract v0.3 JSON inventory
@@ -23,11 +23,11 @@ def _resolve_log_level() -> int:
     """Resolve log level per contract v0.3 §11 precedence.
 
     1. --log-level CLI flag (handled by caller, not here)
-    2. MSK144_RECORDER_LOG_LEVEL env var
+    2. METEOR_SCATTER_LOG_LEVEL env var
     3. CLIENT_LOG_LEVEL env var
     4. Default: INFO
     """
-    for env_key in ("MSK144_RECORDER_LOG_LEVEL", "CLIENT_LOG_LEVEL"):
+    for env_key in ("METEOR_SCATTER_LOG_LEVEL", "CLIENT_LOG_LEVEL"):
         val = os.environ.get(env_key, "").upper().strip()
         if val and hasattr(logging, val):
             return getattr(logging, val)
@@ -48,7 +48,7 @@ def _install_sighup_handler() -> None:
 
 def main():
     # "Quiet" surfaces emit clean stdout (JSON or shell-parseable) and
-    # must not get the "msk144-recorder starting" log line on top.
+    # must not get the "meteor-scatter starting" log line on top.
     # config show / config apply, env show / env apply join inventory /
     # validate / version because the whiptail wizard parses their stdout.
     _contract_quiet = any(
@@ -85,10 +85,10 @@ def main():
                 handler.setLevel(logging.WARNING)
 
     if not _contract_quiet:
-        logging.info("msk144-recorder starting")
+        logging.info("meteor-scatter starting")
 
     parser = argparse.ArgumentParser(
-        prog="msk144-recorder",
+        prog="meteor-scatter",
         description="MSK144 meteor-scatter spot recorder and wsprdaemon.org uploader",
     )
 
@@ -98,7 +98,7 @@ def main():
     def _add_common(sub):
         sub.add_argument(
             "--config", type=Path, default=None,
-            help="Path to msk144-recorder-config.toml",
+            help="Path to meteor-scatter-config.toml",
         )
         sub.add_argument(
             "--log-level", default=None,
@@ -120,7 +120,7 @@ def main():
     sub_daemon = subparsers.add_parser("daemon", help="Run recorder daemon")
     sub_daemon.add_argument(
         "--instance", default=None,
-        help="Reporter-ID instance (loads /etc/msk144-recorder/<instance>.toml "
+        help="Reporter-ID instance (loads /etc/meteor-scatter/<instance>.toml "
              "when present; falls back to shared config otherwise). "
              "See sigmond's MULTI-INSTANCE-ARCHITECTURE.md §6.",
     )
@@ -138,12 +138,12 @@ def main():
     # Configuration interview (CONTRACT-v0.5 §14).
     sub_cfg = subparsers.add_parser(
         "config",
-        help="initialize or edit msk144-recorder configuration",
+        help="initialize or edit meteor-scatter configuration",
     )
     cfg_sub = sub_cfg.add_subparsers(dest="config_command")
 
     sub_init = cfg_sub.add_parser(
-        "init", help="write a fresh msk144-recorder-config.toml from template")
+        "init", help="write a fresh meteor-scatter-config.toml from template")
     sub_init.add_argument("--reconfig", action="store_true",
                           help="overwrite existing config")
     sub_init.add_argument("--non-interactive", action="store_true",
@@ -162,11 +162,11 @@ def main():
     # (scripts/config-wizard.sh) and any other tooling that wants to
     # round-trip the config as JSON through the same validator the
     # daemon uses.
-    from msk144_recorder import configurator as _cfg
+    from meteor_scatter import configurator as _cfg
     _cfg.add_show_apply_subparsers(cfg_sub, common=_add_common)
 
     # Top-level `env show` / `env apply` for per-instance env files at
-    # /etc/msk144-recorder/env/<radiod_id>.env -- start-time knobs the
+    # /etc/meteor-scatter/env/<radiod_id>.env -- start-time knobs the
     # systemd unit's EnvironmentFile= consumes.  No managed keys yet in
     # this deposit-only build; the wsprdaemon.org upload knobs arrive
     # with the upload transport (Phase 3).
@@ -199,18 +199,18 @@ def main():
 
 
 def _handle_env(args):
-    from msk144_recorder import configurator
+    from meteor_scatter import configurator
     sub = getattr(args, "env_command", None)
     if sub == "show":
         sys.exit(configurator.cmd_env_show(args))
     if sub == "apply":
         sys.exit(configurator.cmd_env_apply(args))
-    print("usage: msk144-recorder env {show|apply} --instance <radiod_id>")
+    print("usage: meteor-scatter env {show|apply} --instance <radiod_id>")
     sys.exit(2)
 
 
 def _handle_config(args):
-    from msk144_recorder import configurator
+    from meteor_scatter import configurator
 
     sub = getattr(args, "config_command", None)
     if sub == "init":
@@ -221,16 +221,16 @@ def _handle_config(args):
         sys.exit(configurator.cmd_config_show(args))
     if sub == "apply":
         sys.exit(configurator.cmd_config_apply(args))
-    print("usage: msk144-recorder config {init|edit|show|apply} [...]")
+    print("usage: meteor-scatter config {init|edit|show|apply} [...]")
     sys.exit(2)
 
 
 def _handle_inventory(args):
-    from msk144_recorder.config import DEFAULT_CONFIG_PATH, load_config
-    from msk144_recorder.contract import build_inventory
+    from meteor_scatter.config import DEFAULT_CONFIG_PATH, load_config
+    from meteor_scatter.contract import build_inventory
 
     config_path = args.config or Path(
-        os.environ.get("MSK144_RECORDER_CONFIG", str(DEFAULT_CONFIG_PATH))
+        os.environ.get("METEOR_SCATTER_CONFIG", str(DEFAULT_CONFIG_PATH))
     )
     try:
         config = load_config(config_path)
@@ -246,7 +246,7 @@ def _handle_inventory(args):
         else:
             msg = f"config invalid: {config_path}: {exc}"
         payload = {
-            "client": "msk144-recorder",
+            "client": "meteor-scatter",
             "version": "0.1.0",
             "contract_version": "0.4",
             "config_path": str(config_path),
@@ -267,11 +267,11 @@ def _handle_inventory(args):
 
 
 def _handle_validate(args):
-    from msk144_recorder.config import DEFAULT_CONFIG_PATH, load_config
-    from msk144_recorder.contract import build_validate
+    from meteor_scatter.config import DEFAULT_CONFIG_PATH, load_config
+    from meteor_scatter.contract import build_validate
 
     config_path = args.config or Path(
-        os.environ.get("MSK144_RECORDER_CONFIG", str(DEFAULT_CONFIG_PATH))
+        os.environ.get("METEOR_SCATTER_CONFIG", str(DEFAULT_CONFIG_PATH))
     )
     try:
         config = load_config(config_path)
@@ -305,11 +305,11 @@ def _handle_validate(args):
 
 
 def _handle_version(args):
-    from msk144_recorder import __version__
-    from msk144_recorder.version import GIT_INFO
+    from meteor_scatter import __version__
+    from meteor_scatter.version import GIT_INFO
 
     payload = {
-        "client": "msk144-recorder",
+        "client": "meteor-scatter",
         "version": __version__,
     }
     if GIT_INFO:
@@ -319,9 +319,9 @@ def _handle_version(args):
 
 def _handle_daemon(args):
     _install_sighup_handler()
-    logger = logging.getLogger("msk144_recorder.daemon")
+    logger = logging.getLogger("meteor_scatter.daemon")
 
-    from msk144_recorder.config import (
+    from meteor_scatter.config import (
         DEFAULT_CONFIG_PATH,
         ensure_sources,
         extract_reporter_id,
@@ -331,7 +331,7 @@ def _handle_daemon(args):
         RADIOD_STATUS_PLACEHOLDER,
         is_placeholder_status,
     )
-    from msk144_recorder.core.recorder import Msk144Recorder
+    from meteor_scatter.core.recorder import MeteorScatterRecorder
 
     # Phase-3 config resolution (sigmond's MULTI-INSTANCE-ARCHITECTURE.md
     # §4): prefer per-instance config when --instance is given and the
@@ -361,7 +361,7 @@ def _handle_daemon(args):
     if args.radiod_id is not None:
         # Legacy single-source mode — operator explicitly selected one
         # block; honor it exactly even if the config has more.  Used
-        # by ``msk144-recorder@<radiod-id>.service`` template units.
+        # by ``meteor-scatter@<radiod-id>.service`` template units.
         try:
             radiod_block = resolve_radiod_block(config, args.radiod_id)
         except ValueError:
@@ -387,7 +387,7 @@ def _handle_daemon(args):
     if radiod_block is not None:
         blocks = [radiod_block]
         logger.info(
-            "Starting msk144-recorder daemon for radiod %s "
+            "Starting meteor-scatter daemon for radiod %s "
             "(config=%s, reporter_id=%s, single-source mode)",
             radiod_block.get("status", "<unconfigured>"), config_path,
             reporter_id or "<derived>",
@@ -403,7 +403,7 @@ def _handle_daemon(args):
             )
         blocks = [s["radiod_block"] for s in sources]
         logger.info(
-            "Starting msk144-recorder daemon for %d radiod source(s): %s "
+            "Starting meteor-scatter daemon for %d radiod source(s): %s "
             "(config=%s, reporter_id=%s)",
             len(blocks),
             ", ".join(s["radiod_id"] for s in sources),
@@ -422,19 +422,19 @@ def _handle_daemon(args):
     if any(is_placeholder_status(b.get("status")) for b in blocks):
         logger.error(
             "radiod status address is unconfigured (placeholder %r). Run "
-            "`msk144-recorder config init` (or `sudo smd bringup`) to set the "
+            "`meteor-scatter config init` (or `sudo smd bringup`) to set the "
             "real radiod mDNS status name, then start the service. Exiting "
             "without restart (EX_CONFIG 78).",
             RADIOD_STATUS_PLACEHOLDER,
         )
         sys.exit(78)
 
-    recorder = Msk144Recorder(config, blocks, reporter_id=reporter_id)
+    recorder = MeteorScatterRecorder(config, blocks, reporter_id=reporter_id)
     recorder.run()
 
 
 def _handle_status(args):
-    print("msk144-recorder: not running (Phase 1 not yet implemented)")
+    print("meteor-scatter: not running (Phase 1 not yet implemented)")
     sys.exit(2)
 
 

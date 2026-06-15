@@ -9,14 +9,14 @@ from importlib.metadata import version as pkg_version
 from pathlib import Path
 from typing import Any
 
-from msk144_recorder.config import (
+from meteor_scatter.config import (
     get_freqs,
     get_mode_params,
     load_config,
     resolve_radiod_status,
     is_placeholder_status,
 )
-from msk144_recorder.version import GIT_INFO
+from meteor_scatter.version import GIT_INFO
 
 logger = logging.getLogger(__name__)
 
@@ -27,10 +27,10 @@ def build_inventory(config: dict, config_path: Path) -> dict:
     """Build the inventory --json payload per contract v0.3."""
     station = config.get("station", {})
     paths = config.get("paths", {})
-    log_dir = paths.get("log_dir", "/var/log/msk144-recorder")
+    log_dir = paths.get("log_dir", "/var/log/meteor-scatter")
 
     try:
-        version = pkg_version("msk144-recorder")
+        version = pkg_version("meteor-scatter")
     except Exception:
         version = "0.1.0"
 
@@ -63,9 +63,9 @@ def build_inventory(config: dict, config_path: Path) -> dict:
 
         modes = ["msk144"] if msk144_freqs else []
 
-        spool_path = f"{paths.get('spool_dir', '/var/lib/msk144-recorder')}/{radiod_id}"
+        spool_path = f"{paths.get('spool_dir', '/var/lib/meteor-scatter')}/{radiod_id}"
 
-        # CONTRACT v0.6 §17 — output sinks per instance.  msk144-recorder
+        # CONTRACT v0.6 §17 — output sinks per instance.  meteor-scatter
         # writes spots into sigmond's local SQLite sink (via the
         # in-process tailer) and to per-mode log files; both are file
         # sinks from the contract's point of view.
@@ -100,7 +100,7 @@ def build_inventory(config: dict, config_path: Path) -> dict:
             "provides_timing_calibration": False,
             "chain_delay_ns_applied": chain_delay,
             # CONTRACT v0.7 §18 — runtime-state field for the §18
-            # subscription. msk144-recorder runs in RTP-default mode (PSK
+            # subscription. meteor-scatter runs in RTP-default mode (PSK
             # decoding is ms-tolerant; no hard-deadline scheduling
             # against UTC, so subscribing to a peer authority would
             # not improve spot quality). Reported as null to satisfy
@@ -111,7 +111,7 @@ def build_inventory(config: dict, config_path: Path) -> dict:
         instances.append(instance)
 
         # The process log goes to the systemd journal
-        # (StandardOutput=journal) — see it via `smd log msk144-recorder`.
+        # (StandardOutput=journal) — see it via `smd log meteor-scatter`.
         # log_paths lists only file-based logs (for `smd log --files`).
         instance_logs: dict[str, Any] = {}
         spot_logs: dict[str, str] = {}
@@ -125,7 +125,7 @@ def build_inventory(config: dict, config_path: Path) -> dict:
     log_level_name = logging.getLevelName(effective_level)
 
     payload: dict[str, Any] = {
-        "client": "msk144-recorder",
+        "client": "meteor-scatter",
         "version": version,
         "contract_version": CONTRACT_VERSION,
         "config_path": str(config_path),
@@ -223,7 +223,7 @@ def _collect_issues(config: dict, paths: dict) -> list[dict]:
                 "instance": rid,
                 "message": (
                     "[[radiod]] `status` is the unconfigured placeholder "
-                    f"{block.get('status')!r} — run `msk144-recorder config "
+                    f"{block.get('status')!r} — run `meteor-scatter config "
                     "init` to set the real radiod mDNS status name"
                 ),
             })

@@ -82,7 +82,7 @@ requires-dist = [
 provides-extras = ["dev", "tui", "opus"]
 
 [[package]]
-name = "msk144-recorder"
+name = "meteor-scatter"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [

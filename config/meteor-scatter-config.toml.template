@@ -1,4 +1,4 @@
-# msk144-recorder configuration
+# meteor-scatter configuration
 # See https://github.com/mijahauan/meteor-scatter for documentation.
 #
 # Monitors meteor-scatter activity via WSJT-X's MSK144 protocol, decodes
@@ -8,21 +8,21 @@
 [station]
 callsign    = "YOURCALL"
 grid_square = "AA00aa"
-# Optional PSWS identifiers (not required for msk144-recorder operation):
+# Optional PSWS identifiers (not required for meteor-scatter operation):
 # psws_station_id    = "S000000"
 # psws_instrument_id = "0"
 
 [paths]
-spool_dir   = "/var/lib/msk144-recorder"
-log_dir     = "/var/log/msk144-recorder"
+spool_dir   = "/var/lib/meteor-scatter"
+log_dir     = "/var/log/meteor-scatter"
 keep_wav    = false
 
-# Decoder.  msk144-recorder decodes with WSJT-X's `jt9` in MSK144 mode
+# Decoder.  meteor-scatter decodes with WSJT-X's `jt9` in MSK144 mode
 # (`jt9 --msk144 -p 15`).  The arch-specific binary is bundled in-repo at
 # bin/decoders/jt9-{x86,arm32,arm64}-v27 and resolved automatically; set
 # `decoder_jt9` only to override that resolution with an explicit path.
 decoder_kind = "jt9"
-# decoder_jt9 = "/opt/git/sigmond/msk144-recorder/bin/decoders/jt9-x86-v27"
+# decoder_jt9 = "/opt/git/sigmond/meteor-scatter/bin/decoders/jt9-x86-v27"
 
 # Optional standalone fallback for chain-delay correction (contract v0.3 §8).
 # Overridden by RADIOD_<id>_CHAIN_DELAY_NS in coordination.env when present.
@@ -32,7 +32,7 @@ decoder_kind = "jt9"
 [[radiod]]
 # REQUIRED: the mDNS control/status multicast name of the radiod to
 # consume from.  Discover available radiods on the LAN with:
-#   msk144-recorder config init   (interactive wizard, picks one)
+#   meteor-scatter config init   (interactive wizard, picks one)
 #   ka9q-python list              (raw discovery)
 # Leave the placeholder unchanged to make the daemon refuse to start
 # until the operator runs the configurator.

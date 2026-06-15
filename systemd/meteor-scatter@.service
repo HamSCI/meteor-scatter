@@ -1,5 +1,5 @@
 [Unit]
-Description=msk144-recorder MSK144 meteor-scatter spot recorder for radiod %I
+Description=meteor-scatter MSK144 meteor-scatter spot recorder for radiod %I
 After=network-online.target
 Wants=network-online.target
 StartLimitIntervalSec=300
@@ -7,46 +7,46 @@ StartLimitBurst=10
 
 [Service]
 Type=notify
-User=msk144rec
-Group=msk144rec
+User=meteorscat
+Group=meteorscat
 
 WatchdogSec=120
 NotifyAccess=main
 
 EnvironmentFile=-/etc/sigmond/coordination.env
-EnvironmentFile=-/etc/msk144-recorder/env/%I.env
+EnvironmentFile=-/etc/meteor-scatter/env/%I.env
 
-WorkingDirectory=/opt/git/sigmond/msk144-recorder
+WorkingDirectory=/opt/git/sigmond/meteor-scatter
 
-ExecStartPre=+/bin/mkdir -p /var/lib/msk144-recorder/%I/msk144
-ExecStartPre=+/bin/mkdir -p /var/log/msk144-recorder
-ExecStartPre=+/usr/bin/chown -R msk144rec:msk144rec /var/lib/msk144-recorder/%I
-ExecStartPre=+/usr/bin/chown -R msk144rec:msk144rec /var/log/msk144-recorder
-# /var/lib/hs-uploader is SHARED across HamSCI client users (msk144rec,
+ExecStartPre=+/bin/mkdir -p /var/lib/meteor-scatter/%I/msk144
+ExecStartPre=+/bin/mkdir -p /var/log/meteor-scatter
+ExecStartPre=+/usr/bin/chown -R meteorscat:meteorscat /var/lib/meteor-scatter/%I
+ExecStartPre=+/usr/bin/chown -R meteorscat:meteorscat /var/log/meteor-scatter
+# /var/lib/hs-uploader is SHARED across HamSCI client users (meteorscat,
 # wsprdaemon, ...) — its setgid+group-write shape is owned by
 # tmpfiles.d/hs-uploader.conf (root:sigmond, mode 02775).  Earlier
 # versions of this unit had:
 #
 #   ExecStartPre=+/bin/mkdir -p /var/lib/hs-uploader
-#   ExecStartPre=+/usr/bin/chown msk144rec:msk144rec /var/lib/hs-uploader
+#   ExecStartPre=+/usr/bin/chown meteorscat:meteorscat /var/lib/hs-uploader
 #
 # Both wrong: the first redundant with tmpfiles.d, the second hostile —
-# it re-stomped the dir's group from sigmond to msk144rec on every
-# msk144-recorder restart, locking wsprdaemon-client's wd-upload-hs out
+# it re-stomped the dir's group from sigmond to meteorscat on every
+# meteor-scatter restart, locking wsprdaemon-client's wd-upload-hs out
 # of the shared watermarks.db with "attempt to write a readonly
 # database".  Observed on bee1 2026-05-14.  Removed.
 
 # Phase-3 cutover (sigmond MULTI-INSTANCE-ARCHITECTURE.md):
-# --instance %I picks up /etc/msk144-recorder/%I.toml when the operator
+# --instance %I picks up /etc/meteor-scatter/%I.toml when the operator
 # has run `sudo smd instance migrate` (Phase 8).  Until then, the
 # per-instance config doesn't exist and the daemon falls back to the
-# legacy /etc/msk144-recorder/msk144-recorder-config.toml with a one-line
+# legacy /etc/meteor-scatter/meteor-scatter-config.toml with a one-line
 # deprecation warning.  --radiod-id %I stays for the legacy fallback
 # path (selects the matching [[radiod]] block within the shared
 # config); ignored once per-instance config takes over.
 # Note: --config is intentionally omitted — passing it would force
 # the legacy path always (explicit_path wins in resolve_config_path).
-ExecStart=/opt/git/sigmond/msk144-recorder/venv/bin/python3 -m msk144_recorder.cli daemon \
+ExecStart=/opt/git/sigmond/meteor-scatter/venv/bin/python3 -m meteor_scatter.cli daemon \
     --instance %I \
     --radiod-id %I
 
@@ -65,16 +65,16 @@ RestartPreventExitStatus=78
 RestartSec=5
 
 # Logs go to the systemd journal (sigmond standard) — query with
-# `journalctl -u msk144-recorder@%I` or `smd log msk144-recorder`.
+# `journalctl -u meteor-scatter@%I` or `smd log meteor-scatter`.
 StandardOutput=journal
 StandardError=inherit
-SyslogIdentifier=msk144-recorder@%I
+SyslogIdentifier=meteor-scatter@%I
 
 Nice=5
 # jt9 is a Fortran binary that mmaps its own working buffers per slot
 # (~60 MB RSS each).  MSK144 provisions only two channels (10 m + 6 m),
 # so at most two concurrent jt9 children — far under this ceiling.  1 GB
-# leaves comfortable headroom for those plus the msk144-recorder Python
+# leaves comfortable headroom for those plus the meteor-scatter Python
 # process itself; kept generous so a slow decode never trips the cgroup.
 MemoryMax=1G
 MemorySwapMax=0
@@ -86,8 +86,8 @@ ProtectHome=read-only
 # /var/lib/sigmond holds the shared hamsci_sink queue (sink.db); without
 # it RW, ProtectSystem=strict makes the dir read-only and the psk Writer
 # silently no-ops (every decoded spot dropped before it reaches the queue).
-ReadWritePaths=/var/lib/msk144-recorder /var/log/msk144-recorder /var/lib/hs-uploader /var/lib/sigmond
-ReadOnlyPaths=/etc/msk144-recorder
+ReadWritePaths=/var/lib/meteor-scatter /var/log/meteor-scatter /var/lib/hs-uploader /var/lib/sigmond
+ReadOnlyPaths=/etc/meteor-scatter
 PrivateNetwork=false
 
 CapabilityBoundingSet=CAP_NET_RAW CAP_NET_BIND_SERVICE

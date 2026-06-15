@@ -4,7 +4,7 @@ Uses the hs-uploader library's ``Pipeline`` + ``Uploader`` orchestrator
 and the ``PskReporterTcp`` transport (which owns the TCP socket
 end-to-end — no third-party library involvement).
 
-This is the sole PSK Reporter upload path; ``recorder.Msk144Recorder.
+This is the sole PSK Reporter upload path; ``recorder.MeteorScatterRecorder.
 _start_uploaders`` constructs it unconditionally.
 
 Source selection:
@@ -16,7 +16,7 @@ Source selection:
   instance is safe by construction.
 * No SQLite sink → fall back to ``FileTreeSource`` reading per-slot
   ``.spots.txt`` files the ``SlotWorker`` writes when
-  ``MSK144_USE_HS_UPLOADER=1`` and no sink is present.  Files are deleted
+  ``METEOR_SCATTER_USE_HS_UPLOADER=1`` and no sink is present.  Files are deleted
   on PSKReporter ack (delete_on_ack retention).
 
 Other notes:
@@ -65,11 +65,11 @@ def _cross_rx_dedup_enabled() -> bool:
     have nothing to dedup anyway, so OFF-by-default is also the
     correct default for the common case.
 
-    Set ``MSK144_DIRECT_DEDUP=1`` to opt in on a multi-source host that
+    Set ``METEOR_SCATTER_DIRECT_DEDUP=1`` to opt in on a multi-source host that
     is NOT sharing sink.db with wspr-recorder (or where the IOERR
     has been verified not to occur).
     """
-    raw = (os.environ.get("MSK144_DIRECT_DEDUP") or "0").strip().lower()
+    raw = (os.environ.get("METEOR_SCATTER_DIRECT_DEDUP") or "0").strip().lower()
     return raw in ("1", "true", "yes", "on")
 
 
@@ -174,7 +174,7 @@ class HsPskReporterUploader:
 
         try:
             self._transport = PskReporterTcp(
-                decoding_software=f"msk144-recorder/0.1 (radiod={self._radiod_id})",
+                decoding_software=f"meteor-scatter/0.1 (radiod={self._radiod_id})",
                 antenna=self._antenna,
             )
         except Exception as exc:  # noqa: BLE001
@@ -190,7 +190,7 @@ class HsPskReporterUploader:
             radiod_id=self._radiod_id,
         )
         pipeline = Pipeline(
-            name=f"msk144-recorder-{self._radiod_id}",
+            name=f"meteor-scatter-{self._radiod_id}",
             source=src,
             transport=self._transport,
             watermark=watermark,
@@ -365,7 +365,7 @@ class HsPskReporterUploader:
             # 5) for the via-server delivery path, and by future
             # query-style consumers like Andrew Roland's scrapers.
             # Cleanup is centralized in `smd storage trim --all`
-            # (MSK144_RETENTION_MIN, default 60 min, 30-min floor).
+            # (METEOR_SCATTER_RETENTION_MIN, default 60 min, 30-min floor).
             delete_on_commit=False,
         )
 
@@ -402,7 +402,7 @@ class HsPskReporterUploader:
         else:
             logger.info(
                 "psk-uploader-hs: cross-rx dedup DISABLED "
-                "(MSK144_DIRECT_DEDUP=0); every receiver's row will be "
+                "(METEOR_SCATTER_DIRECT_DEDUP=0); every receiver's row will be "
                 "POSTed to PSKReporter independently",
             )
 
@@ -470,7 +470,7 @@ def _parse_spots_file(path, raw):
     ``frequency``, ``snr_db`` / ``score``, ``mode``, ``grid``,
     ``message``.  Lines that don't parse are skipped silently.
     """
-    from msk144_recorder.core.ch_tailer import parse_decoder_line
+    from meteor_scatter.core.ch_tailer import parse_decoder_line
 
     mode = path.parent.name.lower()
     if mode not in ("ft8", "ft4"):

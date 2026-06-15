@@ -4,16 +4,37 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this project is
 
-**msk144-recorder** is a Python client that receives FT4 and FT8 audio
+**meteor-scatter** is a Python client that receives **MSK144** audio
 streams from one or more ka9q-radio `radiod` instances via `ka9q-python`,
-decodes spots using `decode_ft8`, and uploads them to pskreporter.info.
-It is part of the HamSCI sigmond suite — see
-`/opt/git/sigmond/sigmond/CLAUDE.md` (orchestrator) and
+decodes meteor-scatter pings with **`jt9 --msk144`**, and ships the spots
+(local SQLite sink → hs-uploader). It is part of the HamSCI sigmond
+suite — see `/opt/git/sigmond/sigmond/CLAUDE.md` (orchestrator) and
 `/opt/git/sigmond/CLAUDE.md` (umbrella) for cross-repo context.
 
-This client replaces the ka9q-radio native shell pipeline (`ft8-record`
-+ `ft8-decode` + `pskreporter@`) with a coordinated daemon that
-implements the HamSCI client contract.
+> **Naming.** This project was renamed from **`msk144-recorder`** to
+> **`meteor-scatter`** (canonical). The Python package is `meteor_scatter`,
+> the dist/CLI/unit are `meteor-scatter`, the service user is `meteorscat`,
+> and runtime paths are `/etc|/var/lib|/var/log/meteor-scatter`. The
+> string **`msk144` is the protocol/mode** and is deliberately preserved:
+> the sink namespace `mode="msk144"` → `msk144.spots`, the
+> `[radiod.msk144]` config block, the `jt9 --msk144` flag, `*-msk144.log`,
+> the `/msk144` spool subdir, and the `MSK144_*` protocol-timing constants
+> (`MSK144_TR_PERIOD_SEC`, `MSK144_AUDIO_FREQ_HZ`, `MSK144_SYNC_CHAR`,
+> `MSK144_CADENCE_SEC`, `MSK144_CYCLE_SEC`). Operator env vars moved
+> `MSK144_*` → `METEOR_SCATTER_*`; existing `.env` files, deployed
+> `/etc|/var` paths, and the `meteorscat` user must be migrated on cutover.
+
+### Compound-callsign hash resolution
+
+Unresolved compound calls are recovered via the shared **`callhash`**
+library — the same mechanism `psk-recorder` and `wspr-recorder` use.
+`jt9` is invoked with **`-Y`** ([core/decoder.py](src/meteor_scatter/core/decoder.py))
+so it emits the 22-bit hash as `<NNNNNNN>` instead of the opaque `<...>`;
+`ch_tailer` runs each decoded line through `CallHashTable.observe()` +
+`callhash.parse_message(line, table=...)`, substituting the hash back to
+plaintext from accumulated `<call>` sightings (and refusing to guess on
+ambiguous/colliding slots). A call learned on FT8 or WSPR resolves an
+MSK144 hash and vice-versa.
 
 ## Authors
 
@@ -32,22 +53,22 @@ uv run pytest tests/test_slot.py::SlotWorkerTests::test_X   # one test
 
 # Run-from-source without install:
 PYTHONPATH=src python3 -m pytest tests/ -v
-PYTHONPATH=src python3 -m msk144_recorder inventory --json \
-    --config config/msk144-recorder-config.toml.template
+PYTHONPATH=src python3 -m meteor_scatter inventory --json \
+    --config config/meteor-scatter-config.toml.template
 
 # Production install / upgrade (uses sigmond's shared _ensure_uv helper)
 sudo ./scripts/install.sh           # first-run: user, venv (via uv), config, systemd
 sudo ./scripts/deploy.sh            # ongoing: refresh install + restart instances
 sudo ./scripts/deploy.sh --pull     # git pull then deploy
 
-# CLI surface (current — verify against `msk144-recorder --help`)
-msk144-recorder inventory --json       # per-instance resource view
-msk144-recorder validate --json        # config validation
-msk144-recorder version --json         # version + git sha
-msk144-recorder status                 # health check
-msk144-recorder daemon --config <path> --radiod-id <id>
-msk144-recorder config init|edit|show|apply
-msk144-recorder env                    # read/write /etc/msk144-recorder/env/<instance>.env
+# CLI surface (current — verify against `meteor-scatter --help`)
+meteor-scatter inventory --json       # per-instance resource view
+meteor-scatter validate --json        # config validation
+meteor-scatter version --json         # version + git sha
+meteor-scatter status                 # health check
+meteor-scatter daemon --config <path> --radiod-id <id>
+meteor-scatter config init|edit|show|apply
+meteor-scatter env                    # read/write /etc/meteor-scatter/env/<instance>.env
 ```
 
 The test suite is large (~222 tests collected). When iterating, target
@@ -61,7 +82,7 @@ radiod (ka9q-radio)
   │  RadiodControl.ensure_channel() via ka9q-python
   │  preset=usb, samprate=12000, encoding=s16be
   ▼
-RTP multicast ──► msk144-recorder daemon (one per radiod)
+RTP multicast ──► meteor-scatter daemon (one per radiod)
                     │
                     ├─ per-channel: RingBuffer → SlotWorker
                     │    └─ 15s (FT8) or 7.5s (FT4) cadence
@@ -81,7 +102,7 @@ RTP multicast ──► msk144-recorder daemon (one per radiod)
 Pump cadence is 30 s (`hs_uploader_shim.PUMP_INTERVAL_SEC`), matching
 the FT4/FT8 slot rate and the legacy `PSKREPORTER_INTERVAL`.
 
-Two delivery modes selected by `MSK144_DELIVERY_MODE`:
+Two delivery modes selected by `METEOR_SCATTER_DELIVERY_MODE`:
 
 - **direct** — client POSTs spots directly to pskreporter.info; cross-rx
   dedup applies in the local pipeline.
@@ -92,7 +113,7 @@ Two delivery modes selected by `MSK144_DELIVERY_MODE`:
 ## Project structure
 
 ```
-src/msk144_recorder/
+src/meteor_scatter/
   cli.py              # argparse entry point + stdout-cleanliness guard
   config.py           # TOML loader, radiod block resolution, defaults
   contract.py         # inventory/validate JSON builders (contract v0.7)
@@ -100,7 +121,7 @@ src/msk144_recorder/
                       #   (CONTRACT v0.5 §14); whiptail wizard with stdin fallback
   version.py          # GIT_INFO dict for provenance
   core/
-    recorder.py            # Msk144Recorder: orchestrates one radiod's channels
+    recorder.py            # MeteorScatterRecorder: orchestrates one radiod's channels
     receiver_manager.py    # per-channel receiver lifecycle
     stream.py              # ChannelStream: RadiodStream + ring + SlotWorker
     ring.py                # process-local deque ring buffer
@@ -111,13 +132,13 @@ src/msk144_recorder/
     hs_uploader_shim.py    # HsPskReporterUploader — sole upload path
     ch_tailer.py           # spot-tail path into sigmond's SQLite sink
 tests/                # ~222 collected tests; fixtures in tests/fixtures/
-config/               # msk144-recorder-config.toml.template
+config/               # meteor-scatter-config.toml.template
 docs/                 # ARCHITECTURE.md, CONFIG.md, INSTALL.md, OPERATIONS.md, SIGMOND-CONTRACT.md
 scripts/
   install.sh          # first-run bootstrap (uv-based via sigmond's _ensure_uv)
   deploy.sh           # editable-install refresh + restart
   config-wizard.sh    # whiptail wizard backing configurator.py
-systemd/              # msk144-recorder@.service template unit
+systemd/              # meteor-scatter@.service template unit
 deploy.toml           # sigmond client manifest
 ```
 
@@ -126,10 +147,10 @@ docstring — the codebase is well-documented at module level.
 
 ## Key design decisions
 
-- **Templated systemd unit** — `msk144-recorder@<radiod_id>.service`, one
+- **Templated systemd unit** — `meteor-scatter@<radiod_id>.service`, one
   instance per radiod. Multiple radiods = multiple instances, started
   and stopped independently.
-- **ka9q-python owns multicast destination** — msk144-recorder never
+- **ka9q-python owns multicast destination** — meteor-scatter never
   passes `destination=` to `ensure_channel()`; reads the resolved
   address from `ChannelInfo` for the inventory payload (contract §7).
 - **radiod identified by mDNS hostname** (`bee1-status.local`), never
@@ -141,17 +162,17 @@ docstring — the codebase is well-documented at module level.
   subprocess was removed during the ClickHouse-removal sweep).
 - **WAV spool deleted after decode** — `paths.keep_wav = false`
   default.
-- **PSWS station/instrument IDs are optional** — msk144-recorder doesn't
+- **PSWS station/instrument IDs are optional** — meteor-scatter doesn't
   require them; optional fields exist for operators who also run PSWS.
 
 ## Client contract (v0.7)
 
-msk144-recorder implements the HamSCI client contract at version 0.7
+meteor-scatter implements the HamSCI client contract at version 0.7
 (authoritative source: `/opt/git/sigmond/sigmond/docs/CLIENT-CONTRACT.md`).
 `contract.py` carries `CONTRACT_VERSION = "0.7"`; the `deploy.toml`
 manifest currently declares `0.6` and may lag behind the code.
 
-Sections msk144-recorder implements:
+Sections meteor-scatter implements:
 
 - **§1 / §2 / §3 / §4 / §5** — native TOML config, radiod-id binding,
   self-describe CLI (`inventory`/`validate`/`version` `--json`),
@@ -159,7 +180,7 @@ Sections msk144-recorder implements:
 - **§6 / §7** — uses ka9q-python; data destination read from
   `ChannelInfo`, never client-specified.
 - **§8** — `RADIOD_<id>_CHAIN_DELAY_NS` read from env on startup.
-- **§10 / §11** — `log_paths` in inventory; `MSK144_RECORDER_LOG_LEVEL`
+- **§10 / §11** — `log_paths` in inventory; `METEOR_SCATTER_LOG_LEVEL`
   / `CLIENT_LOG_LEVEL` honored on startup and SIGHUP.
 - **§12** — validate hardening (SSRC uniqueness, paths, etc.).
 - **§13** — control surface (status/config show/apply).
@@ -178,7 +199,7 @@ Sections msk144-recorder implements:
 - **decode_ft8** — from https://github.com/ka9q/ft8_lib. Built and
   installed at `/usr/local/bin/decode_ft8`. Invoked as
   `decode_ft8 -f <freq_mhz> [-4] <wavfile>` (`-4` for FT4 mode).
-- **ka9q-radio radiod** — the RTP source. msk144-recorder talks to it
+- **ka9q-radio radiod** — the RTP source. meteor-scatter talks to it
   exclusively via `ka9q-python`.
 
 The legacy `pskreporter` binary (`ftlib-pskreporter`) is **no longer
@@ -208,8 +229,8 @@ callsign    = "AC0G"
 grid_square = "EM38ww40pk"
 
 [paths]
-spool_dir   = "/var/lib/msk144-recorder"
-log_dir     = "/var/log/msk144-recorder"
+spool_dir   = "/var/lib/meteor-scatter"
+log_dir     = "/var/log/meteor-scatter"
 decoder     = "/usr/local/bin/decode_ft8"
 pskreporter = "/usr/local/bin/pskreporter"   # legacy; see "External dependencies"
 keep_wav    = false
@@ -233,31 +254,31 @@ freqs_hz    = [14080000, 7047500, ...]
 
 ## Production paths
 
-- Config: `/etc/msk144-recorder/msk144-recorder-config.toml` (legacy shared
+- Config: `/etc/meteor-scatter/meteor-scatter-config.toml` (legacy shared
   — fall-through path; deprecated, see Per-instance cutover below)
-- Per-instance config: `/etc/msk144-recorder/<reporter-id>.toml`
+- Per-instance config: `/etc/meteor-scatter/<reporter-id>.toml`
   (preferred path; preferred when `--instance` is passed and file
   exists)
-- Per-instance env: `/etc/msk144-recorder/env/<instance>.env`
-- Spool: `/var/lib/msk144-recorder/<radiod_id>/{ft8,ft4}/YYMMDD_HHMMSS.wav`
-- Spot logs: `/var/log/msk144-recorder/<radiod_id>-{ft8,ft4}.log`
-- Process log: systemd journal (`journalctl -u msk144-recorder@<radiod_id>`)
+- Per-instance env: `/etc/meteor-scatter/env/<instance>.env`
+- Spool: `/var/lib/meteor-scatter/<radiod_id>/{ft8,ft4}/YYMMDD_HHMMSS.wav`
+- Spot logs: `/var/log/meteor-scatter/<radiod_id>-{ft8,ft4}.log`
+- Process log: systemd journal (`journalctl -u meteor-scatter@<radiod_id>`)
 - Uploader state: `/var/lib/hs-uploader/watermarks.db`
 - Sigmond local sink: `/var/lib/sigmond/sink.db`
-- Venv: `/opt/msk144-recorder/venv`
-- Source: `/opt/git/sigmond/msk144-recorder` (editable install)
-- Service user: `msk144rec:msk144rec`
+- Venv: `/opt/meteor-scatter/venv`
+- Source: `/opt/git/sigmond/meteor-scatter` (editable install)
+- Service user: `meteorscat:meteorscat`
 
 ## Per-instance cutover (Phase 3 of sigmond multi-instance architecture)
 
-The systemd unit (`msk144-recorder@%i.service`) passes both
+The systemd unit (`meteor-scatter@%i.service`) passes both
 `--instance %i` and `--radiod-id %i`.  `config.resolve_config_path()`
-prefers `/etc/msk144-recorder/<instance>.toml` when it exists; otherwise
-falls back to the legacy shared `msk144-recorder-config.toml` with a
+prefers `/etc/meteor-scatter/<instance>.toml` when it exists; otherwise
+falls back to the legacy shared `meteor-scatter-config.toml` with a
 one-line `DeprecationWarning`.
 
 For operators currently running radiod-keyed instance names
-(`msk144-recorder@my-rx888.service`), no action is required — the
+(`meteor-scatter@my-rx888.service`), no action is required — the
 daemon continues to read the shared config under the legacy path.
 Migrating to reporter-keyed instance names is a one-shot operation
 via `sudo smd instance migrate` (sigmond Phase 8, not yet shipped).

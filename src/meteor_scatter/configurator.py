@@ -1,4 +1,4 @@
-"""Interactive `config init` and `config edit` for msk144-recorder.
+"""Interactive `config init` and `config edit` for meteor-scatter.
 
 Three operator-facing paths:
 
@@ -13,7 +13,7 @@ Three operator-facing paths:
    Runs when whiptail isn't installed, or when the operator passes
    ``--non-interactive``, or when stdout isn't a TTY.  Implements
    CONTRACT-v0.5 §14: sigmond invokes via ``smd config init|edit
-   msk144-recorder [<instance>]``, passing ``STATION_CALL``,
+   meteor-scatter [<instance>]``, passing ``STATION_CALL``,
    ``STATION_GRID``, ``SIGMOND_INSTANCE``, and
    ``SIGMOND_RADIOD_STATUS`` as advisory defaults.
 
@@ -70,9 +70,9 @@ _HELP_TOML_PATH = Path(__file__).resolve().parent.parent.parent \
 def _find_template() -> Optional[Path]:
     candidates = [
         Path(__file__).resolve().parent.parent.parent
-            / "config" / "msk144-recorder-config.toml.template",
-        Path("/opt/git/sigmond/msk144-recorder/config/msk144-recorder-config.toml.template"),
-        Path("/usr/local/share/msk144-recorder/msk144-recorder-config.toml.template"),
+            / "config" / "meteor-scatter-config.toml.template",
+        Path("/opt/git/sigmond/meteor-scatter/config/meteor-scatter-config.toml.template"),
+        Path("/usr/local/share/meteor-scatter/meteor-scatter-config.toml.template"),
     ]
     for p in candidates:
         if p.exists():
@@ -104,7 +104,7 @@ def cmd_config_edit(args) -> int:
     """Dispatch `config edit` to whiptail wizard or legacy stdin prompts."""
     target = _resolve_target(args)
     if not target.exists():
-        _err(f"{target} does not exist.  Run `msk144-recorder config init` first.")
+        _err(f"{target} does not exist.  Run `meteor-scatter config init` first.")
         return 1
     if not getattr(args, "non_interactive", False) and _wizard_available(args):
         return _exec_wizard(args, "edit")
@@ -122,7 +122,7 @@ def _enable_instance(radiod_id: str) -> None:
     sctl = shutil.which("systemctl")
     if not sctl:
         return
-    unit = f"msk144-recorder@{radiod_id}.service"
+    unit = f"meteor-scatter@{radiod_id}.service"
     try:
         r = subprocess.run([sctl, "enable", unit], capture_output=True, text=True)
     except OSError:
@@ -138,12 +138,12 @@ def _legacy_config_init(args) -> int:
     target = _resolve_target(args)
     if target.exists() and not getattr(args, "reconfig", False):
         _err(f"{target} already exists.  Pass --reconfig to overwrite, or "
-             f"run `msk144-recorder config edit` instead.")
+             f"run `meteor-scatter config edit` instead.")
         return 1
 
     template = _find_template()
     if template is None:
-        _err("msk144-recorder template not found; reinstall or pass --template")
+        _err("meteor-scatter template not found; reinstall or pass --template")
         return 1
 
     # Read template, then patch with operator/env values.
@@ -160,16 +160,16 @@ def _legacy_config_init(args) -> int:
     _info("")
     _info("Next steps:")
     _info(f"  1. Review the [radiod.msk144] freqs_hz array in {target}")
-    _info(f"  2. Validate: msk144-recorder validate --json")
+    _info(f"  2. Validate: meteor-scatter validate --json")
     _info(f"  3. Start:    sudo systemctl start "
-          f"msk144-recorder@{values['radiod_id']}.service  (instance already enabled)")
+          f"meteor-scatter@{values['radiod_id']}.service  (instance already enabled)")
     return 0
 
 
 def _legacy_config_edit(args) -> int:
     target = _resolve_target(args)
     if not target.exists():
-        _err(f"{target} does not exist.  Run `msk144-recorder config init` first.")
+        _err(f"{target} does not exist.  Run `meteor-scatter config init` first.")
         return 1
 
     try:
@@ -582,7 +582,7 @@ def _err(msg: str) -> None:
 # implementation when sigmond isn't installed (older deploys,
 # standalone-host operators who skipped `pip install -e
 # /opt/git/sigmond/sigmond`).  Local fallback keeps the previous
-# behaviour exactly so msk144-recorder still works standalone.
+# behaviour exactly so meteor-scatter still works standalone.
 #
 # Same shape as mag-recorder's adoption (mag-recorder commit 52190e7).
 # ---------------------------------------------------------------------------
@@ -595,7 +595,7 @@ try:
     assert _sigmond_wd.SIGMOND_WIZARD_DISPATCH_API == "1", (
         f"sigmond.wizard_dispatch API "
         f"{_sigmond_wd.SIGMOND_WIZARD_DISPATCH_API!r} != '1' "
-        f"(expected by msk144-recorder)"
+        f"(expected by meteor-scatter)"
     )
     # Locate the shell-side helpers next to the Python module so the
     # wizard script can `source` them regardless of where sigmond
@@ -615,7 +615,7 @@ def _wizard_available(args=None) -> bool:
 
     When sigmond is importable, defers to sigmond.wizard_dispatch.
     is_wizard_available(args, _WIZARD_PATH) so all three clients
-    (mag-recorder, msk144-recorder, wspr-recorder) honour the same gate.
+    (mag-recorder, meteor-scatter, wspr-recorder) honour the same gate.
 
     When sigmond isn't installed, falls back to the original
     standalone check.  Behaviour bit-for-bit identical to the
@@ -643,13 +643,13 @@ def _exec_wizard(args, mode: str) -> int:
     """Hand off to scripts/config-wizard.sh, preserving --config."""
     extra_env: dict = {
         # Tell the wizard where the help sidecar is so it doesn't have
-        # to guess (matters when msk144-recorder is installed editable
-        # from /opt/git/sigmond/msk144-recorder and run from /usr/local/bin).
-        "MSK144_RECORDER_HELP_TOML": str(_HELP_TOML_PATH),
-        # The binary path: wizard shells out to `msk144-recorder config
+        # to guess (matters when meteor-scatter is installed editable
+        # from /opt/git/sigmond/meteor-scatter and run from /usr/local/bin).
+        "METEOR_SCATTER_HELP_TOML": str(_HELP_TOML_PATH),
+        # The binary path: wizard shells out to `meteor-scatter config
         # show/apply` and needs to call the same binary the caller
         # used (so a non-default --config keeps working).
-        "MSK144_RECORDER_CLI": sys.argv[0],
+        "METEOR_SCATTER_CLI": sys.argv[0],
     }
     extra_args = [mode]
     config_arg = getattr(args, "config", None)
@@ -664,8 +664,8 @@ def _exec_wizard(args, mode: str) -> int:
         # (direct-invocation safety net).
         if _SIGMOND_WIZARD_LIB_SH is not None:
             extra_env["SIGMOND_WIZARD_LIB_SH"] = str(_SIGMOND_WIZARD_LIB_SH)
-        # parse=None: msk144-recorder's wizard pipes JSON directly into
-        # `msk144-recorder config apply` itself; we don't parse stdout.
+        # parse=None: meteor-scatter's wizard pipes JSON directly into
+        # `meteor-scatter config apply` itself; we don't parse stdout.
         # Default interactive=True (sigmond.wizard_dispatch 1.x): child
         # inherits the parent's TTY so whiptail can render dialogs.
         result = _sigmond_wd.exec_wizard(
@@ -726,7 +726,7 @@ def cmd_config_show(args) -> int:
     a sensible value even on a freshly-installed host.  Without
     ``--defaults`` only the keys actually present in the file appear.
 
-    Note: msk144-recorder's DEFAULTS only covers [paths] and [processing];
+    Note: meteor-scatter's DEFAULTS only covers [paths] and [processing];
     [station] and [[radiod]] aren't defaulted (operators must fill them
     in).  --defaults still includes the file's [station] / [[radiod]]
     verbatim.
@@ -771,7 +771,7 @@ _APPLY_ALLOWED_SECTIONS = {"station", "paths", "processing", "timing", "radiod"}
 def cmd_config_apply(args) -> int:
     """Read a JSON dict on stdin, validate, atomically write the TOML.
 
-    For msk144-recorder the apply surface is intentionally smaller than
+    For meteor-scatter the apply surface is intentionally smaller than
     the full schema: only [station], [paths], [processing] can be set
     here.  [[radiod]] arrays-of-tables are not modifiable through
     this path -- see _APPLY_ALLOWED_SECTIONS for the rationale.
@@ -886,7 +886,7 @@ def cmd_config_apply(args) -> int:
     # (fresh-install case where the wizard runs against the template).
     if merged.get("radiod"):
         with tempfile.NamedTemporaryFile(
-                mode="w", suffix=".toml", prefix="msk144-recorder-validate.", delete=False) as tmp:
+                mode="w", suffix=".toml", prefix="meteor-scatter-validate.", delete=False) as tmp:
             tmp_path = Path(tmp.name)
         try:
             tmp_path.write_text(_serialize_toml(merged), encoding="utf-8")
@@ -1043,11 +1043,11 @@ def add_show_apply_subparsers(cfg_sub: argparse._SubParsersAction,
 
 
 # ---------------------------------------------------------------------------
-# env show / env apply -- /etc/msk144-recorder/env/<radiod_id>.env
+# env show / env apply -- /etc/meteor-scatter/env/<radiod_id>.env
 # ---------------------------------------------------------------------------
 #
-# msk144-recorder reads its per-instance env file via systemd's
-# EnvironmentFile=-/etc/msk144-recorder/env/%i.env directive (where %i is
+# meteor-scatter reads its per-instance env file via systemd's
+# EnvironmentFile=-/etc/meteor-scatter/env/%i.env directive (where %i is
 # the radiod_id of the [[radiod]] block this instance serves).  The file
 # is where upload-destination knobs will live once the wsprdaemon.org
 # transport is wired (Phase 3); in the current deposit-only build there
@@ -1056,7 +1056,7 @@ def add_show_apply_subparsers(cfg_sub: argparse._SubParsersAction,
 # and sigmond-owned; the wizard reads from it (e.g. for the SQLite sink
 # path) but never writes there.
 
-_ENV_DIR = Path("/etc/msk144-recorder/env")
+_ENV_DIR = Path("/etc/meteor-scatter/env")
 
 # Keys the wizard / `env apply` will write.  Empty in the deposit-only
 # build — the PSKReporter-era delivery knobs were removed with the
@@ -1125,7 +1125,7 @@ def _validate_env_payload(payload: dict) -> Optional[str]:
 
 
 def cmd_env_show(args) -> int:
-    """Emit /etc/msk144-recorder/env/<instance>.env as JSON on stdout."""
+    """Emit /etc/meteor-scatter/env/<instance>.env as JSON on stdout."""
     instance = args.instance
     if not instance:
         print("env show: --instance <radiod_id> is required", file=sys.stderr)
@@ -1193,7 +1193,7 @@ def add_env_subparsers(subparsers: argparse._SubParsersAction,
     env-file machinery is colocated with the TOML show/apply code.
     """
     sub_env = subparsers.add_parser("env",
-        help="read or write /etc/msk144-recorder/env/<instance>.env")
+        help="read or write /etc/meteor-scatter/env/<instance>.env")
     env_sub = sub_env.add_subparsers(dest="env_command")
 
     sub_env_show = env_sub.add_parser("show",

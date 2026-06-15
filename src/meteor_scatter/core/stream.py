@@ -49,10 +49,10 @@ from typing import Optional
 
 import numpy as np
 
-from msk144_recorder.config import MSK144_CADENCE_SEC
-from msk144_recorder.core.authority_reader import AuthorityReader
-from msk144_recorder.core.ring import Ring
-from msk144_recorder.core.slot import SlotWorker
+from meteor_scatter.config import MSK144_CADENCE_SEC
+from meteor_scatter.core.authority_reader import AuthorityReader
+from meteor_scatter.core.ring import Ring
+from meteor_scatter.core.slot import SlotWorker
 
 logger = logging.getLogger(__name__)
 

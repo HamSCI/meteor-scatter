@@ -1,4 +1,4 @@
-"""Tests for msk144_recorder.core.decoder — jt9 MSK144 helpers.
+"""Tests for meteor_scatter.core.decoder — jt9 MSK144 helpers.
 
 Covers binary resolution, the jt9 argv, decoded.txt line parsing, and
 the normalization that turns a jt9 decode into a per-mode-log line.
@@ -15,7 +15,7 @@ SRC_DIR = REPO_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from msk144_recorder.core import decoder
+from meteor_scatter.core import decoder
 
 
 class TestResolveBinary(unittest.TestCase):
@@ -45,6 +45,9 @@ class TestBuildCmd(unittest.TestCase):
     def test_cmd_has_msk144_and_period(self):
         cmd = decoder.build_jt9_cmd("jt9", Path("/wd"), Path("/wd/slot.wav"))
         self.assertIn("--msk144", cmd)
+        # -Y emits unresolved compound-call hashes as <NNNNNNN> so the
+        # callhash table can resolve them (parity with wspr's FST4W path).
+        self.assertIn("-Y", cmd)
         # -p 15 (T/R period), -f 1500 (audio offset), -a workdir, wav last.
         self.assertEqual(cmd[cmd.index("-p") + 1], "15")
         self.assertEqual(cmd[cmd.index("-f") + 1], "1500")
@@ -99,7 +102,7 @@ class TestNormalizeLogLine(unittest.TestCase):
         self.assertTrue(line.endswith("\n"))
 
     def test_roundtrips_through_ch_tailer(self):
-        from msk144_recorder.core.ch_tailer import parse_decoder_line
+        from meteor_scatter.core.ch_tailer import parse_decoder_line
         d = decoder.parse_decoded_txt_line("183015  -3 -0.2 1623 &  K1ABC W9XYZ EN52")
         line = decoder.normalize_log_line(d, time.gmtime(1778157296), 50_260_000)
         row = parse_decoder_line(line)

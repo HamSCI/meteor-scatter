@@ -1,4 +1,4 @@
-"""Tests for msk144_recorder.core.cycle_batcher.
+"""Tests for meteor_scatter.core.cycle_batcher.
 
 Covers per-(cycle, rx_source) batching of decoded MSK144 spots before
 they hit the SQLite sink.  Exercises:
@@ -26,8 +26,8 @@ SRC_DIR = REPO_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from msk144_recorder.core.cycle_batcher import (
-    Msk144CycleBatcher,
+from meteor_scatter.core.cycle_batcher import (
+    MeteorScatterCycleBatcher,
     _cycle_start,
     _cycle_iso,
     _freq_to_band_name,
@@ -113,7 +113,7 @@ class BatcherFlushTests(unittest.TestCase):
     def _make(self, *, cycle_deadline=0.05):
         """Spin up a batcher with a tight deadline so tests fire quickly."""
         writer = FakeWriter()
-        batcher = Msk144CycleBatcher(
+        batcher = MeteorScatterCycleBatcher(
             writer_factory=lambda batch_rows: writer,
             cycle_deadline_sec=cycle_deadline,
         )
@@ -188,7 +188,7 @@ class BatcherFlushTests(unittest.TestCase):
         import re
         batcher, writer = self._make()
         with self.assertLogs(
-            "msk144_recorder.core.cycle_batcher", level=logging.INFO,
+            "meteor_scatter.core.cycle_batcher", level=logging.INFO,
         ) as cm:
             try:
                 batcher.add(
@@ -238,7 +238,7 @@ class SuperviseTests(unittest.TestCase):
     not silently stop its subsystem."""
 
     def test_restarts_loop_until_clean_return(self):
-        from msk144_recorder.core import cycle_batcher as cb
+        from meteor_scatter.core import cycle_batcher as cb
         calls = {"n": 0}
 
         def fn():
@@ -252,7 +252,7 @@ class SuperviseTests(unittest.TestCase):
         self.assertEqual(calls["n"], 3)
 
     def test_no_restart_once_not_alive(self):
-        from msk144_recorder.core import cycle_batcher as cb
+        from meteor_scatter.core import cycle_batcher as cb
         calls = {"n": 0}
         alive = {"v": True}
 
@@ -266,7 +266,7 @@ class SuperviseTests(unittest.TestCase):
         self.assertEqual(calls["n"], 1)
 
     def test_clean_loop_runs_once(self):
-        from msk144_recorder.core import cycle_batcher as cb
+        from meteor_scatter.core import cycle_batcher as cb
         calls = {"n": 0}
         cb._supervise("t", lambda: True, lambda: calls.__setitem__("n", calls["n"] + 1))
         self.assertEqual(calls["n"], 1)
