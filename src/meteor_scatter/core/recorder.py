@@ -40,11 +40,12 @@ if TYPE_CHECKING:  # pragma: no cover
     from meteor_scatter.core.stream import ChannelSink
 from meteor_scatter.core.ch_tailer import ChTailer, _default_writer_factory
 from meteor_scatter.core.cycle_batcher import MeteorScatterCycleBatcher
-# Upload transport is DEFERRED (Phase 3): spots are deposited into
-# sigmond's local SQLite sink (msk144.spots) by the ChTailer →
-# MeteorScatterCycleBatcher path; the wsprdaemon.org SFTP uploader is not wired
-# yet (pending confirmation that wsprdaemon ingests MSK144 spots — see
-# docs/MSK144-RECORDER-DESIGN.md §5.3).  No uploader is imported here.
+# MSK144 spots are attempted QSOs → uploaded to PSKReporter the same way
+# FT4/FT8 are (psk-recorder's HsPskReporterUploader).  The ChTailer
+# deposits rows into sigmond's local SQLite sink (msk144.spots); the
+# uploader pumps that queue to pskreporter.info via the hs-uploader
+# PskReporterTcp transport (which maps mode "msk144" → "MSK144").
+from meteor_scatter.core.hs_uploader_shim import HsPskReporterUploader
 from meteor_scatter.core.receiver_manager import (
     ReceiverManager,
     _resolve_encoding,  # re-exported for any external importer
@@ -246,9 +247,9 @@ class MeteorScatterRecorder:
             for block in self._radiod_blocks
         ]
 
-        # Upload transport deferred (Phase 3) — no uploaders are started;
-        # spots are deposited to the SQLite sink by the ChTailer path.
-        # List kept (empty) so _shutdown's stop loop stays uniform.
+        # Populated by _start_uploaders() with the HsPskReporterUploader
+        # (unless METEOR_SCATTER_DELIVERY_MODE disables it).  _shutdown
+        # iterates this to stop each uploader cleanly.
         self._uploaders: list = []
         self._running = False
 
@@ -554,20 +555,56 @@ class MeteorScatterRecorder:
         return None
 
     def _start_uploaders(self) -> None:
-        # DEFERRED (Phase 3).  No upload transport runs yet: decoded MSK144
-        # spots are deposited into sigmond's local SQLite sink
-        # (``msk144.spots``) by the ChTailer → MeteorScatterCycleBatcher path and
-        # accumulate there.  The wsprdaemon.org SFTP uploader
-        # (wspr-recorder's WsprdaemonTarSftp transport) is wired only once
-        # wsprdaemon's MSK144 ingest is confirmed — see
-        # docs/MSK144-RECORDER-DESIGN.md §5.3.  Until then this is a no-op
-        # so the recorder runs end-to-end (record → decode → DB) without
-        # publishing anything externally.
-        logger.info(
-            "upload transport deferred — MSK144 spots accumulate in the "
-            "local SQLite sink (msk144.spots); no external upload until the "
-            "wsprdaemon.org transport is wired (Phase 3)",
+        # MSK144 spots are attempted QSOs → published to PSKReporter the
+        # same way FT4/FT8 are.  A single HsPskReporterUploader thread
+        # pumps the ``msk144.spots`` SQLite queue (filled by the ChTailer
+        # → MeteorScatterCycleBatcher path) to pskreporter.info via the
+        # hs-uploader PskReporterTcp transport (mode "msk144" → "MSK144").
+        # The SqliteSource is selected when sigmond's sink is present;
+        # else it falls back to the per-slot spool FileTreeSource.
+        #
+        # METEOR_SCATTER_DELIVERY_MODE controls this: "direct" (default)
+        # runs the uploader; "deposit"/"off"/"none" leaves spots in the
+        # sink only (record → decode → DB, no external publish).
+        mode = (
+            os.environ.get("METEOR_SCATTER_DELIVERY_MODE") or "direct"
+        ).strip().lower()
+        if mode in ("deposit", "off", "none", "disabled"):
+            logger.info(
+                "METEOR_SCATTER_DELIVERY_MODE=%s — PSKReporter uploader "
+                "disabled; MSK144 spots deposit to the msk144.spots sink only",
+                mode,
+            )
+            return
+
+        callsign = self._station.get("callsign", "")
+        grid = self._station.get("grid_square", "")
+        if not callsign or not grid:
+            logger.warning(
+                "callsign/grid not configured — PSKReporter uploader "
+                "will not start",
+            )
+            return
+        antenna = self._station.get("antenna", "")
+        # Default to TCP (delivery-confirmed, no silent drops under load).
+        use_tcp = bool(self._paths.get("pskreporter_tcp", True))
+        spool_dir = Path(self._paths.get(
+            "spool_dir", "/var/lib/meteor-scatter",
+        )) / self._radiod_id
+
+        uploader = HsPskReporterUploader(
+            callsign=callsign,
+            grid_square=grid,
+            antenna=antenna,
+            radiod_id=self._radiod_id,
+            use_tcp=use_tcp,
+            spool_dir=spool_dir,
         )
+        logger.info(
+            "uploader: %s (MSK144 → PSKReporter)", type(uploader).__name__,
+        )
+        uploader.start()
+        self._uploaders.append(uploader)
 
     def _notify_ready(self) -> None:
         """Send sd_notify READY=1 if running under systemd."""

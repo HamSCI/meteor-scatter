@@ -94,7 +94,13 @@ def _short_rx(rx_source: str) -> str:
 
 
 class HsPskReporterUploader:
-    """Pump psk.spots → PSK Reporter via hs-uploader's Pipeline."""
+    """Pump msk144.spots → PSK Reporter via hs-uploader's Pipeline.
+
+    MSK144 spots are attempted QSOs, so they reach PSKReporter the same
+    way FT4/FT8 do (this is the psk-recorder uploader adapted to read the
+    ``msk144.spots`` sink namespace).  The hs-uploader ``PskReporterTcp``
+    transport maps the row mode ``msk144`` → ``MSK144``.
+    """
 
     def __init__(
         self,
@@ -126,12 +132,10 @@ class HsPskReporterUploader:
         # (see _on_batch_outcome below).  Works uniformly across
         # SqliteSource / FileTreeSource — replaces the spool-dir delta
         # logic that only worked for the file path.
-        self._uploaded_ft8 = 0
-        self._uploaded_ft4 = 0
-        # Per-pump tallies; reset to 0 at the top of each pump cycle
-        # so the journal log line reports just this cycle's deltas.
-        self._pump_ft8 = 0
-        self._pump_ft4 = 0
+        self._uploaded_msk144 = 0
+        # Per-pump tally; reset to 0 at the top of each pump cycle
+        # so the journal log line reports just this cycle's delta.
+        self._pump_msk144 = 0
         # Phase D Cut 1: per-rx_source per-pump ship counts, populated
         # from the on_batch_outcome callback so the per-pump log line
         # can break "shipped ft8=N ft4=M" down by which receiver each
@@ -146,7 +150,7 @@ class HsPskReporterUploader:
     def start(self) -> None:
         if not self._callsign or not self._grid_square:
             logger.warning(
-                "psk-uploader-hs: callsign / grid not configured; skipping",
+                "ms-uploader-hs: callsign / grid not configured; skipping",
             )
             return
         if not self._use_tcp:
@@ -154,7 +158,7 @@ class HsPskReporterUploader:
             # exposes (per the design plan's "TCP-default per spec").
             # Keep going on TCP — log so operators notice the override.
             logger.info(
-                "psk-uploader-hs: pskreporter_tcp=False is ignored; "
+                "ms-uploader-hs: pskreporter_tcp=False is ignored; "
                 "PskReporterTcp transport is TCP-only",
             )
 
@@ -165,7 +169,7 @@ class HsPskReporterUploader:
                 SqliteWatermarkStore, default_path,
             )
         except ImportError as exc:
-            logger.warning("psk-uploader-hs disabled: %s", exc)
+            logger.warning("ms-uploader-hs disabled: %s", exc)
             return
 
         src = self._build_source()
@@ -179,7 +183,7 @@ class HsPskReporterUploader:
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning(
-                "psk-uploader-hs: PskReporterTcp construct failed: %s", exc,
+                "ms-uploader-hs: PskReporterTcp construct failed: %s", exc,
             )
             return
 
@@ -211,11 +215,11 @@ class HsPskReporterUploader:
 
         self._stop.clear()
         self._thread = threading.Thread(
-            target=self._run, daemon=True, name="psk-uploader-hs",
+            target=self._run, daemon=True, name="ms-uploader-hs",
         )
         self._thread.start()
         logger.info(
-            "psk-uploader-hs started: %s/%s (radiod_id=%s, pump=%ds)",
+            "ms-uploader-hs started: %s/%s (radiod_id=%s, pump=%ds)",
             self._callsign, self._grid_square, self._radiod_id,
             int(PUMP_INTERVAL_SEC),
         )
@@ -231,7 +235,7 @@ class HsPskReporterUploader:
                 pass
         if self._pump_count:
             logger.info(
-                "psk-uploader-hs stopped after %d pump(s), %d with work",
+                "ms-uploader-hs stopped after %d pump(s), %d with work",
                 self._pump_count, self._work_count,
             )
 
@@ -248,35 +252,32 @@ class HsPskReporterUploader:
                 # Reset per-pump per-mode tallies; the on_batch_outcome
                 # callback fires inside pump() and fills these in.
                 # Works across SqliteSource / file sources uniformly.
-                self._pump_ft8 = 0
-                self._pump_ft4 = 0
+                self._pump_msk144 = 0
                 self._pump_by_rx = {}
 
                 if self._uploader is not None and self._uploader.pump():
                     self._work_count += 1
-                    self._uploaded_ft8 += self._pump_ft8
-                    self._uploaded_ft4 += self._pump_ft4
+                    self._uploaded_msk144 += self._pump_msk144
                     # Render per-rx breakdown when more than one source
                     # contributed this pump — keeps single-rx logs
                     # unchanged, surfaces multi-rx visibility when it
-                    # matters.  Operators reading ``smd watch psk`` see
-                    # which receivers are actually contributing spots.
+                    # matters.  Operators reading ``smd watch meteor-scatter``
+                    # see which receivers are actually contributing spots.
                     rx_part = ""
                     if len(self._pump_by_rx) > 1:
                         rx_part = " by_rx=[" + " ".join(
-                            f"{_short_rx(rx)}:{counts.get('ft8', 0)}/{counts.get('ft4', 0)}"
+                            f"{_short_rx(rx)}:{counts.get('msk144', 0)}"
                             for rx, counts in sorted(self._pump_by_rx.items())
                         ) + "]"
                     logger.info(
-                        "psk-uploader-hs: shipped ft8=%d ft4=%d "
-                        "(total ft8=%d ft4=%d, work=%d)%s",
-                        self._pump_ft8, self._pump_ft4,
-                        self._uploaded_ft8, self._uploaded_ft4,
+                        "ms-uploader-hs: shipped msk144=%d "
+                        "(total msk144=%d, work=%d)%s",
+                        self._pump_msk144, self._uploaded_msk144,
                         self._work_count, rx_part,
                     )
             except Exception:
                 logger.exception(
-                    "psk-uploader-hs: unhandled error in pump loop",
+                    "ms-uploader-hs: unhandled error in pump loop",
                 )
 
     def _on_batch_outcome(self, pipeline, batch, outcome) -> None:
@@ -294,15 +295,13 @@ class HsPskReporterUploader:
         for r in batch.records:
             cols = r.columns or {}
             mode = str(cols.get("mode", "")).lower()
-            if mode == "ft8":
-                self._pump_ft8 += 1
-            elif mode == "ft4":
-                self._pump_ft4 += 1
+            if mode == "msk144":
+                self._pump_msk144 += 1
             # Phase D Cut 1: per-rx tally so the pump-log line can
             # surface per-receiver contribution in multi-source mode.
             rx = str(cols.get("rx_source", "")) or "?"
-            by = self._pump_by_rx.setdefault(rx, {"ft8": 0, "ft4": 0})
-            if mode in ("ft8", "ft4"):
+            by = self._pump_by_rx.setdefault(rx, {"msk144": 0})
+            if mode == "msk144":
                 by[mode] = by.get(mode, 0) + 1
 
     # ----- source selection -----
@@ -322,7 +321,7 @@ class HsPskReporterUploader:
         project the columns ``PskReporterTcp`` needs.
         """
         sqlite_kwargs = dict(
-            database="psk",
+            database="msk144",
             table="spots",
             accepted_schema_versions=[2],
             select_columns=[
@@ -351,7 +350,7 @@ class HsPskReporterUploader:
                 # is unaffected: the queue only contains one radiod's
                 # rows anyway.
                 ("tx_call", "!=", ""),
-                ("mode", "IN", ["ft8", "ft4"]),
+                ("mode", "IN", ["msk144"]),
             ],
             # First-pump-after-fresh-watermark anchor: start at
             # wallclock-now, not epoch.  Without this, an empty
@@ -396,12 +395,12 @@ class HsPskReporterUploader:
             )
             sqlite_kwargs["dedup_order_by_desc"] = "score"
             logger.info(
-                "psk-uploader-hs: cross-rx dedup ENABLED "
+                "ms-uploader-hs: cross-rx dedup ENABLED "
                 "(partition by time+tx_call+freq_bucket, order by score)",
             )
         else:
             logger.info(
-                "psk-uploader-hs: cross-rx dedup DISABLED "
+                "ms-uploader-hs: cross-rx dedup DISABLED "
                 "(METEOR_SCATTER_DIRECT_DEDUP=0); every receiver's row will be "
                 "POSTed to PSKReporter independently",
             )
@@ -415,19 +414,19 @@ class HsPskReporterUploader:
             sqlite_src = SqliteSource.from_env(**sqlite_kwargs)
             if sqlite_src.health() != HEALTH_NOOP:
                 logger.info(
-                    "psk-uploader-hs: using SqliteSource (sink at %s)",
+                    "ms-uploader-hs: using SqliteSource (sink at %s)",
                     sqlite_src._config.path if sqlite_src._config else "?",
                 )
                 return sqlite_src
         except Exception as exc:  # noqa: BLE001
             logger.warning(
-                "psk-uploader-hs: SqliteSource construct failed: %s",
+                "ms-uploader-hs: SqliteSource construct failed: %s",
                 exc,
             )
 
         if self._spool_dir is None:
             logger.warning(
-                "psk-uploader-hs: no SQLite sink and no spool_dir "
+                "ms-uploader-hs: no SQLite sink and no spool_dir "
                 "— no source available",
             )
             return None
@@ -436,7 +435,7 @@ class HsPskReporterUploader:
             from hs_uploader.sources.files import FileSpec, FileTreeSource
         except ImportError as exc:
             logger.warning(
-                "psk-uploader-hs: FileTreeSource import failed: %s", exc,
+                "ms-uploader-hs: FileTreeSource import failed: %s", exc,
             )
             return None
 
@@ -446,11 +445,11 @@ class HsPskReporterUploader:
                 FileSpec(
                     pattern="*.spots.txt",
                     parser=_parse_spots_file,
-                    table="psk.spots",
+                    table="msk144.spots",
                 ),
             ],
             retention=FileTreeSource.DELETE_ON_ACK,
-            source_id=f"psk-spool:{self._radiod_id}",
+            source_id=f"ms-spool:{self._radiod_id}",
         )
 
 
@@ -473,7 +472,7 @@ def _parse_spots_file(path, raw):
     from meteor_scatter.core.ch_tailer import parse_decoder_line
 
     mode = path.parent.name.lower()
-    if mode not in ("ft8", "ft4"):
+    if mode != "msk144":
         mode = None
 
     try:
