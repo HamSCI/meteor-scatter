@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "meteor-scatter"
-version = "0.1.0"
+version = "0.4.0"
 description = "MSK144 meteor-scatter spot recorder and wsprdaemon.org uploader for ka9q-radio"
 requires-python = ">=3.10"
 license = {text = "MIT"}

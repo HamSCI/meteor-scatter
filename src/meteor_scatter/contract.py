@@ -32,7 +32,7 @@ def build_inventory(config: dict, config_path: Path) -> dict:
     try:
         version = pkg_version("meteor-scatter")
     except Exception:
-        version = "0.1.0"
+        version = "0.4.0"
 
     radiod_blocks = config.get("radiod", [])
     if isinstance(radiod_blocks, dict):
