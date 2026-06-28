@@ -5,7 +5,7 @@ thread of its own for RTP reception — it receives sample batches via
 the `on_samples` callback that a shared `MultiStream` dispatches after
 demultiplexing by SSRC.
 
-Timing model (RTP-referenced ka9q.SlotClock — anchor-once + re-validate).
+Timing model (RTP-referenced ka9q.SlotClock — anchor ONCE, defer to RTP).
 
   1. On the FIRST on_samples batch we anchor a shared ``ka9q.SlotClock``
      off radiod's GPS-true RTP timestamp (``quality.last_rtp_timestamp``)
@@ -21,12 +21,10 @@ Timing model (RTP-referenced ka9q.SlotClock — anchor-once + re-validate).
      labelled with, which removes the long-standing "decodes=N/N but
      spots=0" drift surface entirely.
 
-  3. A throttled (~1 Hz) ``_maybe_revalidate`` recomputes the next
-     boundary's true UTC from the StatusListener-refreshed ``channel_info``
-     and compares it to the SlotClock's grid projection; a sustained gross
-     divergence means the INITIAL anchor was wrong (stale GPS snapshot /
-     wrap mis-disambiguation) — re-anchor off the fresh reference and flush
-     the ring (whose offsets are anchor-relative).
+  3. We re-anchor ONLY on a genuine stream restart (``on_stream_restored``,
+     fired by MultiStream after a real radiod outage).  We deliberately do
+     NOT second-guess the grid by re-reading radiod's status feed per batch:
+     the grid is RTP-driven and drift-immune, so we defer to radiod's RTP.
 
 Per METROLOGY.md §4.5 RTP-reference invariant, the recorder does not
 diagnose timing health on its own — that is hf-timestd's job.  If the
@@ -39,9 +37,7 @@ client-side wall-clock comparison.
 from __future__ import annotations
 
 import logging
-import os
 import threading
-import time
 from pathlib import Path
 from typing import Optional
 
@@ -76,9 +72,6 @@ class ChannelSink:
         authority_reader: Optional[AuthorityReader] = None,
         decoder_kind: str = "jt9",
         spool_spots: bool = False,
-        radiod_id: str = "",
-        fault_reporter=None,
-        fault_threshold_sec: float = 0.35,
     ):
         self._mode = mode
         self._frequency_hz = frequency_hz
@@ -122,35 +115,17 @@ class ChannelSink:
 
         self._total_delivered: int = 0
         # ChannelInfo carrying gps_time / rtp_timesnap / chain_delay — used to
-        # map RTP→UTC at anchor time and, kept fresh by the StatusListener, to
-        # RTP-reference re-validate the SlotClock anchor (_maybe_revalidate).
+        # map RTP→UTC ONCE at anchor time (and again only at a genuine stream
+        # restart, via on_stream_restored).  We do NOT re-read it per batch to
+        # second-guess the grid: SlotClock's grid is RTP-driven and drift-
+        # immune, so we defer to radiod's RTP and never re-anchor on status
+        # jitter.
         self._channel_info = None
         # Diagnostic: how the current SlotClock anchor was derived.
         self._anchor_source: str = ""        # "rtp_to_utc[+authority]" | "wallclock_fallback"
-        # ChannelInfo.anchor_epoch observed when the anchor was set (diag).
-        self._anchor_epoch: Optional[int] = None
         # §18 authority reader — supplies the dynamic RTP→UTC offset at anchor
-        # time (0.0 standalone); also inspectable by diags.
+        # time (0.0 standalone).
         self._reader = authority_reader if authority_reader is not None else AuthorityReader()
-        # RTP-reference re-validation state (see _maybe_revalidate).  The
-        # StatusListener keeps self._channel_info's (gps_time, rtp_timesnap)
-        # fresh, so re-anchoring lands on radiod's current GPS reference.
-        self._radiod_id = radiod_id
-        self._fault_reporter = fault_reporter
-        # Threshold + persistence env-tunable.  0.35 s sits above the ~0.28 s
-        # post-restart anchor-settling and the ~0.45 s status-anchor jitter
-        # cadence; requiring _fault_after consecutive ~1 Hz over-threshold
-        # checks filters a lone jitter spike while still catching a sustained
-        # real divergence.
-        self._fault_threshold_sec = float(
-            os.environ.get("METEOR_SCATTER_TIMING_FAULT_SEC",
-                           str(fault_threshold_sec)))
-        self._fault_after = max(1, int(
-            os.environ.get("METEOR_SCATTER_TIMING_FAULT_AFTER", "2")))
-        self._fault_strikes = 0
-        self._last_check_mono = 0.0
-        self._last_reanchor_mono = 0.0
-        self._reanchor_cooldown_sec = 30.0
 
     @property
     def mode(self) -> str:
@@ -203,7 +178,7 @@ class ChannelSink:
         the long-standing "decodes=N/N but spots=0" drift (the audio handed
         to the decoder now always lines up with the RTP grid point its WAV
         is labelled with).  The slot harvesting + WAV write happen on the
-        SlotWorker thread; here we only anchor, push, and re-validate.
+        SlotWorker thread; here we only anchor (once) and push.
         """
         n = len(samples)
         if n == 0:
@@ -228,8 +203,6 @@ class ChannelSink:
                     return
                 self._clock.anchor(batch_first_rtp, anchor_utc)
                 self._anchor_source = source
-                self._anchor_epoch = getattr(
-                    self._channel_info, "anchor_epoch", None)
                 logger.info(
                     "%s %d Hz: SlotClock anchored via %s",
                     self._mode.upper(), self._frequency_hz, source,
@@ -239,62 +212,6 @@ class ChannelSink:
         self._ring.push(samples, start_off)
         self._latest_rtp = last_rtp
         self._total_delivered += n
-
-        self._maybe_revalidate()
-
-    def _maybe_revalidate(self) -> None:
-        """Throttled RTP-reference anchor check (~1 Hz).
-
-        Recompute the next boundary's true UTC from the StatusListener-
-        refreshed ``channel_info`` via ``rtp_to_utc`` and compare to the
-        SlotClock's grid projection.  A sustained gross divergence means the
-        INITIAL anchor was wrong (stale GPS snapshot / wrap mis-
-        disambiguation) — re-anchor off the fresh reference and flush the
-        ring (whose offsets are anchor-relative).  Cheap and rare; the grid
-        itself never drifts, so this only ever fires on a bad anchor.
-        """
-        if self._channel_info is None:
-            return
-        mono = time.monotonic()
-        if mono - self._last_check_mono < 1.0:
-            return
-        self._last_check_mono = mono
-        try:
-            from ka9q import rtp_to_utc
-            with self._clock_lock:
-                div = self._clock.divergence_sec(
-                    self._channel_info, rtp_to_utc)
-        except Exception as exc:  # noqa: BLE001 — detection must not crash audio
-            logger.debug("%s %d Hz: divergence check raised: %s",
-                         self._mode.upper(), self._frequency_hz, exc)
-            return
-        if div is None:
-            return
-        if abs(div) <= self._fault_threshold_sec:
-            self._fault_strikes = 0
-            return
-        self._fault_strikes += 1
-        if self._fault_strikes < self._fault_after:
-            return
-        self._fault_strikes = 0
-        if mono - self._last_reanchor_mono < self._reanchor_cooldown_sec:
-            return
-        self._last_reanchor_mono = mono
-        if self._fault_reporter is not None:
-            try:
-                self._fault_reporter.report(
-                    self._mode, self._frequency_hz, div)
-            except Exception:  # noqa: BLE001
-                pass
-        logger.error(
-            "TIMING FAULT rx=%s mode=%s %d Hz: SlotClock anchor diverged "
-            "%+.3fs from radiod GPS reference — re-anchoring + flushing ring",
-            self._radiod_id, self._mode, self._frequency_hz, div,
-        )
-        with self._clock_lock:
-            self._clock.reset()
-        self._ring.clear()
-        self._latest_rtp = None
 
     def _anchor_utc_for(self, rtp_ts: int, n: int):
         """Return (utc, source) mapping ``rtp_ts`` -> UTC via the suite-shared

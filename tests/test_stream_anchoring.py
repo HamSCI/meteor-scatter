@@ -77,7 +77,7 @@ class TestRtpAnchoring(unittest.TestCase):
             n = 2400
             q = _FakeQuality(last_rtp_timestamp=1_000_000 + n)
             with mock.patch("ka9q.rtp_to_utc", return_value=1_700_000_500.0):
-                with mock.patch("meteor_scatter.core.stream.time.time",
+                with mock.patch("hamsci_dsp.timing.time.time",
                                 return_value=1_700_000_500.0):
                     with mock.patch.object(sink._ring, "push") as push:
                         sink.on_samples(np.zeros(n, dtype=np.float32), q)
@@ -125,7 +125,7 @@ class TestRtpAnchoring(unittest.TestCase):
             n = 2400
             q = _FakeQuality(last_rtp_timestamp=1_000_000 + n)
             with mock.patch("ka9q.rtp_to_utc", return_value=1_700_000_500.0):
-                with mock.patch("meteor_scatter.core.stream.time.time",
+                with mock.patch("hamsci_dsp.timing.time.time",
                                 return_value=1_700_000_500.0):
                     with mock.patch.object(sink._ring, "push"):
                         sink.on_samples(np.zeros(n, dtype=np.float32), q)
@@ -145,14 +145,14 @@ class TestRtpAnchoring(unittest.TestCase):
             r0 = 4_000_000
             with mock.patch("ka9q.rtp_to_utc", return_value=2000.0):
                 with mock.patch.object(sink._ring, "push") as push:
-                    with mock.patch("meteor_scatter.core.stream.time.time",
+                    with mock.patch("hamsci_dsp.timing.time.time",
                                     return_value=1000.0):
                         sink.on_samples(
                             np.zeros(n1, dtype=np.float32),
                             _FakeQuality(last_rtp_timestamp=r0 + n1))
                     # absurd wall-clock jump; RTP contiguous (next batch ends
                     # n2 later) -> offset must be exactly n1, unaffected.
-                    with mock.patch("meteor_scatter.core.stream.time.time",
+                    with mock.patch("hamsci_dsp.timing.time.time",
                                     return_value=999_999_999.0):
                         sink.on_samples(
                             np.zeros(n2, dtype=np.float32),
