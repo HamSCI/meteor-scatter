@@ -345,7 +345,7 @@ class ChTailer:
         # authority state. Sourced from hf-timestd's adjudicated
         # authority.json; degrades to the standalone-fallback marker when
         # hf-timestd is absent/stale. Identical shape across all clients.
-        from meteor_scatter.core.authority_reader import (
+        from hamsci_dsp.timing import (
             AuthorityReader, standalone_timing_authority,
         )
         try:

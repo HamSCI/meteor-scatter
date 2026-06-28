@@ -8,7 +8,7 @@ resolution-markers = [
 
 [[package]]
 name = "callhash"
-version = "1.0.0"
+version = "1.1.0"
 source = { editable = "../callhash" }
 
 [package.metadata]
@@ -35,6 +35,36 @@ sdist = { url = "https://files.pythonhosted.org/packages/50/79/66800aadf48771f6b
 wheels = [
     { url = "https://files.pythonhosted.org/packages/8a/0e/97c33bf5009bdbac74fd2beace167cab3f978feb69cc36f1ef79360d6c4e/exceptiongroup-1.3.1-py3-none-any.whl", hash = "sha256:a7a39a3bd276781e98394987d3a5701d0c4edffb633bb7a5144577f82c773598", size = 16740, upload-time = "2025-11-21T23:01:53.443Z" },
 ]
+
+[[package]]
+name = "geographiclib"
+version = "2.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/df/78/4892343230a9d29faa1364564e525307a37e54ad776ea62c12129dbba704/geographiclib-2.1.tar.gz", hash = "sha256:6a6545e6262d0ed3522e13c515713718797e37ed8c672c31ad7b249f372ef108", size = 37004, upload-time = "2025-08-21T21:34:26Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/31/b3/802576f2ea5dcb48501bb162e4c7b7b3ca5654a42b2c968ef98a797a4c79/geographiclib-2.1-py3-none-any.whl", hash = "sha256:e2a873b9b9e7fc38721ad73d5f4e6c9ed140d428a339970f505c07056997d40b", size = 40740, upload-time = "2025-08-21T21:34:24.955Z" },
+]
+
+[[package]]
+name = "hamsci-dsp"
+version = "0.3.0"
+source = { editable = "../hamsci-dsp" }
+dependencies = [
+    { name = "geographiclib" },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "apexpy", marker = "extra == 'geomag'", specifier = ">=2.0" },
+    { name = "geographiclib", specifier = ">=2.0" },
+    { name = "iri2020", marker = "extra == 'iono'", specifier = ">=1.7" },
+    { name = "numpy", specifier = ">=1.24.0" },
+    { name = "pylap", marker = "extra == 'raytrace'" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
+]
+provides-extras = ["dev", "iono", "raytrace", "geomag"]
 
 [[package]]
 name = "hs-uploader"
@@ -64,7 +94,7 @@ wheels = [
 
 [[package]]
 name = "ka9q-python"
-version = "3.16.1"
+version = "3.18.0"
 source = { editable = "../ka9q-python" }
 dependencies = [
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
@@ -83,10 +113,11 @@ provides-extras = ["dev", "tui", "opus"]
 
 [[package]]
 name = "meteor-scatter"
-version = "0.1.0"
+version = "0.4.0"
 source = { editable = "." }
 dependencies = [
     { name = "callhash" },
+    { name = "hamsci-dsp" },
     { name = "hs-uploader" },
     { name = "ka9q-python" },
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
@@ -102,6 +133,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "callhash", editable = "../callhash" },
+    { name = "hamsci-dsp", editable = "../hamsci-dsp" },
     { name = "hs-uploader", editable = "../hs-uploader" },
     { name = "ka9q-python", editable = "../ka9q-python" },
     { name = "numpy", specifier = ">=1.24.0" },

@@ -190,7 +190,7 @@ class ReceiverManager:
         # Surface the Fusion governor identity at startup so the journal
         # record makes multi-radiod attribution clear.
         try:
-            from meteor_scatter.core.authority_reader import AuthorityReader
+            from hamsci_dsp.timing import AuthorityReader
             snap = AuthorityReader().read()
             governor = snap.governor_radiod if snap is not None else None
         except Exception as e:
@@ -407,7 +407,7 @@ class ReceiverManager:
         )
         # Hand the freshly-discovered ChannelInfo (with GPS_TIME /
         # RTP_TIMESNAP / chain_delay_correction populated) to the sink
-        # so on_samples can use rtp_to_wallclock as the UTC source.
+        # so on_samples can use rtp_to_utc as the UTC anchor source.
         sink.set_channel_info(ch_info)
         if lifetime_arg is not None:
             self._lifetime_entries.append((multi, ch_info.ssrc))

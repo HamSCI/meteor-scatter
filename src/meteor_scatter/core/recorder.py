@@ -441,7 +441,7 @@ class MeteorScatterRecorder:
         Capturing per-channel anchors when chrony is settled means
         the ChannelInfo's (gps_time, rtp_timesnap) pair inherits an
         ε_0 ≈ 0 system_time.  Sample-clock arithmetic in
-        ka9q.rtp_to_wallclock then projects slot start times to
+        ka9q.rtp_to_utc then projects slot start times to
         true UTC ± ε_now (chrony's current discipline error), not
         ε_now − ε_0 with ε_0 frozen at the wrong value.
 

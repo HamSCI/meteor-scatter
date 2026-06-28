@@ -1,17 +1,16 @@
-"""Tests for ChannelSink's anchor-once model.
+"""Tests for ChannelSink's RTP-referenced SlotClock anchoring.
 
-The recorder reads wall clock ONCE on the first batch (via
-rtp_to_wallclock when channel_info is available, else time.time()
-fallback), saves an `_anchor_utc` + `_anchor_total_samples` pair,
-and projects every subsequent batch's UTC by pure sample-count
-arithmetic.  No further wall-clock reads are used for timing.
-
-These tests use a fake Ring + SlotWorker via monkey-patching so we
-can drive on_samples() in isolation.
+The recorder anchors a ka9q.SlotClock ONCE, off radiod's GPS-true RTP
+timestamp (quality.last_rtp_timestamp) mapped to UTC via rtp_to_utc (or a
+time.time() fallback when channel_info is absent).  Every batch is then
+pushed to the ring keyed by its absolute RTP **sample offset** — never by a
+delivered-sample-count UTC projection.  This is the fix for the
+"decodes=N/N but spots=0" drift: ring offsets and slot boundaries are both
+anchor-relative integer sample counts derived from the true RTP timestamp,
+so the audio always lines up with the grid point its WAV is labelled with.
 """
 
 import shutil
-import sys
 import tempfile
 import unittest
 from dataclasses import dataclass
@@ -22,36 +21,39 @@ import numpy as np
 
 from meteor_scatter.core.stream import ChannelSink
 
+SR = 12000
+
 
 @dataclass
 class _FakeQuality:
     """Stand-in for MultiStream's StreamQuality."""
+    last_rtp_timestamp: int = 0
     total_samples_delivered: int = 0
     first_rtp_timestamp: int = 0
 
 
 class _FakeChannelInfo:
-    """Stand-in for ka9q's ChannelInfo carrying gps_time / rtp_timesnap."""
     def __init__(self, gps_time=1462564880_000_000_000, rtp_timesnap=1):
         self.gps_time = gps_time
         self.rtp_timesnap = rtp_timesnap
+        self.anchor_epoch = 0
 
 
-def _make_sink() -> ChannelSink:
+class _NoAuthority:
+    """AuthorityReader stub with no usable offset (standalone timing)."""
+    def read(self):
+        return None
+
+
+def _make_sink(authority_reader=None) -> ChannelSink:
     tmp = Path(tempfile.mkdtemp())
     (tmp / "msk144").mkdir(exist_ok=True)
     log_fd = open(tmp / "log", "ab")
     sink = ChannelSink(
-        mode="msk144",
-        frequency_hz=28_130_000,
-        sample_rate=12_000,
-        preset="usb",
-        encoding=0,
-        spool_dir=tmp,
-        log_fd=log_fd,
-        decoder_path="/nonexistent",
-        keep_wav=False,
-        authority_reader=None,
+        mode="msk144", frequency_hz=28_130_000, sample_rate=SR,
+        preset="usb", encoding=0, spool_dir=tmp, log_fd=log_fd,
+        decoder_path="/nonexistent", keep_wav=False,
+        authority_reader=authority_reader,
     )
     sink._tmp_dir = tmp  # type: ignore[attr-defined]
     return sink
@@ -63,164 +65,121 @@ def _cleanup_sink(sink) -> None:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-class TestAnchorOnce(unittest.TestCase):
+class TestRtpAnchoring(unittest.TestCase):
 
-    def test_first_batch_anchors_from_wall_clock_fallback(self):
-        """No channel_info → time.time()-based anchor on first batch."""
-        sink = _make_sink()
-        try:
-            samples = np.zeros(2400, dtype=np.float32)   # 200 ms at 12 kHz
-            q = _FakeQuality(total_samples_delivered=2400, first_rtp_timestamp=0)
-            with mock.patch("meteor_scatter.core.stream.time.time",
-                            return_value=1_700_000_000.0):
-                with mock.patch.object(sink._ring, "push") as push:
-                    sink.on_samples(samples, q)
-            self.assertEqual(sink._anchor_source, "wallclock_fallback")
-            # First-sample UTC = wall_now - n/sample_rate = 1700000000.0 - 0.2
-            self.assertAlmostEqual(sink._anchor_utc, 1_699_999_999.8, places=3)
-            self.assertEqual(sink._anchor_total_samples, 0)
-            # Ring received the projected UTC for the first sample.
-            push.assert_called_once()
-            self.assertAlmostEqual(push.call_args[0][1],
-                                   1_699_999_999.8, places=3)
-        finally:
-            _cleanup_sink(sink)
-
-    def test_first_batch_anchors_via_rtp_to_wallclock_when_available(self):
-        """channel_info set + rtp_to_wallclock returns a number → use it."""
-        sink = _make_sink()
+    def test_first_batch_anchors_via_rtp_to_utc(self):
+        # Inject a reader with no usable offset so the standalone anchor source
+        # is asserted deterministically, regardless of whether this host
+        # happens to have a live /run/hf-timestd/authority.json.
+        sink = _make_sink(authority_reader=_NoAuthority())
         sink.set_channel_info(_FakeChannelInfo())
         try:
-            samples = np.zeros(2400, dtype=np.float32)
-            q = _FakeQuality(total_samples_delivered=2400,
-                             first_rtp_timestamp=1_000_000)
-            with mock.patch("ka9q.rtp_to_wallclock",
-                            return_value=1_700_000_500.0):
+            n = 2400
+            q = _FakeQuality(last_rtp_timestamp=1_000_000 + n)
+            with mock.patch("ka9q.rtp_to_utc", return_value=1_700_000_500.0):
                 with mock.patch("meteor_scatter.core.stream.time.time",
                                 return_value=1_700_000_500.0):
-                    with mock.patch.object(sink._ring, "push"):
-                        sink.on_samples(samples, q)
-            self.assertEqual(sink._anchor_source, "rtp_to_wallclock")
-            self.assertAlmostEqual(sink._anchor_utc, 1_700_000_500.0, places=3)
+                    with mock.patch.object(sink._ring, "push") as push:
+                        sink.on_samples(np.zeros(n, dtype=np.float32), q)
+            self.assertTrue(sink._clock.anchored)
+            self.assertEqual(sink._anchor_source, "rtp_to_utc")
+            self.assertAlmostEqual(sink._clock._anchor_utc, 1_700_000_500.0, places=3)
+            # First batch's first sample is the anchor -> ring offset 0.
+            push.assert_called_once()
+            self.assertEqual(push.call_args[0][1], 0)
+            # latest_rtp recorded = last packet ts.
+            self.assertEqual(sink._latest_rtp, 1_000_000 + n)
         finally:
             _cleanup_sink(sink)
 
-    def test_authority_offset_is_applied_to_anchor(self):
-        """A usable hf-timestd §18 offset is ADDED to the rtp_to_wallclock
-        anchor (S2), and the source records that it was applied."""
+    def test_wall_clock_fallback_without_channel_info(self):
+        # _NoAuthority + no channel_info -> the shared helper's bare wall-clock
+        # fallback.  Mock the helper's own clock (hamsci_dsp.timing.time.time).
+        sink = _make_sink(authority_reader=_NoAuthority())   # no channel_info set
+        try:
+            n = 2400          # 200 ms
+            q = _FakeQuality(last_rtp_timestamp=500_000 + n)
+            with mock.patch("hamsci_dsp.timing.time.time",
+                            return_value=1_700_000_000.0):
+                with mock.patch.object(sink._ring, "push"):
+                    sink.on_samples(np.zeros(n, dtype=np.float32), q)
+            self.assertEqual(sink._anchor_source, "wallclock_fallback")
+            # anchor utc = now - n/sr
+            self.assertAlmostEqual(sink._clock._anchor_utc,
+                                   1_700_000_000.0 - n / SR, places=3)
+        finally:
+            _cleanup_sink(sink)
+
+    def test_authority_offset_applied_to_anchor(self):
         class _FakeSnap:
             offset_usable = True
-            offset_seconds = 0.004250  # 4.25 ms
+            offset_seconds = 0.004250
+            rtp_to_utc_offset_ns = 4_250_000
         class _FakeReader:
             def read(self):
                 return _FakeSnap()
 
-        tmp = Path(tempfile.mkdtemp())
-        (tmp / "msk144").mkdir(exist_ok=True)
-        log_fd = open(tmp / "log", "ab")
-        sink = ChannelSink(
-            mode="msk144", frequency_hz=28_130_000, sample_rate=12_000,
-            preset="usb", encoding=0, spool_dir=tmp, log_fd=log_fd,
-            decoder_path="/nonexistent", keep_wav=False,
-            authority_reader=_FakeReader(),
-        )
+        sink = _make_sink(authority_reader=_FakeReader())
         sink.set_channel_info(_FakeChannelInfo())
         try:
-            samples = np.zeros(2400, dtype=np.float32)
-            q = _FakeQuality(total_samples_delivered=2400,
-                             first_rtp_timestamp=1_000_000)
-            with mock.patch("ka9q.rtp_to_wallclock",
-                            return_value=1_700_000_500.0):
+            n = 2400
+            q = _FakeQuality(last_rtp_timestamp=1_000_000 + n)
+            with mock.patch("ka9q.rtp_to_utc", return_value=1_700_000_500.0):
                 with mock.patch("meteor_scatter.core.stream.time.time",
                                 return_value=1_700_000_500.0):
                     with mock.patch.object(sink._ring, "push"):
-                        sink.on_samples(samples, q)
-            self.assertEqual(sink._anchor_source, "rtp_to_wallclock+authority")
-            self.assertAlmostEqual(sink._anchor_utc, 1_700_000_500.00425, places=4)
-        finally:
-            shutil.rmtree(tmp, ignore_errors=True)
-
-    def test_subsequent_batches_use_pure_sample_count_projection(self):
-        """Second batch's UTC = anchor + delivered_since_anchor/sample_rate.
-
-        Critically: time.time() is moved during the test, but the
-        projection IGNORES that — confirms zero wall-clock dependency
-        after anchor."""
-        sink = _make_sink()
-        try:
-            sr = sink.sample_rate
-            with mock.patch.object(sink._ring, "push") as push:
-                # Anchor at wall_now=1000.0 with 1 sec of samples.
-                with mock.patch("meteor_scatter.core.stream.time.time",
-                                return_value=1000.0):
-                    sink.on_samples(
-                        np.zeros(sr, dtype=np.float32),
-                        _FakeQuality(total_samples_delivered=sr),
-                    )
-
-                # Now ANY value of time.time() must not affect the
-                # projection — push another 0.5 s of samples and verify
-                # we see anchor + 1.0 s (since anchor accounted for the
-                # FIRST 1 s and the new batch's first sample is at +1.0 s).
-                with mock.patch("meteor_scatter.core.stream.time.time",
-                                return_value=999_999_999.0):  # absurd
-                    sink.on_samples(
-                        np.zeros(sr // 2, dtype=np.float32),
-                        _FakeQuality(total_samples_delivered=sr + sr // 2),
-                    )
-
-            # First push: utc_of_first = anchor (1000.0 - 1.0) = 999.0
-            self.assertAlmostEqual(push.call_args_list[0][0][1], 999.0, places=4)
-            # Second push: anchor + (sr / sr) = anchor + 1.0 = 1000.0
-            self.assertAlmostEqual(push.call_args_list[1][0][1], 1000.0, places=4)
+                        sink.on_samples(np.zeros(n, dtype=np.float32), q)
+            self.assertEqual(sink._anchor_source, "rtp_to_utc+authority")
+            self.assertAlmostEqual(sink._clock._anchor_utc,
+                                   1_700_000_500.00425, places=4)
         finally:
             _cleanup_sink(sink)
 
-    def test_on_stream_restored_re_anchors(self):
-        """Stream-gap recovery MUST re-anchor.  This inverts the older
-        contract — see commit 502573c (``fix(stream): re-anchor on
-        stream_restored after radiod outage``) and the design comment
-        in stream.py::on_stream_restored.
-
-        Background: MultiStream only fires on_stream_restored after a
-        real radiod restart (15 s + ensure_channel success), and on
-        such a restart MultiStream resets ``quality =
-        StreamQuality()`` so ``total_samples_delivered`` restarts at 0.
-        Holding the pre-restart anchor across that discontinuity drives
-        ``delta_samples`` wildly negative, every projected UTC misses
-        every slot window, and decodes silently fall to 0/0 forever
-        (observed B4-100 2026-05-14, every band silent 3 h).
-
-        Correct behavior after restore:
-          - ``_anchor_utc`` cleared to None
-          - ``_anchor_total_samples`` cleared to 0
-          - ``_channel_info`` REPLACED by the new snapshot
-        The next ``on_samples`` call re-anchors from a fresh wall-clock
-        correlation.
-        """
+    def test_ring_offsets_are_rtp_derived_not_wall_clock(self):
+        """Offsets come from the true RTP timestamp; moving time.time()
+        between batches must NOT shift them (the drift-immunity property)."""
         sink = _make_sink()
-        sink.set_channel_info(_FakeChannelInfo(rtp_timesnap=1))
+        sink.set_channel_info(_FakeChannelInfo())
         try:
-            sr = sink.sample_rate
-            with mock.patch.object(sink._ring, "push"):
-                with mock.patch("ka9q.rtp_to_wallclock",
-                                return_value=2000.0):
+            n1, n2 = SR, SR // 2     # 1.0 s then 0.5 s, contiguous in RTP
+            r0 = 4_000_000
+            with mock.patch("ka9q.rtp_to_utc", return_value=2000.0):
+                with mock.patch.object(sink._ring, "push") as push:
+                    with mock.patch("meteor_scatter.core.stream.time.time",
+                                    return_value=1000.0):
+                        sink.on_samples(
+                            np.zeros(n1, dtype=np.float32),
+                            _FakeQuality(last_rtp_timestamp=r0 + n1))
+                    # absurd wall-clock jump; RTP contiguous (next batch ends
+                    # n2 later) -> offset must be exactly n1, unaffected.
+                    with mock.patch("meteor_scatter.core.stream.time.time",
+                                    return_value=999_999_999.0):
+                        sink.on_samples(
+                            np.zeros(n2, dtype=np.float32),
+                            _FakeQuality(last_rtp_timestamp=r0 + n1 + n2))
+            self.assertEqual(push.call_args_list[0][0][1], 0)
+            self.assertEqual(push.call_args_list[1][0][1], n1)
+        finally:
+            _cleanup_sink(sink)
+
+    def test_on_stream_restored_resets_clock_and_ring(self):
+        sink = _make_sink()
+        sink.set_channel_info(_FakeChannelInfo())
+        try:
+            with mock.patch("ka9q.rtp_to_utc", return_value=2000.0):
+                with mock.patch.object(sink._ring, "push"):
                     sink.on_samples(
-                        np.zeros(sr, dtype=np.float32),
-                        _FakeQuality(total_samples_delivered=sr,
-                                     first_rtp_timestamp=1),
-                    )
-            # First batch anchored normally.
-            self.assertEqual(sink._anchor_utc, 2000.0)
-            self.assertIsNotNone(sink._anchor_source)
+                        np.zeros(SR, dtype=np.float32),
+                        _FakeQuality(last_rtp_timestamp=1 + SR))
+            self.assertTrue(sink._clock.anchored)
 
             new_info = _FakeChannelInfo(rtp_timesnap=999)
-            sink.on_stream_restored(new_info)
-
-            # Anchor MUST be cleared so the next batch re-anchors.
-            self.assertIsNone(sink._anchor_utc)
-            self.assertEqual(sink._anchor_total_samples, 0)
-            # channel_info MUST be replaced by the new snapshot.
+            with mock.patch.object(sink._ring, "clear") as clear:
+                sink.on_stream_restored(new_info)
+            # clock dropped, ring flushed, latest_rtp cleared, info replaced.
+            self.assertFalse(sink._clock.anchored)
+            clear.assert_called_once()
+            self.assertIsNone(sink._latest_rtp)
             self.assertIs(sink._channel_info, new_info)
         finally:
             _cleanup_sink(sink)
