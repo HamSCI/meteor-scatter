@@ -1,7 +1,8 @@
 """Spot-log tailer for meteor-scatter (CONTRACT v0.6 §17).
 
 Watches the per-mode spot-log file `<log_dir>/<radiod_id>-msk144.log`,
-parses each new line, and inserts rows into `msk144.spots` via
+parses each new line, and inserts rows into the shared `psk.spots`
+(per-row `mode="msk144"`) via
 `sigmond.hamsci_sink.Writer.from_env()`.  Runs as a daemon thread inside
 the MeteorScatterRecorder process, feeding the cycle batcher → sink → wsprdaemon
 upload path.
@@ -457,22 +458,28 @@ class ChTailer:
 
 
 def _default_writer_factory(batch_rows: int):
-    """Lazy-import `sigmond.hamsci_sink.Writer` for `msk144.spots`.
+    """Lazy-import `sigmond.hamsci_sink.Writer` for the shared ``psk.spots``.
 
     Sigmond core stays stdlib-only; this import only happens when a
     tailer actually starts.  `Writer.from_env()` resolves the backend
     (sigmond's SQLite sink by default); the writer is itself a no-op
     when the sink path is unwritable.
 
-    ``mode="msk144"`` namespaces rows into the ``msk144.spots`` target
-    (the hamsci_sink mode is a free-form namespace — wspr/psk/noise
-    coexist the same way).  ``schema_version=2`` is the tag every staged
-    row carries; the `hs-uploader` reader filters on it, so the producer
-    must tag rows at the matching version or the source silently treats
-    them as stale-schema and yields nothing.
+    ``mode="psk"`` namespaces rows into the shared ``psk.spots`` target —
+    the SAME table psk-recorder's FT8/FT4 spots use.  MSK144 is NOT a
+    separate namespace; it is just another value of the per-row ``mode``
+    column (still ``"msk144"``, set by the parser), exactly the way the
+    wsprdaemon server (wd30) unifies ft8/ft4/msk144 in one ``psk.spots``
+    and one PSKReporter forwarder.  This lets a single psk→PSKReporter
+    pipeline (mode IN ft8/ft4/msk144) deliver our spots and lets the
+    cycle-tar (``WsprCycleSource include_psk`` reads ``psk.spots``) carry
+    them on the server-forwarded path for free.  ``schema_version=2`` is
+    the tag every staged row carries; the `hs-uploader` reader filters on
+    it, so the producer must tag rows at the matching version or the
+    source silently treats them as stale-schema and yields nothing.
     """
     from sigmond.hamsci_sink import Writer
     return Writer.from_env(
-        table="spots", mode="msk144",
+        table="spots", mode="psk",
         schema_version=2, batch_rows=batch_rows,
     )

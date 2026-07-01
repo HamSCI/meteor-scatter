@@ -94,12 +94,16 @@ def _short_rx(rx_source: str) -> str:
 
 
 class HsPskReporterUploader:
-    """Pump msk144.spots → PSK Reporter via hs-uploader's Pipeline.
+    """Pump our MSK144 rows in ``psk.spots`` → PSK Reporter via a Pipeline.
 
     MSK144 spots are attempted QSOs, so they reach PSKReporter the same
-    way FT4/FT8 do (this is the psk-recorder uploader adapted to read the
-    ``msk144.spots`` sink namespace).  The hs-uploader ``PskReporterTcp``
-    transport maps the row mode ``msk144`` → ``MSK144``.
+    way FT4/FT8 do — they share the ``psk.spots`` namespace and are
+    distinguished by the per-row ``mode`` (``msk144``), which
+    ``PskReporterTcp`` maps to ``MSK144``.  This source filters to
+    ``mode IN ["msk144"]`` so it delivers only our rows (never psk's
+    ft8/ft4).  Standalone/no-daemon fallback: in the sigmond single-host
+    model meteor is sink-only and the daemon's unified psk pipeline
+    delivers instead.
     """
 
     def __init__(
@@ -321,7 +325,14 @@ class HsPskReporterUploader:
         project the columns ``PskReporterTcp`` needs.
         """
         sqlite_kwargs = dict(
-            database="msk144",
+            # Shared psk.spots namespace (ch_tailer writes mode="psk").  The
+            # ``mode IN ["msk144"]`` filter below scopes this direct-delivery
+            # source to OUR rows only, so it never double-posts psk-recorder's
+            # ft8/ft4.  In the sigmond single-host model meteor runs sink-only
+            # (METEOR_SCATTER_DELIVERY_MODE=deposit) and the daemon's unified
+            # psk→PSKReporter pipeline delivers; this direct path is the
+            # standalone/no-daemon fallback.
+            database="psk",
             table="spots",
             accepted_schema_versions=[2],
             select_columns=[
