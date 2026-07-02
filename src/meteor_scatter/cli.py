@@ -355,7 +355,23 @@ def _handle_daemon(args):
     # real reporter ID.  Operators set a real reporter_id by populating
     # the [instance] block in the per-instance config (sigmond Phase 8
     # `smd instance migrate` is the planned interactive setup path).
-    reporter_id = extract_reporter_id(config)
+    #
+    # Site-wide default: STATION_REPORTER_ID from coordination.env
+    # (coordination.toml [station] reporter_id — HamSCI/sigmond#38).
+    # One id for every upload path; [instance] stays the per-instance
+    # override.  Without either, warn loudly: the radiod-hostname
+    # fallback misattributes spots all the way to PSKReporter.
+    reporter_id = (
+        extract_reporter_id(config)
+        or (os.environ.get("STATION_REPORTER_ID") or "").strip()
+        or None
+    )
+    if reporter_id is None:
+        logging.getLogger(__name__).warning(
+            "no reporter_id configured ([instance] reporter_id or "
+            "STATION_REPORTER_ID) — spot rows will fall back to the "
+            "radiod hostname, which misattributes uploads downstream"
+        )
 
     radiod_block: dict | None = None
     if args.radiod_id is not None:
