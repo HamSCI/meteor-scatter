@@ -138,7 +138,12 @@ accepted_schema_versions = [2]
 start_at = "now"
 delete_on_commit = false
 select_columns = ["time", "frequency", "mode", "snr_db", "tx_call", "grid", "score", "message", "rx_source", "frequency_bucket_hz"]
-extra_where = [["tx_call", "!=", ""], ["mode", "IN", ["ft8", "ft4", "msk144"]]]
+# forward_to_pskreporter=0 only: the per-row flag names the responsible
+# PSKReporter poster (wd30 server model).  Rows flagged true ride the
+# wsprdaemon tar and wd30's forwarder posts them (meteor deposit mode);
+# posting them here too would double-report.  Both writers set the flag
+# on every row, so the json_extract comparison never sees NULL.
+extra_where = [["tx_call", "!=", ""], ["mode", "IN", ["ft8", "ft4", "msk144"]], ["forward_to_pskreporter", "=", 0]]
 [hs_uploader.pipeline.transport]
 type = "pskreporter"
 decoding_software = "psk-recorder/0.1 (radiod={radiod_status})"
