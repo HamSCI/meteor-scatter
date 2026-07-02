@@ -408,11 +408,15 @@ class MeteorScatterRecorder:
             ver = "0.1.0"
         proc_version = f"{ver}+{short}" if short else ver
 
-        # forward_to_pskreporter is a PSKReporter-era per-row flag with no
-        # meaning for the wsprdaemon path; deposit-only mode always passes
-        # False.  Spots land in the SQLite sink regardless — the flag only
-        # ever gated PSKReporter forwarding, which this client does not do.
-        forward_flag = False
+        # forward_to_pskreporter rides each row into the wsprdaemon tar and
+        # gates the SERVER-side PSKReporter forwarder (wd30's
+        # pskreporter_forwarder only ships rows flagged 1).  Mirror
+        # psk-recorder's delivery-mode semantics: in "deposit" mode the
+        # server owns the PSKReporter hop (flag True, like ft8/ft4); in
+        # "direct" mode the in-process uploader POSTs from this host, so
+        # the flag stays False to keep the server from double-posting.
+        # "off"/"none"/"disabled" publish nothing externally (False).
+        forward_flag = self._delivery_mode() == "deposit"
 
         # One shared cycle batcher per process; every ReceiverManager's
         # tailers receive the same batcher reference, so spots collapse
@@ -555,6 +559,23 @@ class MeteorScatterRecorder:
                     return None
         return None
 
+    @staticmethod
+    def _delivery_mode() -> str:
+        """Resolved METEOR_SCATTER_DELIVERY_MODE (default "direct").
+
+        "direct"  — in-process HsPskReporterUploader POSTs to PSKReporter
+                    from this host; rows carry forward_to_pskreporter=False
+                    so the wsprdaemon server does not double-post.
+        "deposit" — sink-only here; rows carry forward_to_pskreporter=True
+                    and the wsprdaemon server's pskreporter_forwarder owns
+                    the PSKReporter hop (same server-merge path as ft8/ft4).
+        "off"/"none"/"disabled" — no external publish (rows still deposit
+                    to the sink and ride the wsprdaemon tar for ingest).
+        """
+        return (
+            os.environ.get("METEOR_SCATTER_DELIVERY_MODE") or "direct"
+        ).strip().lower()
+
     def _start_uploaders(self) -> None:
         # MSK144 spots are attempted QSOs → published to PSKReporter the
         # same way FT4/FT8 are.  A single HsPskReporterUploader thread
@@ -566,15 +587,15 @@ class MeteorScatterRecorder:
         #
         # METEOR_SCATTER_DELIVERY_MODE controls this: "direct" (default)
         # runs the uploader; "deposit"/"off"/"none" leaves spots in the
-        # sink only (record → decode → DB, no external publish).
-        mode = (
-            os.environ.get("METEOR_SCATTER_DELIVERY_MODE") or "direct"
-        ).strip().lower()
+        # sink only (deposit → the server forwards; see _delivery_mode).
+        mode = self._delivery_mode()
         if mode in ("deposit", "off", "none", "disabled"):
             logger.info(
                 "METEOR_SCATTER_DELIVERY_MODE=%s — PSKReporter uploader "
-                "disabled; MSK144 spots deposit to the psk.spots sink only",
+                "disabled; MSK144 spots deposit to the psk.spots sink only%s",
                 mode,
+                (" (server-side pskreporter_forwarder owns delivery)"
+                 if mode == "deposit" else ""),
             )
             return
 

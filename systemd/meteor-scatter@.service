@@ -14,6 +14,12 @@ WatchdogSec=120
 NotifyAccess=main
 
 EnvironmentFile=-/etc/sigmond/coordination.env
+# %i (literal instance) is the working key: %I "unescapes" systemd
+# escaping, turning dashes into slashes (B4-100-rx888mk2 →
+# B4/100/rx888mk2), so the %I path never matches a real flat file.
+# Same bug + fix as wspr-recorder@.service.  %I kept second for any
+# host that worked around it with nested directories.
+EnvironmentFile=-/etc/meteor-scatter/env/%i.env
 EnvironmentFile=-/etc/meteor-scatter/env/%I.env
 
 WorkingDirectory=/opt/git/sigmond/meteor-scatter
