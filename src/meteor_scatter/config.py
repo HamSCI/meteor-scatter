@@ -78,9 +78,9 @@ DEFAULTS: dict[str, Any] = {
     "paths": {
         "spool_dir": "/var/lib/meteor-scatter",
         "log_dir": "/var/log/meteor-scatter",
-        # Empty by default — the jt9 MSK144 binary is bundled in-repo and
-        # arch-resolved at runtime (see core.decoder._resolve_decoder_binary).
-        # Set paths.decoder_jt9 to override that resolution.
+        # Empty by default — jt9 is resolved from /usr/local/bin at runtime
+        # (sigmond's from-source wsjtx-decoders build; see
+        # core.decoder.resolve_jt9_binary).  Set paths.decoder_jt9 to override.
         "decoder": "",
         "keep_wav": False,
     },

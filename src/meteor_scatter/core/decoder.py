@@ -15,15 +15,14 @@ each jt9 run (the same line-count-diff pattern wspr-recorder uses for
 ``fst4_decodes.dat``), and this module turns each raw jt9 line into a
 normalized per-mode-log line the ChTailer parser consumes.
 
-Binaries are bundled in-repo at ``bin/decoders/jt9-{x86,arm32,arm64}-v*``
-and arch-resolved at runtime (mirrors wspr-recorder's
-``_resolve_decoder_binaries``); an explicit config path overrides that.
+jt9 is resolved from ``/usr/local/bin`` at runtime (sigmond's from-source
+wsjtx-decoders build; no pre-compiled binaries are shipped); an explicit
+config path (``paths.decoder_jt9`` / ``paths.decoder``) overrides that.
 """
 
 from __future__ import annotations
 
 import logging
-import platform
 import shutil
 from pathlib import Path
 from typing import Optional
@@ -45,31 +44,19 @@ MSK144_SYNC_CHAR = "&"
 MAX_DECODED_TXT_BYTES = 200_000
 
 
-# arch (platform.machine()) → bundled jt9 binary basename.  v27 where we
-# have it; arm32 only ships v26.  Mirror wspr-recorder's table so the two
-# clients resolve the same binaries on the same hosts.
-_JT9_BY_ARCH = {
-    "x86_64":  "jt9-x86-v27",
-    "amd64":   "jt9-x86-v27",
-    "aarch64": "jt9-arm64-v27",
-    "arm64":   "jt9-arm64-v27",
-    "armv7l":  "jt9-arm32-v26",
-    "armv6l":  "jt9-arm32-v26",
-}
-
-# bin/decoders sits at the repo root: this file is
-# src/meteor_scatter/core/decoder.py → parents[3] == repo root.
-_REPO_DECODER_DIR = Path(__file__).resolve().parents[3] / "bin" / "decoders"
+# jt9 (MSK144) is resolved from /usr/local/bin at runtime — see
+# resolve_jt9_binary(); the recorder ships no bundled decoder binaries.
 
 
 def resolve_jt9_binary(explicit: str = "") -> str:
-    """Resolve the jt9 binary path.
+    """Resolve the jt9 MSK144 decoder.
 
-    Precedence: an explicit config override (``paths.decoder_jt9`` /
-    ``paths.decoder``) wins if it exists; otherwise the arch-specific
-    bundled binary under ``bin/decoders/``; otherwise a bare ``jt9`` on
-    PATH.  Returns the resolved path string (may be the bare name if
-    nothing was found — the caller surfaces the launch failure).
+    An explicit config override (``paths.decoder_jt9`` / ``paths.decoder``)
+    wins if it exists; otherwise jt9 is resolved from PATH (/usr/local/bin),
+    where sigmond's from-source wsjtx-decoders build installs it.  The recorder
+    no longer ships pre-compiled jt9 binaries (GPLv3: build from retained
+    source on-host, not redistributed; see sigmond _build_wsjtx_decoders).
+    jt9 3.0.2 decodes MSK144 via ``--msk144``.
     """
     explicit = (explicit or "").strip()
     if explicit:
@@ -77,26 +64,8 @@ def resolve_jt9_binary(explicit: str = "") -> str:
         if p.is_file() or shutil.which(explicit):
             return explicit
         logger.warning(
-            "decoder override %r not found — falling back to bundled/"
-            "PATH jt9 resolution", explicit,
+            "decoder override %r not found — falling back to PATH jt9", explicit,
         )
-
-    arch = platform.machine().lower()
-    name = _JT9_BY_ARCH.get(arch)
-    if name:
-        bundled = _REPO_DECODER_DIR / name
-        if bundled.is_file():
-            return str(bundled)
-        logger.warning(
-            "bundled jt9 for arch %s expected at %s but missing — "
-            "falling back to PATH", arch, bundled,
-        )
-    else:
-        logger.warning(
-            "no bundled jt9 mapping for arch %r — falling back to PATH jt9",
-            arch,
-        )
-
     return shutil.which("jt9") or "jt9"
 
 
