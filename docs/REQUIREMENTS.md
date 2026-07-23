@@ -34,7 +34,7 @@ FSK441) is engineered for exactly that regime — short 72 ms frames repeated
 through a 15 s T/R period with aggressive LDPC FEC, so a single ping can carry a
 full decode. meteor-scatter is the suite's **meteor-scatter ping
 recorder/decoder**: it receives the conventional MSK144 monitoring channels
-(10 m @ 28.130 MHz, 6 m @ 50.260 MHz) from `radiod` via `ka9q-python`, records
+(10 m @ 28.145 MHz, 6 m @ 50.260 MHz) from `radiod` via `ka9q-python`, records
 15 s T/R-aligned WAV slots, decodes each once with the bundled `jt9 --msk144`
 binary, and ships the resulting spots to the suite's local SQLite sink
 (`msk144.spots`) and onward to a reporting service.
@@ -265,7 +265,7 @@ target) · `hf-timestd` (§18 timing-authority producer, optional) · sigmond
 ### 8.1 Inputs *(derived from deploy.toml + per-instance config + `inventory --json`)*
 - **RF:** radiod MSK144 channels via `ka9q-python` — instance
   `sigma-rx888mk2-status.local`, **2 channels**, `frequencies_hz =
-  [28130000, 50260000]` (10 m @ 28.130 MHz, 6 m @ 50.260 MHz), preset `usb`,
+  [28145000, 50260000]` (10 m @ 28.145 MHz, 6 m @ 50.260 MHz), preset `usb`,
   `sample_rate=12000`, `encoding=s16be`.
 - **Config:** `/etc/meteor-scatter/<instance>.toml` (preferred) or legacy
   `/etc/meteor-scatter/meteor-scatter-config.toml`. Operator MUST set:

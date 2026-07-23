@@ -94,7 +94,7 @@ wheels = [
 
 [[package]]
 name = "ka9q-python"
-version = "3.18.0"
+version = "3.20.0"
 source = { editable = "../ka9q-python" }
 dependencies = [
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },

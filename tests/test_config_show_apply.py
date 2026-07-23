@@ -95,7 +95,7 @@ radiod_status = "test-status.local"
 sample_rate = 12000
 preset = "usb"
 encoding = "s16be"
-freqs_hz = [28130000, 50260000]
+freqs_hz = [28145000, 50260000]
 '''
 
 
@@ -118,7 +118,7 @@ def test_apply_preserves_radiod_blocks(tmp_path: Path) -> None:
         loaded = tomllib.load(f)
     assert isinstance(loaded["radiod"], list)
     assert loaded["radiod"][0]["id"] == "test-rx888"
-    assert loaded["radiod"][0]["msk144"]["freqs_hz"] == [28130000, 50260000]
+    assert loaded["radiod"][0]["msk144"]["freqs_hz"] == [28145000, 50260000]
 
 
 # NOTE: an earlier version of this test asserted that [[radiod]] was
@@ -203,7 +203,7 @@ def test_serialize_toml_round_trips_via_tomllib() -> None:
             {
                 "id": "test-rx888",
                 "radiod_status": "test-status.local",
-                "msk144": {"sample_rate": 12000, "freqs_hz": [28130000, 50260000]},
+                "msk144": {"sample_rate": 12000, "freqs_hz": [28145000, 50260000]},
             },
         ],
     }
@@ -230,11 +230,11 @@ def test_serialize_toml_inline_arrays() -> None:
     text = configurator._serialize_toml({
         "radiod": [
             {"id": "x", "radiod_status": "x.local",
-             "msk144": {"freqs_hz": [28130000, 50260000]}},
+             "msk144": {"freqs_hz": [28145000, 50260000]}},
         ],
     })
     # One line with the whole array, not separate lines.
-    assert any("[28130000, 50260000]" in line for line in text.splitlines())
+    assert any("[28145000, 50260000]" in line for line in text.splitlines())
 
 
 # ---------- wizard availability --------------------------------------------

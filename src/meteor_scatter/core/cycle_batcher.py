@@ -92,7 +92,7 @@ MSK144_CYCLE_SEC = 15.0
 # MSK144 dial frequencies per WSJT-X:
 #   https://www.physics.princeton.edu/pulsar/k1jt/wsjtx.html
 _BAND_NAMES: dict[int, str] = {
-    28130000: "10",
+    28145000: "10",
     50260000: "6",
 }
 

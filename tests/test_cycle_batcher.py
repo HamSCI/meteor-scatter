@@ -62,7 +62,7 @@ class FakeWriter:
         self.closed = True
 
 
-def _row(*, mode="msk144", utc=(2026, 5, 20, 19, 14, 0), freq=28130000, **kw):
+def _row(*, mode="msk144", utc=(2026, 5, 20, 19, 14, 0), freq=28145000, **kw):
     """Build a minimal msk144.spots row dict for the batcher."""
     return {
         "time": datetime(*utc, tzinfo=timezone.utc),
@@ -99,7 +99,7 @@ class CycleBoundaryTests(unittest.TestCase):
 class FreqToBandTests(unittest.TestCase):
 
     def test_standard_msk144_freqs_map_to_band(self):
-        self.assertEqual(_freq_to_band_name(28130000), "10")   # 10 m dial
+        self.assertEqual(_freq_to_band_name(28145000), "10")   # 10 m dial
         self.assertEqual(_freq_to_band_name(50260000), "6")    # 6 m dial
 
     def test_non_standard_freq_falls_back_to_khz_bucket(self):
@@ -193,8 +193,8 @@ class BatcherFlushTests(unittest.TestCase):
             try:
                 batcher.add(
                     [
-                        _row(freq=28130000),
-                        _row(freq=28130000),
+                        _row(freq=28145000),
+                        _row(freq=28145000),
                         _row(freq=50260000),
                     ],
                     rx_source="radiod:bee1-status.local",

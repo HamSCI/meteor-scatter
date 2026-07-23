@@ -40,7 +40,7 @@ def _make_worker(tmpdir, *, mode="msk144", cadence=15.0, ring=None,
     worker = SlotWorker(
         ring=ring,
         mode=mode,
-        frequency_hz=28130000,
+        frequency_hz=28145000,
         cadence_sec=cadence,
         spool_dir=Path(tmpdir) / mode,
         log_fd=io.StringIO(),
@@ -74,7 +74,7 @@ class SlotHarvestTickTests(unittest.TestCase):
             wavs = list((Path(tmpdir) / "msk144").glob("*.wav"))
             self.assertGreaterEqual(len(wavs), 1, "expected a WAV for slot0")
             # filename labels the epoch-aligned slot start (UTC 900000000)
-            self.assertTrue(any("_28130.wav" in w.name for w in wavs))
+            self.assertTrue(any("_28145.wav" in w.name for w in wavs))
 
     def test_tick_noop_before_anchor(self):
         with tempfile.TemporaryDirectory() as tmpdir:

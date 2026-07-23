@@ -39,7 +39,7 @@ decoder_kind = "jt9"
 status = "<configure-via-config-init>"
 
 # MSK144 meteor-scatter monitoring.  Standard WSJT-X dial frequencies (USB):
-#   10 m → 28.130 MHz
+#   10 m → 28.145 MHz
 #   6 m  → 50.260 MHz   (requires a receiver/radiod path that covers 6 m)
 # The standard MSK144 T/R sequence is 15 s; we record 15 s T/R-aligned
 # slots and decode each once with jt9 --msk144.
@@ -54,6 +54,6 @@ sample_rate = 12000
 preset      = "usb"
 encoding    = "s16be"
 freqs_hz    = [
-  28_130_000,
+  28_145_000,
   50_260_000,
 ]

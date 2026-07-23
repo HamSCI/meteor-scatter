@@ -50,7 +50,7 @@ def _make_sink(authority_reader=None) -> ChannelSink:
     (tmp / "msk144").mkdir(exist_ok=True)
     log_fd = open(tmp / "log", "ab")
     sink = ChannelSink(
-        mode="msk144", frequency_hz=28_130_000, sample_rate=SR,
+        mode="msk144", frequency_hz=28_145_000, sample_rate=SR,
         preset="usb", encoding=0, spool_dir=tmp, log_fd=log_fd,
         decoder_path="/nonexistent", keep_wav=False,
         authority_reader=authority_reader,

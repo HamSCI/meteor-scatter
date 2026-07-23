@@ -14,4 +14,4 @@ status = "test-status.local"
 sample_rate = 12000
 preset      = "usb"
 encoding    = "s16be"
-freqs_hz    = [28130000, 50260000]
+freqs_hz    = [28145000, 50260000]

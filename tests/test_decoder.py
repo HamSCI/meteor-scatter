@@ -94,9 +94,9 @@ class TestNormalizeLogLine(unittest.TestCase):
              "sync": "&", "message": "CQ K1ABC FN42"}
         # 2026-05-07 12:34:56 UTC
         slot = time.gmtime(1778157296)
-        line = decoder.normalize_log_line(d, slot, 28_130_000)
-        # abs RF = dial 28.130 MHz + 1500 Hz audio offset.
-        self.assertIn(" 28131500 ", line)
+        line = decoder.normalize_log_line(d, slot, 28_145_000)
+        # abs RF = dial 28.145 MHz + 1500 Hz audio offset.
+        self.assertIn(" 28146500 ", line)
         self.assertIn(" & CQ K1ABC FN42", line)
         self.assertTrue(line.startswith("2026/05/07 12:34:56 "))
         self.assertTrue(line.endswith("\n"))

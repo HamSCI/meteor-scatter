@@ -142,7 +142,7 @@ class InventoryV03Tests(unittest.TestCase):
     def test_frequencies(self):
         inst = self.data["instances"][0]
         freqs = inst["frequencies_hz"]
-        self.assertIn(28130000, freqs)   # 10 m MSK144 dial
+        self.assertIn(28145000, freqs)   # 10 m MSK144 dial
         self.assertIn(50260000, freqs)   # 6 m MSK144 dial
 
     def test_log_paths_present(self):
@@ -234,7 +234,7 @@ class ConfigTests(unittest.TestCase):
         config = load_config(TEST_CONFIG)
         block = resolve_radiod_block(config, "test-status.local")
         msk144 = get_freqs(block, "msk144")
-        self.assertEqual(msk144, [28130000, 50260000])
+        self.assertEqual(msk144, [28145000, 50260000])
 
 
 class RadiodSchemaTests(unittest.TestCase):
@@ -255,7 +255,7 @@ class RadiodSchemaTests(unittest.TestCase):
     def test_resolve_block_matches_status_field(self):
         from meteor_scatter.config import resolve_radiod_block
         config = {"radiod": [
-            {"status": "bee1-status.local", "msk144": {"freqs_hz": [28130000]}},
+            {"status": "bee1-status.local", "msk144": {"freqs_hz": [28145000]}},
             {"status": "other.local", "msk144": {"freqs_hz": [50260000]}},
         ]}
         block = resolve_radiod_block(config, "bee1-status.local")

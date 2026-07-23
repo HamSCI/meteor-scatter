@@ -37,7 +37,7 @@ decoder_kind = "jt9"
 status = "sigma-rx888mk2-status.local"
 
 # MSK144 meteor-scatter monitoring.  Standard WSJT-X dial frequencies (USB):
-#   10 m → 28.130 MHz   (RX888 HF direct-sampling path)
+#   10 m → 28.145 MHz   (RX888 HF direct-sampling path)
 #   6 m  → 50.260 MHz   (same RX888 path that serves 6 m FT8/FT4 today)
 # The standard MSK144 T/R sequence is 15 s; we record 15 s T/R-aligned
 # slots and decode each once with jt9 --msk144.
@@ -52,6 +52,6 @@ sample_rate = 12000
 preset      = "usb"
 encoding    = "s16be"
 freqs_hz    = [
-  28_130_000,
+  28_145_000,
   50_260_000,
 ]

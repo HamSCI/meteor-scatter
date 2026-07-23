@@ -275,7 +275,7 @@ systemctl daemon-reload
 # --- Phase 6: (none) ---
 # Unlike psk/wspr-recorder, meteor-scatter does NOT replace any native
 # ka9q-radio decoder service: MSK144 monitors its own dial frequencies
-# (28.130 / 50.260 MHz) and does not overlap the FT8/FT4 services those
+# (28.145 / 50.260 MHz) and does not overlap the FT8/FT4 services those
 # siblings own.  Nothing to disable here.
 
 # --- Phase 7: instances ---
