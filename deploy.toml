@@ -92,8 +92,8 @@ note = "optional UI for `meteor-scatter config init|edit` interactive wizard; ab
 # ---------------------------------------------------------------------------
 
 [client_features.watch]
-verb         = "psk"
-description  = "PSK Reporter ft8/ft4 cycles + flushes"
+verb         = "meteor"
+description  = "MSK144 meteor-scatter decodes (per-15s cycle: 10 m / 6 m)"
 verbose      = true
 per_instance = true
 
@@ -104,7 +104,7 @@ kind         = "spot_queue"
 per_instance = true
 
 [client_features.receiver_channels]
-description  = "FT4/FT8 spot channels (per-mode freqs_hz)"
+description  = "MSK144 spot channels (10 m / 6 m freqs_hz)"
 per_instance = true
 parser_file  = "src/meteor_scatter/sigmond_tui.py"
 parser_attr  = "parse_receiver_channels"
