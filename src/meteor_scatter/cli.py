@@ -338,6 +338,13 @@ def _handle_daemon(args):
     # file exists; fall back to legacy shared with a deprecation
     # warning otherwise.  --config still wins over both (operator
     # override).
+    # systemd escapes '=' in unit instance names to '\x3d', so with the
+    # %i unit templates a '='-style (reporter-id sentinel) instance
+    # reaches the daemon in escaped form.  Unescape so config lookup
+    # works for both naming styles ('-' names pass through untouched).
+    if args.instance:
+        args.instance = args.instance.replace("\\x3d", "=")
+
     config_path = resolve_config_path(
         instance=args.instance, explicit_path=args.config,
     )
