@@ -24,9 +24,9 @@ EnvironmentFile=-/etc/meteor-scatter/env/%I.env
 
 WorkingDirectory=/opt/git/sigmond/meteor-scatter
 
-ExecStartPre=+/bin/mkdir -p /var/lib/meteor-scatter/%I/msk144
+ExecStartPre=+/bin/mkdir -p /var/lib/meteor-scatter/%i/msk144
 ExecStartPre=+/bin/mkdir -p /var/log/meteor-scatter
-ExecStartPre=+/usr/bin/chown -R meteorscat:meteorscat /var/lib/meteor-scatter/%I
+ExecStartPre=+/usr/bin/chown -R meteorscat:meteorscat /var/lib/meteor-scatter/%i
 ExecStartPre=+/usr/bin/chown -R meteorscat:meteorscat /var/log/meteor-scatter
 # /var/lib/hs-uploader is SHARED across HamSCI client users (meteorscat,
 # wsprdaemon, ...) — its setgid+group-write shape is owned by
@@ -43,18 +43,18 @@ ExecStartPre=+/usr/bin/chown -R meteorscat:meteorscat /var/log/meteor-scatter
 # database".  Observed on bee1 2026-05-14.  Removed.
 
 # Phase-3 cutover (sigmond MULTI-INSTANCE-ARCHITECTURE.md):
-# --instance %I picks up /etc/meteor-scatter/%I.toml when the operator
+# --instance %i picks up /etc/meteor-scatter/%I.toml when the operator
 # has run `sudo smd instance migrate` (Phase 8).  Until then, the
 # per-instance config doesn't exist and the daemon falls back to the
 # legacy /etc/meteor-scatter/meteor-scatter-config.toml with a one-line
-# deprecation warning.  --radiod-id %I stays for the legacy fallback
+# deprecation warning.  --radiod-id %i stays for the legacy fallback
 # path (selects the matching [[radiod]] block within the shared
 # config); ignored once per-instance config takes over.
 # Note: --config is intentionally omitted — passing it would force
 # the legacy path always (explicit_path wins in resolve_config_path).
 ExecStart=/opt/git/sigmond/meteor-scatter/venv/bin/python3 -m meteor_scatter.cli daemon \
-    --instance %I \
-    --radiod-id %I
+    --instance %i \
+    --radiod-id %i
 
 # 180s is generous for the 2-channel (10 m + 6 m) MSK144 layout: each
 # channel triggers a setpolicy round-trip with radiod, the initial
