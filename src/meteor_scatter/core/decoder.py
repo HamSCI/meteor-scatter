@@ -30,7 +30,10 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 # WSJT-X MSK144 conventions.
-MSK144_TR_PERIOD_SEC = 15          # standard meteor-scatter T/R sequence length
+# Default T/R sequence length: a stock WSJT-X install defaults MSK144 to 30 s.
+# This is only the fallback for build_jt9_cmd — the live value is the recorder's
+# configured tr_period_sec, passed in from the slot cadence.
+MSK144_TR_PERIOD_SEC = 30
 MSK144_AUDIO_FREQ_HZ = 1500        # default audio Tx passband centre (jt9 -f)
 # The MSK144 sync indicator jt9 writes in the mode column (FT8=`~`, FT4=`+`,
 # JT65=`#`, JT9=`@`, MSK144=`&`).  Used both to tag normalized log lines and
@@ -63,8 +66,14 @@ def resolve_jt9_binary(explicit: str = "") -> str:
     return shutil.which("jt9") or "jt9"
 
 
-def build_jt9_cmd(jt9_path: str, workdir: Path, wav_path: Path) -> list[str]:
+def build_jt9_cmd(
+    jt9_path: str, workdir: Path, wav_path: Path,
+    tr_period_sec: int = MSK144_TR_PERIOD_SEC,
+) -> list[str]:
     """Build the ``jt9 --msk144`` argv for one slot WAV.
+
+    ``tr_period_sec`` is jt9's ``-p`` (T/R period); it must match the slot
+    cadence and the transmitting stations' WSJT-X T/R period (default 30 s).
 
     ``-a workdir`` is jt9's writeable data dir (decoded.txt, wisdom,
     timer.out land there); run the process with ``cwd=workdir`` and
@@ -82,7 +91,7 @@ def build_jt9_cmd(jt9_path: str, workdir: Path, wav_path: Path) -> list[str]:
         jt9_path,
         "-Y",
         "--msk144",
-        "-p", str(MSK144_TR_PERIOD_SEC),
+        "-p", str(int(tr_period_sec)),
         "-f", str(MSK144_AUDIO_FREQ_HZ),
         "-a", str(workdir),
         str(wav_path),

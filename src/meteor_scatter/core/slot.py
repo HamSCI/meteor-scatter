@@ -12,7 +12,8 @@ drift the old UTC-projection cadence math suffered.
 
 The decoder backend (selected by ``decoder_kind``):
 
-  * ``"jt9"`` — WSJT-X's ``jt9`` in MSK144 mode (``jt9 --msk144 -p 15``).
+  * ``"jt9"`` — WSJT-X's ``jt9`` in MSK144 mode (``jt9 --msk144 -p <tr>``,
+    where ``<tr>`` is the configured T/R period = the slot cadence).
     Unlike decode_ft8, jt9 writes its decodes to a ``decoded.txt`` file
     in its ``-a`` data dir (a stable per-channel workdir) and prints only
     a ``<DecodeFinished>`` sentinel to stdout.  After each run we read the
@@ -23,7 +24,8 @@ The decoder backend (selected by ``decoder_kind``):
 The normalized lines land in ``<radiod>-msk144.log``;
 ``ch_tailer.parse_decoder_line`` parses each one into a spot row.
 
-MSK144 cadence: 15 s T/R slots (at :00, :15, :30, :45).
+MSK144 cadence: T/R slots at the configured tr_period_sec (default 30 s,
+matching stock WSJT-X — slots at :00, :30; a 15 s config gives :00/:15/:30/:45).
 """
 
 from __future__ import annotations
@@ -241,14 +243,17 @@ class SlotWorker:
     def _fork_decoder_jt9(self, wav_path: Path, slot_start: float) -> None:
         """WSJT-X jt9 in MSK144 mode — decodes arrive on the process STDOUT.
 
-        CLI: ``jt9 -Y --msk144 -p 15 -f 1500 -a <workdir> <wav>`` (run with
+        CLI: ``jt9 -Y --msk144 -p <tr> -f 1500 -a <workdir> <wav>`` (run with
         cwd=<workdir>).  jt9 --msk144 prints each decode to stdout as
         ``<time> <snr> <dt> <freq> & <message>`` followed by a
         ``<DecodeFinished>`` sentinel; the ``-a`` workdir's ``decoded.txt``
         stays empty for MSK144.  We capture each slot's decodes from the
         proc's stdout at reap time (see _reap_finished/_materialise).
         """
-        cmd = _decoder.build_jt9_cmd(self._decoder_path, self._workdir, wav_path)
+        cmd = _decoder.build_jt9_cmd(
+            self._decoder_path, self._workdir, wav_path,
+            tr_period_sec=int(round(self._cadence_sec)),
+        )
         try:
             proc = subprocess.Popen(
                 cmd,

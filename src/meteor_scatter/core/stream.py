@@ -72,6 +72,7 @@ class ChannelSink:
         authority_reader: Optional[AuthorityReader] = None,
         decoder_kind: str = "jt9",
         spool_spots: bool = False,
+        tr_period_sec: float = MSK144_CADENCE_SEC,
     ):
         self._mode = mode
         self._frequency_hz = frequency_hz
@@ -79,7 +80,9 @@ class ChannelSink:
         self._preset = preset
         self._encoding = encoding
 
-        cadence = MSK144_CADENCE_SEC
+        # T/R sequence length — slot cadence AND jt9 -p come from this one
+        # value so the recorded slots frame the transmitters' T/R period.
+        cadence = tr_period_sec
 
         self._ring = Ring(
             max_seconds=RING_SECONDS,

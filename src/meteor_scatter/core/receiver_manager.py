@@ -230,6 +230,7 @@ class ReceiverManager:
             params = get_mode_params(self._radiod, mode)
             sample_rate = params["sample_rate"]
             preset = params["preset"]
+            tr_period_sec = params["tr_period_sec"]
             # The WAV writer (wav.py) peak-normalizes f32 -> s16be at
             # write time, so radiod MUST emit f32 on the wire: an s16
             # channel quantizes a low-level signal (e.g. a 25 dB-down FT8
@@ -270,6 +271,7 @@ class ReceiverManager:
                     decoder_kind=decoder_kind,
                     keep_wav=keep_wav,
                     spool_spots=spool_spots,
+                    tr_period_sec=tr_period_sec,
                 )
                 if self._provision_one_with_retry(
                         sink, multi_by_group, deadline):

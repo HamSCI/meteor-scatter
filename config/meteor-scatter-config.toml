@@ -39,8 +39,11 @@ status = "sigma-rx888mk2-status.local"
 # MSK144 meteor-scatter monitoring.  Standard WSJT-X dial frequencies (USB):
 #   10 m → 28.145 MHz   (RX888 HF direct-sampling path)
 #   6 m  → 50.260 MHz   (same RX888 path that serves 6 m FT8/FT4 today)
-# The standard MSK144 T/R sequence is 15 s; we record 15 s T/R-aligned
-# slots and decode each once with jt9 --msk144.
+# T/R period: a stock WSJT-X MSK144 install transmits on a 30 s T/R sequence
+# (TX at the top of each minute), so we record 30 s T/R-aligned slots and
+# decode each once with `jt9 --msk144 -p 30`.  This MUST match the period the
+# stations you monitor use — set `tr_period_sec` below to override (WSJT-X
+# also offers 5/10/15 s; 15 s is the 2 m VHF meteor-ping convention).
 #
 # Bandwidth: MSK144 occupies ~2.4-2.5 kHz (2000 baud MSK), centered on the
 # 1500 Hz audio Tx point → roughly 300-2750 Hz.  The `usb` preset's filter
@@ -48,10 +51,11 @@ status = "sigma-rx888mk2-status.local"
 # SSB audio width a real WSJT-X station receives on.  Do NOT narrow this;
 # a tighter filter would clip the MSK144 sidebands and kill decodes.
 [radiod.msk144]
-sample_rate = 12000
-preset      = "usb"
-encoding    = "s16be"
-freqs_hz    = [
+sample_rate   = 12000
+preset        = "usb"
+encoding      = "s16be"
+tr_period_sec = 30
+freqs_hz      = [
   28_145_000,
   50_260_000,
 ]

@@ -787,7 +787,8 @@ class MeteorScatterRecorder:
         """Monotonic count of decode slots processed across all channels:
         sum of each SlotWorker's (decodes_ok + decodes_fail + slots_empty).
 
-        Advances every decode cadence (<=15 s) whenever RTP is flowing --
+        Advances every decode cadence (the T/R period, default 30 s) whenever
+        RTP is flowing --
         and, even if every decode hangs, at least every ~60 s via the
         kill-deadline reap (see slot.DECODE_TIMEOUT_SEC) -- regardless of
         whether anything actually decodes.  Freezes only when the

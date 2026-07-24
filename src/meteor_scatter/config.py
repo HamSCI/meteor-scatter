@@ -98,10 +98,15 @@ DEFAULTS: dict[str, Any] = {
     },
 }
 
-# MSK144 standard T/R sequence length.  WSJT-X also offers 5 s/10 s short
-# variants, but the conventional meteor-scatter period monitored here is 15 s;
-# we record one 15 s T/R-aligned slot per period and decode it once.
-MSK144_CADENCE_SEC = 15.0
+# MSK144 T/R sequence length (seconds).  This MUST match the T/R period the
+# transmitting WSJT-X stations use, or the recorded slots won't frame their
+# transmissions cleanly (a mismatch still decodes — MSK144 frames are self-
+# contained — but the same TX shows up in adjacent slots with a wandering dt).
+# A stock WSJT-X install defaults MSK144 to 30 s, so that is our default;
+# WSJT-X also offers 5/10/15 s.  Overridable per radiod via the
+# ``[radiod.msk144] tr_period_sec`` key.  We record one T/R-aligned slot per
+# period and decode it once with ``jt9 --msk144 -p <tr_period_sec>``.
+MSK144_CADENCE_SEC = 30.0
 # Single decode mode for this client.  Kept as a tuple so the per-mode loops
 # inherited from the FT4/FT8 skeleton iterate cleanly over just this one.
 MODES = ("msk144",)
@@ -186,12 +191,15 @@ def get_freqs(radiod_block: dict, mode: str = "msk144") -> list[int]:
 
 
 def get_mode_params(radiod_block: dict, mode: str) -> dict:
-    """Extract sample_rate, preset, encoding for a mode."""
+    """Extract sample_rate, preset, encoding, tr_period_sec for a mode."""
     mode_block = radiod_block.get(mode, {})
     return {
         "sample_rate": int(mode_block.get("sample_rate", DEFAULT_SAMPLE_RATE)),
         "preset": mode_block.get("preset", DEFAULT_PRESET),
         "encoding": mode_block.get("encoding", DEFAULT_ENCODING),
+        "tr_period_sec": float(
+            mode_block.get("tr_period_sec", MSK144_CADENCE_SEC)
+        ),
     }
 
 

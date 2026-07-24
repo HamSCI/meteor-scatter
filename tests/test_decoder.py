@@ -48,12 +48,20 @@ class TestBuildCmd(unittest.TestCase):
         # -Y emits unresolved compound-call hashes as <NNNNNNN> so the
         # callhash table can resolve them (parity with wspr's FST4W path).
         self.assertIn("-Y", cmd)
-        # -p 15 (T/R period), -f 1500 (audio offset), -a workdir, wav last.
-        self.assertEqual(cmd[cmd.index("-p") + 1], "15")
+        # -p 30 (default T/R period = stock WSJT-X MSK144), -f 1500 (audio
+        # offset), -a workdir, wav last.
+        self.assertEqual(cmd[cmd.index("-p") + 1], "30")
         self.assertEqual(cmd[cmd.index("-f") + 1], "1500")
         self.assertEqual(cmd[cmd.index("-a") + 1], "/wd")
         self.assertEqual(cmd[-1], "/wd/slot.wav")
         self.assertEqual(cmd[0], "jt9")
+
+    def test_cmd_period_is_configurable(self):
+        # The recorder passes its configured tr_period_sec (from the slot
+        # cadence) as jt9's -p, so a 15 s VHF setup gets -p 15.
+        cmd = decoder.build_jt9_cmd(
+            "jt9", Path("/wd"), Path("/wd/slot.wav"), tr_period_sec=15)
+        self.assertEqual(cmd[cmd.index("-p") + 1], "15")
 
 
 class TestParseDecodedTxt(unittest.TestCase):
