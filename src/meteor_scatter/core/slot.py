@@ -112,19 +112,18 @@ class SlotWorker:
         self._decoder_kind = decoder_kind
         self._keep_wav = keep_wav
         self._spool_spots = spool_spots
-        # Stable per-channel jt9 data dir.  jt9 appends decodes to
-        # <workdir>/decoded.txt and keeps its FFTW wisdom here across
-        # slots; we diff the file's line count to pick up each slot's new
-        # decodes.  Per-frequency so the two bands never share a file.
+        # Stable per-channel jt9 data dir — jt9 keeps its FFTW wisdom and
+        # scratch files (decoded.txt, timer.out) here across slots.  NOTE:
+        # jt9 --msk144 writes its decodes to STDOUT, not decoded.txt (that
+        # file stays empty); we harvest each slot's decodes from the
+        # process's stdout in _reap.  Per-frequency so the two bands never
+        # share a workdir.
         freq_khz = frequency_hz // 1000
         self._workdir = Path(spool_dir) / f"work_{freq_khz}"
         _decoder.ensure_workdir(self._workdir)
-        self._decoded_txt = self._workdir / "decoded.txt"
-        self._decoded_lines_seen = self._count_lines(self._decoded_txt)
         self._running = False
         self._thread: Optional[threading.Thread] = None
-        # Each entry: (proc, wav_path, slot_start_utc, fork_monotonic,
-        #              prev_decoded_lines).
+        # Each entry: (proc, wav_path, slot_start_utc, fork_monotonic).
         self._pending_procs: list[tuple[subprocess.Popen, Path,
                                         float, float, int]] = []
         # Counters read by the recorder's stats thread. int ops are atomic
@@ -240,17 +239,16 @@ class SlotWorker:
         self._fork_decoder_jt9(wav_path, slot_start)
 
     def _fork_decoder_jt9(self, wav_path: Path, slot_start: float) -> None:
-        """WSJT-X jt9 in MSK144 mode — decodes land in workdir/decoded.txt.
+        """WSJT-X jt9 in MSK144 mode — decodes arrive on the process STDOUT.
 
-        CLI: ``jt9 --msk144 -p 15 -f 1500 -a <workdir> <wav>`` (run with
-        cwd=<workdir>).  jt9 appends decode lines to ``decoded.txt`` and
-        prints a ``<DecodeFinished>`` sentinel to stdout.  We snapshot the
-        current ``decoded.txt`` line count at fork time so the reap can
-        read exactly this slot's new lines (the same line-diff pattern
-        wspr-recorder uses for ``fst4_decodes.dat``).
+        CLI: ``jt9 -Y --msk144 -p 15 -f 1500 -a <workdir> <wav>`` (run with
+        cwd=<workdir>).  jt9 --msk144 prints each decode to stdout as
+        ``<time> <snr> <dt> <freq> & <message>`` followed by a
+        ``<DecodeFinished>`` sentinel; the ``-a`` workdir's ``decoded.txt``
+        stays empty for MSK144.  We capture each slot's decodes from the
+        proc's stdout at reap time (see _reap_finished/_materialise).
         """
         cmd = _decoder.build_jt9_cmd(self._decoder_path, self._workdir, wav_path)
-        prev_lines = self._count_lines(self._decoded_txt)
         try:
             proc = subprocess.Popen(
                 cmd,
@@ -259,7 +257,7 @@ class SlotWorker:
                 cwd=str(self._workdir),
             )
             self._pending_procs.append(
-                (proc, wav_path, slot_start, time.monotonic(), prev_lines)
+                (proc, wav_path, slot_start, time.monotonic())
             )
             logger.debug(
                 "%s %d Hz: jt9 --msk144 pid=%d on %s",
@@ -291,9 +289,10 @@ class SlotWorker:
     def _drain_proc_pipes(self, proc: subprocess.Popen) -> None:
         """Read + discard a finished proc's stdout/stderr, then close them.
 
-        jt9 prints only a ``<DecodeFinished>`` sentinel (and any warnings)
-        to its pipes; the real decodes are in ``decoded.txt``.  We still
-        must drain + close the pipes so the FDs don't leak across slots.
+        stdout (the MSK144 decodes) is normally consumed first by
+        _read_proc_stdout; this drains any remainder plus stderr and
+        closes both FDs so they don't leak across slots.  Also used on
+        the failure/timeout paths where stdout isn't harvested.
         """
         for stream in (proc.stdout, proc.stderr):
             try:
@@ -306,7 +305,7 @@ class SlotWorker:
     def _reap_finished(self) -> None:
         now = time.monotonic()
         still_pending = []
-        for proc, wav_path, slot_start, fork_mono, prev_lines in self._pending_procs:
+        for proc, wav_path, slot_start, fork_mono in self._pending_procs:
             ret = proc.poll()
             if ret is None:
                 # Bound the leak: a proc still alive after DECODE_TIMEOUT_SEC
@@ -327,13 +326,14 @@ class SlotWorker:
                         wav_path.unlink(missing_ok=True)
                     continue
                 still_pending.append(
-                    (proc, wav_path, slot_start, fork_mono, prev_lines)
+                    (proc, wav_path, slot_start, fork_mono)
                 )
                 continue
             # jt9 exits 0 on a clean run whether or not it found anything.
             if ret == 0:
                 self.decodes_ok += 1
-                self._materialise_jt9_output(wav_path, slot_start, prev_lines)
+                stdout_text = self._read_proc_stdout(proc)
+                self._materialise_jt9_output(wav_path, slot_start, stdout_text)
                 self._drain_proc_pipes(proc)
             else:
                 self.decodes_fail += 1
@@ -353,13 +353,14 @@ class SlotWorker:
         self._pending_procs = still_pending
 
     def _reap_all(self, wait: bool = False) -> None:
-        for proc, wav_path, slot_start, _fork_mono, prev_lines in self._pending_procs:
+        for proc, wav_path, slot_start, _fork_mono in self._pending_procs:
             if wait:
                 try:
                     proc.wait(timeout=5.0)
                     if proc.returncode == 0:
+                        stdout_text = self._read_proc_stdout(proc)
                         self._materialise_jt9_output(
-                            wav_path, slot_start, prev_lines)
+                            wav_path, slot_start, stdout_text)
                 except subprocess.TimeoutExpired:
                     proc.kill()
             self._drain_proc_pipes(proc)
@@ -367,21 +368,36 @@ class SlotWorker:
                 wav_path.unlink(missing_ok=True)
         self._pending_procs.clear()
 
-    def _materialise_jt9_output(
-        self, wav_path: Path, slot_start: float, prev_lines: int,
-    ) -> None:
-        """Read this slot's new decoded.txt lines, normalize, append to log.
+    @staticmethod
+    def _read_proc_stdout(proc: subprocess.Popen) -> str:
+        """Read a finished jt9 proc's stdout (bytes → str). '' on any error.
 
-        jt9 appends each MSK144 decode to ``<workdir>/decoded.txt``; the
-        lines after ``prev_lines`` are this slot's.  Each is normalized to
-        a self-contained per-mode-log line (full UTC from the slot anchor,
+        jt9 --msk144 emits its decodes here; the process has already
+        exited (poll()/wait() returned) so the pipe holds the full,
+        bounded output (a few decode lines + the <DecodeFinished> sentinel).
+        """
+        try:
+            if proc.stdout is None:
+                return ""
+            return proc.stdout.read().decode("utf-8", errors="replace")
+        except (OSError, ValueError):
+            return ""
+
+    def _materialise_jt9_output(
+        self, wav_path: Path, slot_start: float, stdout_text: str,
+    ) -> None:
+        """Parse this slot's jt9 stdout decodes, normalize, append to log.
+
+        jt9 --msk144 prints each decode to stdout (NOT decoded.txt, which
+        stays empty for MSK144).  Each decode line is normalized to a
+        self-contained per-mode-log line (full UTC from the slot anchor,
         absolute RF frequency) that ChTailer parses.  When ``spool_spots``
         is set, the same lines are teed to a per-slot ``.spots.txt`` for
-        the hs-uploader file-fallback path.
+        the hs-uploader file-fallback path.  The ``<DecodeFinished>``
+        sentinel and blank lines are dropped by the parser.
         """
-        raw = self._read_new_lines(self._decoded_txt, prev_lines)
+        raw = [ln for ln in stdout_text.splitlines() if ln.strip()]
         if not raw:
-            self._maybe_truncate_decoded_txt()
             return
 
         slot_struct = time.gmtime(int(math.ceil(slot_start)))
@@ -396,7 +412,6 @@ class SlotWorker:
                 )
             )
         if not out_lines:
-            self._maybe_truncate_decoded_txt()
             return
 
         try:
@@ -420,56 +435,3 @@ class SlotWorker:
                     "%s: failed writing per-slot spots file %s: %s",
                     self._mode.upper(), spots_path, exc,
                 )
-
-        self._maybe_truncate_decoded_txt()
-
-    @staticmethod
-    def _count_lines(path: Path) -> int:
-        """Count lines in a file (0 if absent/unreadable)."""
-        try:
-            with open(path, "rb") as f:
-                return sum(1 for _ in f)
-        except OSError:
-            return 0
-
-    @staticmethod
-    def _read_new_lines(path: Path, prev_lines: int) -> list[str]:
-        """Return decoded.txt lines after index ``prev_lines`` (this slot's)."""
-        try:
-            with open(path, "r", encoding="utf-8", errors="replace") as f:
-                lines = f.readlines()
-        except OSError:
-            return []
-        if prev_lines > len(lines):
-            # File was rotated/truncated under us — re-read from the top.
-            prev_lines = 0
-        return [ln for ln in lines[prev_lines:] if ln.strip()]
-
-    def _maybe_truncate_decoded_txt(self) -> None:
-        """Keep decoded.txt bounded; reset the seen-line baseline on truncate.
-
-        decoded.txt grows by one line per MSK144 decode (rare), so this
-        almost never fires.  When it does, rewrite to the tail and reset
-        ``_decoded_lines_seen`` so the next fork's line-diff stays correct.
-        """
-        try:
-            if self._decoded_txt.stat().st_size <= _decoder.MAX_DECODED_TXT_BYTES:
-                return
-        except OSError:
-            return
-        try:
-            with open(self._decoded_txt, "r", encoding="utf-8",
-                      errors="replace") as f:
-                lines = f.readlines()
-            keep = lines[len(lines) // 2:]
-            with open(self._decoded_txt, "w", encoding="utf-8") as f:
-                f.writelines(keep)
-            logger.debug(
-                "%s %d Hz: truncated decoded.txt %d→%d lines",
-                self._mode.upper(), self._frequency_hz, len(lines), len(keep),
-            )
-        except OSError as exc:
-            logger.warning(
-                "%s %d Hz: decoded.txt truncate failed: %s",
-                self._mode.upper(), self._frequency_hz, exc,
-            )

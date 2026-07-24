@@ -37,12 +37,6 @@ MSK144_AUDIO_FREQ_HZ = 1500        # default audio Tx passband centre (jt9 -f)
 # to detect them on the parse side.
 MSK144_SYNC_CHAR = "&"
 
-# decoded.txt is appended to across slots; cap its size so a long-lived
-# channel's decode file doesn't grow without bound.  Generous — MSK144
-# decodes are rare (meteor pings), so this is hit only on very active
-# bands over many days.
-MAX_DECODED_TXT_BYTES = 200_000
-
 
 # jt9 (MSK144) is resolved from /usr/local/bin at runtime — see
 # resolve_jt9_binary(); the recorder ships no bundled decoder binaries.
@@ -106,9 +100,9 @@ def ensure_workdir(workdir: Path) -> None:
 
 
 def parse_decoded_txt_line(line: str) -> Optional[dict]:
-    """Parse one raw ``decoded.txt`` line from a jt9 MSK144 run.
+    """Parse one raw jt9 MSK144 decode line (from the process stdout).
 
-    jt9 writes a fixed-column line per decode.  The leading fields are
+    jt9 --msk144 prints a fixed-column line per decode.  The leading fields are
     ``<time> <snr> <dt> <audio_freq>`` followed by a one-character mode/
     sync indicator and then the freeform WSJT-X message.  Confirmed
     layout against real decodes is a Phase-2 live-validation item; this

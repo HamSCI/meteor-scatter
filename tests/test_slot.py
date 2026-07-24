@@ -151,10 +151,10 @@ class DecodeTimeoutTests(unittest.TestCase):
             )
             self.addCleanup(SlotWorker._kill_proc, proc)
             fds_before = len(os.listdir("/proc/%d/fd" % os.getpid()))
-            # 5-tuple: (proc, wav_path, slot_start, fork_monotonic, prev_lines).
+            # 4-tuple: (proc, wav_path, slot_start, fork_monotonic).
             # fork timestamp far enough in the past to be over any deadline.
             worker._pending_procs.append(
-                (proc, wav, 0.0, time.monotonic() - 10_000, 0)
+                (proc, wav, 0.0, time.monotonic() - 10_000)
             )
             worker._reap_finished()
             time.sleep(0.2)
@@ -178,11 +178,74 @@ class DecodeTimeoutTests(unittest.TestCase):
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             )
             self.addCleanup(SlotWorker._kill_proc, proc)
-            worker._pending_procs.append((proc, wav, 0.0, time.monotonic(), 0))
+            worker._pending_procs.append((proc, wav, 0.0, time.monotonic()))
             worker._reap_finished()
             self.assertIsNone(proc.poll(), "in-deadline proc wrongly killed")
             self.assertEqual(len(worker._pending_procs), 1, "in-deadline proc dropped")
             self.assertEqual(worker.decodes_fail, 0, "false failure counted")
+
+
+class Jt9StdoutHarvestTests(unittest.TestCase):
+    """MSK144 decodes arrive on jt9's STDOUT, not decoded.txt (which stays
+    empty for --msk144).  Regression: the daemon previously read decoded.txt
+    and silently dropped every decode, so real pings never reached the log
+    / sink.  These lock in the stdout-harvest path.
+    """
+
+    JT9_LINE = "000000   0  0.4 1509 &  CQ AC0G EM38"
+    FINISHED = "<DecodeFinished>   0   0        0"
+
+    def test_stdout_decode_normalized_to_log(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worker, _clock, _ring, _box = _make_worker(tmpdir)
+            stdout = f"{self.JT9_LINE}\n{self.FINISHED}\n"
+            worker._materialise_jt9_output(
+                Path(tmpdir) / "x.wav", 900_000_000.0, stdout)
+            out = worker._log_fd.getvalue()
+            self.assertIn("CQ AC0G EM38", out)
+            # abs RF = dial 28145000 + 1509 Hz audio offset
+            self.assertIn(" 28146509 ", out)
+            self.assertIn(" & CQ AC0G EM38", out)
+
+    def test_finished_sentinel_only_writes_nothing(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worker, _clock, _ring, _box = _make_worker(tmpdir)
+            worker._materialise_jt9_output(
+                Path(tmpdir) / "x.wav", 900_000_000.0, f"{self.FINISHED}\n")
+            self.assertEqual(worker._log_fd.getvalue(), "")
+
+    def test_read_proc_stdout_reads_real_pipe(self):
+        import subprocess
+        proc = subprocess.Popen(
+            ["printf", "hello\nworld\n"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        proc.wait()
+        self.assertEqual(
+            SlotWorker._read_proc_stdout(proc).splitlines(), ["hello", "world"])
+
+    def test_end_to_end_fork_reap_harvests_stdout(self):
+        """Fork a fake jt9 that prints a decode to stdout; the reap must
+        harvest it into the log — the exact path the bug bypassed."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fake = Path(tmpdir) / "fake_jt9"
+            fake.write_text(
+                "#!/usr/bin/env python3\n"
+                f"print({self.JT9_LINE!r})\n"
+                f"print({self.FINISHED!r})\n"
+            )
+            fake.chmod(0o755)
+            worker, clock, ring, box = _make_worker(
+                tmpdir, keep_wav=True, decoder_path=str(fake))
+            clock.anchor(rtp_timestamp=0, utc=900_000_000.0)
+            for i in range(40):
+                ring.push(np.ones(6000, dtype=np.float32), start_offset=i * 6000)
+            box["rtp"] = clock.rtp_of_offset(40 * 6000)
+            worker._tick()
+            worker._reap_all(wait=True)
+            out = worker._log_fd.getvalue()
+            self.assertIn("CQ AC0G EM38", out)
+            self.assertIn(" 28146509 ", out)
 
 
 if __name__ == "__main__":
