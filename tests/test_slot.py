@@ -248,5 +248,30 @@ class Jt9StdoutHarvestTests(unittest.TestCase):
             self.assertIn(" 28146509 ", out)
 
 
+class DesyncGuardTests(unittest.TestCase):
+    """audit F18: a SlotClockDesyncError inside _tick's harvest must be
+    caught and recovered via the on_desync callback (ChannelSink's
+    _reset_timing) instead of re-raising as a 'SlotWorker tick error'
+    every 500 ms forever with no recovery."""
+
+    def test_tick_desync_fires_on_desync_and_returns(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worker, clock, ring, box = _make_worker(tmpdir)
+            clock.anchor(rtp_timestamp=0, utc=900_000_000.0)
+            fired = []
+            worker._on_desync = lambda: fired.append(1)
+            box["rtp"] = 2**30 + 10 * SR   # beyond the safe unwrap window
+            worker._tick()                 # must not raise
+            self.assertEqual(fired, [1])
+
+    def test_tick_desync_without_callback_still_swallowed(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worker, clock, ring, box = _make_worker(tmpdir)
+            clock.anchor(rtp_timestamp=0, utc=900_000_000.0)
+            worker._on_desync = None
+            box["rtp"] = 2**30 + 10 * SR
+            worker._tick()                 # must not raise
+
+
 if __name__ == "__main__":
     unittest.main()

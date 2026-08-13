@@ -43,7 +43,7 @@ from typing import Optional
 
 import numpy as np
 
-from ka9q import SlotClock
+from ka9q import SlotClock, SlotClockDesyncError
 
 from meteor_scatter.config import MSK144_CADENCE_SEC
 from hamsci_dsp.timing import AuthorityReader
@@ -115,6 +115,7 @@ class ChannelSink:
             decoder_kind=decoder_kind,
             keep_wav=keep_wav,
             spool_spots=spool_spots,
+            on_desync=self._reset_timing,
         )
 
         self._total_delivered: int = 0
@@ -227,22 +228,35 @@ class ChannelSink:
         # value.
         batch_first_rtp = (last_rtp - n) & 0xFFFFFFFF
 
-        with self._clock_lock:
-            if not self._clock.anchored:
-                anchor_utc, source = self._anchor_utc_for(batch_first_rtp, n)
-                if anchor_utc is None:
-                    return
-                self._clock.anchor(batch_first_rtp, anchor_utc)
-                self._anchor_source = source
-                # The fixed RTP reference for the ring + the slide-follow
-                # re-pin (see _anchor_utc_now).  Set once; only changes on a
-                # genuine stream restart (on_stream_restored resets the clock).
-                self._anchor_rtp = batch_first_rtp
-                logger.info(
-                    "%s %d Hz: SlotClock anchored via %s",
-                    self._mode.upper(), self._frequency_hz, source,
-                )
-            start_off = self._clock.offset_of_rtp(batch_first_rtp)
+        try:
+            with self._clock_lock:
+                if not self._clock.anchored:
+                    anchor_utc, source = self._anchor_utc_for(batch_first_rtp, n)
+                    if anchor_utc is None:
+                        return
+                    self._clock.anchor(batch_first_rtp, anchor_utc)
+                    self._anchor_source = source
+                    # The fixed RTP reference for the ring + the slide-follow
+                    # re-pin (see _anchor_utc_now).  Set once; only changes on a
+                    # genuine stream restart (on_stream_restored resets the clock).
+                    self._anchor_rtp = batch_first_rtp
+                    logger.info(
+                        "%s %d Hz: SlotClock anchored via %s",
+                        self._mode.upper(), self._frequency_hz, source,
+                    )
+                start_off = self._clock.offset_of_rtp(batch_first_rtp)
+        except SlotClockDesyncError as exc:
+            # F18: recover like SlotClock.advance() — drop the anchor (and
+            # the ring: its offsets live in the dead reference space) and
+            # re-anchor on the next batch, instead of letting the desync
+            # propagate up through MultiStream's receive thread.
+            logger.error(
+                "%s %d Hz: SlotClock desync in on_samples — %s; dropping "
+                "anchor + ring to force a clean re-anchor",
+                self._mode.upper(), self._frequency_hz, exc,
+            )
+            self._reset_timing()
+            return
 
         self._ring.push(samples, start_off)
         self._latest_rtp = last_rtp
@@ -290,18 +304,27 @@ class ChannelSink:
         # until manual stop+start).  Re-anchoring is the intended
         # behavior.
         self._channel_info = channel_info
+        self._reset_timing()
+        logger.info(
+            "%s %d Hz: stream restored — re-anchoring on next batch",
+            self._mode.upper(), self._frequency_hz,
+        )
+
+    def _reset_timing(self) -> None:
+        """Drop the SlotClock anchor + ring so the next batch re-anchors
+        from radiod's live channel_info (the StatusListener keeps it
+        fresh — audit F19).  Shared recovery for on_stream_restored and
+        the SlotClockDesyncError guards (audit F18); mirrors the reset
+        SlotClock.advance() forces internally on the same exception.
+        """
         with self._clock_lock:
             self._clock.reset()
         self._ring.clear()
         self._latest_rtp = None
         self._anchor_source = ""
         self._anchor_rtp = None
-        # New RTP reference space → the SlotWorker must re-seed its boundary.
+        # New RTP reference space -> the SlotWorker must re-seed its boundary.
         self._slot_worker.reset_boundary()
-        logger.info(
-            "%s %d Hz: stream restored — re-anchoring on next batch",
-            self._mode.upper(), self._frequency_hz,
-        )
 
     @property
     def preset(self) -> str:

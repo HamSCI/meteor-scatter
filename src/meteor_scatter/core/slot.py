@@ -39,7 +39,7 @@ import time
 from pathlib import Path
 from typing import Callable, Optional
 
-from ka9q import SlotClock
+from ka9q import SlotClock, SlotClockDesyncError
 
 from meteor_scatter.core import decoder as _decoder
 from meteor_scatter.core.ring import Ring
@@ -80,6 +80,7 @@ class SlotWorker:
         keep_wav: bool = False,
         decoder_kind: str = DECODER_JT9,
         spool_spots: bool = False,
+        on_desync: Optional[Callable[[], None]] = None,
     ):
         if decoder_kind not in VALID_DECODER_KINDS:
             raise ValueError(
@@ -108,6 +109,10 @@ class SlotWorker:
         # RTP↔UTC slide instead of freezing — without the per-batch re-anchor
         # storm (this is a smooth, sub-sample nudge once the grid is running).
         self._get_anchor_utc_now = get_anchor_utc_now
+        # audit F18: invoked when offset_of_rtp() raises
+        # SlotClockDesyncError during harvest — ChannelSink._reset_timing,
+        # the same full anchor+ring reset used on stream restore.
+        self._on_desync = on_desync
         # Next clean cadence-multiple UTC boundary to emit (None until first).
         self._next_boundary_utc: Optional[float] = None
         self._sr = clock.sample_rate
@@ -179,28 +184,38 @@ class SlotWorker:
         cadence_samples = self._clock.cadence_samples
         settle_samples = self._clock.settle_samples
         harvested: list[tuple[int, float]] = []
-        with self._clock_lock:
-            if not self._clock.anchored:
-                return
-            latest_off = self._clock.offset_of_rtp(latest_rtp)
-            # Seed the next boundary at the first clean cadence multiple at/after
-            # the STREAM START (anchor_rtp is the first sample, so anchor_utc_now
-            # ~ the stream-start UTC).  A stream that starts mid-slot correctly
-            # begins at the next clean boundary, skipping the partial slot.
-            if self._next_boundary_utc is None:
-                self._next_boundary_utc = (
-                    math.ceil(anchor_utc_now / self._cadence_sec) * self._cadence_sec
-                )
-            # Harvest each completed clean slot, computing its RTP window offset
-            # from radiod's CURRENT mapping (anchor_utc_now) — not a frozen grid.
-            while True:
-                start_off = round(
-                    (self._next_boundary_utc - anchor_utc_now) * self._sr
-                )
-                if latest_off < start_off + cadence_samples + settle_samples:
-                    break
-                harvested.append((start_off, self._next_boundary_utc))
-                self._next_boundary_utc += self._cadence_sec
+        try:
+            with self._clock_lock:
+                if not self._clock.anchored:
+                    return
+                latest_off = self._clock.offset_of_rtp(latest_rtp)
+                # Seed the next boundary at the first clean cadence multiple at/after
+                # the STREAM START (anchor_rtp is the first sample, so anchor_utc_now
+                # ~ the stream-start UTC).  A stream that starts mid-slot correctly
+                # begins at the next clean boundary, skipping the partial slot.
+                if self._next_boundary_utc is None:
+                    self._next_boundary_utc = (
+                        math.ceil(anchor_utc_now / self._cadence_sec) * self._cadence_sec
+                    )
+                # Harvest each completed clean slot, computing its RTP window offset
+                # from radiod's CURRENT mapping (anchor_utc_now) — not a frozen grid.
+                while True:
+                    start_off = round(
+                        (self._next_boundary_utc - anchor_utc_now) * self._sr
+                    )
+                    if latest_off < start_off + cadence_samples + settle_samples:
+                        break
+                    harvested.append((start_off, self._next_boundary_utc))
+                    self._next_boundary_utc += self._cadence_sec
+        except SlotClockDesyncError as exc:
+            logger.error(
+                "%s %d Hz: SlotClock desync in harvest — %s; requesting "
+                "anchor reset (audit F18)",
+                self._mode.upper(), self._frequency_hz, exc,
+            )
+            if self._on_desync is not None:
+                self._on_desync()
+            return
 
         for start_off, start_utc in harvested:
             samples = self._ring.extract_by_offset(start_off, cadence_samples)

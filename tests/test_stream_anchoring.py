@@ -185,5 +185,52 @@ class TestRtpAnchoring(unittest.TestCase):
             _cleanup_sink(sink)
 
 
+class TestDesyncRecovery(unittest.TestCase):
+    """audit F18: a SlotClockDesyncError from offset_of_rtp() must not
+    propagate out of on_samples.  Recover the way SlotClock.advance()
+    does internally (ka9q/slot_clock.py:250-264: log, reset, return) plus
+    this sink's own on_stream_restored precedent: drop anchor AND ring
+    (ring offsets live in the dead reference space), then re-anchor on
+    the next batch."""
+
+    def _anchor(self, sink, first_rtp=1_000_000, n=2400):
+        q = _FakeQuality(last_rtp_timestamp=(first_rtp + n) & 0xFFFFFFFF)
+        with mock.patch("ka9q.rtp_to_utc", return_value=1_700_000_500.0):
+            with mock.patch("hamsci_dsp.timing.time.time",
+                            return_value=1_700_000_500.0):
+                sink.on_samples(np.zeros(n, dtype=np.float32), q)
+        self.assertTrue(sink._clock.anchored)
+
+    def test_desync_batch_resets_instead_of_raising(self):
+        sink = _make_sink(authority_reader=_NoAuthority())
+        sink.set_channel_info(_FakeChannelInfo())
+        try:
+            self._anchor(sink)
+            n = 2400
+            # > _SAFE_UNWRAP_SAMPLES (2**30) past the unwrap high-water:
+            # offset_of_rtp cannot disambiguate and raises.
+            far = (1_000_000 + n + 2**30 + 10 * SR) & 0xFFFFFFFF
+            q2 = _FakeQuality(last_rtp_timestamp=far)
+            sink.on_samples(np.zeros(n, dtype=np.float32), q2)  # must not raise
+            self.assertFalse(sink._clock.anchored)
+            self.assertIsNone(sink._anchor_rtp)
+        finally:
+            _cleanup_sink(sink)
+
+    def test_next_batch_after_desync_reanchors(self):
+        sink = _make_sink(authority_reader=_NoAuthority())
+        sink.set_channel_info(_FakeChannelInfo())
+        try:
+            self._anchor(sink)
+            n = 2400
+            far = (1_000_000 + n + 2**30 + 10 * SR) & 0xFFFFFFFF
+            sink.on_samples(np.zeros(n, dtype=np.float32),
+                            _FakeQuality(last_rtp_timestamp=far))
+            # The very next batch re-establishes the grid cleanly.
+            self._anchor(sink, first_rtp=far, n=n)
+        finally:
+            _cleanup_sink(sink)
+
+
 if __name__ == "__main__":
     unittest.main()
