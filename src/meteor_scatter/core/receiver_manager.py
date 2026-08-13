@@ -120,6 +120,7 @@ class ReceiverManager:
         self._radiod_lifetime_frames = int(radiod_lifetime_frames)
 
         self._control = None
+        self._status_listener = None
         self._sinks: list[ChannelSink] = []
         self._multi_streams: list = []
         # (MultiStream, ssrc) pairs the process-global keepalive
@@ -186,6 +187,24 @@ class ReceiverManager:
         # (wspr-recorder, hfdl-recorder, hf-timestd, etc.).  CONTRACT
         # v0.3 §7 / ka9q-python ≥ 3.14.0.
         self._control = RadiodControl(status, client_id="meteor-scatter")
+
+        # Keep each channel_info fresh from radiod's status broadcasts
+        # (~2 Hz) so the slide-follow hook (ChannelSink._anchor_utc_now)
+        # reads radiod's CURRENT GPS reference instead of the
+        # provisioning-time snapshot.  Without this the slide-follow
+        # mechanism is inert (audit finding F19).  psk-recorder pattern,
+        # mirrored verbatim.  Best-effort: a listener failure must not
+        # block provisioning.
+        try:
+            from ka9q.status_listener import StatusListener
+            self._status_listener = StatusListener(status)
+            self._status_listener.start()
+            logger.info("ReceiverManager %s: status anchor listener started on %s",
+                        self._radiod_id, status)
+        except Exception as e:
+            logger.warning("ReceiverManager %s: status anchor listener unavailable: %s",
+                           self._radiod_id, e)
+            self._status_listener = None
 
         # Surface the Fusion governor identity at startup so the journal
         # record makes multi-radiod attribution clear.
@@ -411,6 +430,14 @@ class ReceiverManager:
         # RTP_TIMESNAP / chain_delay_correction populated) to the sink
         # so on_samples can use rtp_to_utc as the UTC anchor source.
         sink.set_channel_info(ch_info)
+        # Register this same ChannelInfo so the listener refreshes its
+        # anchor in place — keeping the object the sink holds current (F19).
+        if self._status_listener is not None:
+            try:
+                self._status_listener.register_channel(ch_info)
+            except Exception as e:
+                logger.debug("register_channel failed for ssrc %s: %s",
+                             getattr(ch_info, "ssrc", "?"), e)
         if lifetime_arg is not None:
             self._lifetime_entries.append((multi, ch_info.ssrc))
 
@@ -483,6 +510,16 @@ class ReceiverManager:
 
     def stop(self) -> None:
         """Idempotent shutdown — safe to call multiple times."""
+        if self._status_listener is not None:
+            try:
+                self._status_listener.stop()
+            except Exception:
+                logger.exception(
+                    "ReceiverManager %s: error stopping status listener",
+                    self._radiod_id,
+                )
+            self._status_listener = None
+
         for tailer in self._ch_tailers:
             try:
                 tailer.stop()
