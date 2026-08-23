@@ -1,220 +1,293 @@
 # Operations guide
 
-⚠ This is a stale copy of psk-recorder's text (it says FT8/FT4; this client decodes MSK144 via `jt9 --msk144`). See `REQUIREMENTS.md` for the accurate document. Truthing is scheduled (docs program Phase 3).
+> **Audience:** operator/contributor
+> **Status:** current
+> **Verified against:** meteor-scatter bac2116 on 2026-08-23 — code
+> **Canonical for:** running meteor-scatter day-to-day — control, logs, health, failures
 
-Running meteor-scatter day-to-day: starting/stopping, reading logs,
-verifying upload health, troubleshooting.
+Running meteor-scatter day-to-day: starting and stopping, reading logs,
+telling healthy from broken, and what a restart actually costs.
+
+**Set your expectations first.** Meteor pings are *rare*. A healthy
+instance can sit at `spots=0` for hours and still be perfectly well —
+this client's normal state is a lot of empty slots. Every health signal
+below is therefore built on *slot progress*, never on spot count.
 
 ## Service control
 
 ```bash
-sudo systemctl start    meteor-scatter@<radiod_id>
-sudo systemctl stop     meteor-scatter@<radiod_id>
-sudo systemctl restart  meteor-scatter@<radiod_id>
-sudo systemctl status   meteor-scatter@<radiod_id>
+sudo systemctl start    meteor-scatter@<instance>
+sudo systemctl stop     meteor-scatter@<instance>
+sudo systemctl restart  meteor-scatter@<instance>
+sudo systemctl status   meteor-scatter@<instance>
 
 # All instances at once:
 sudo systemctl restart 'meteor-scatter@*'
 ```
 
-The unit is `Type=notify` with `WatchdogSec=120`. The daemon sends
-`READY=1` once it has provisioned channels and `WATCHDOG=1` every ~30s
-thereafter. If the main loop stalls > 120s, systemd kills and restarts
-it.
+Under sigmond, prefer `smd start meteor-scatter` / `smd restart` — see
+the restart-cost warning below before you reach for either.
 
-After repeated start failures, systemd will give up
-(`StartLimitBurst=10` over `StartLimitIntervalSec=300`). Reset with:
+The unit is `Type=notify` with `WatchdogSec=120`. The daemon sends
+`READY=1` once channels are provisioned and `WATCHDOG=1` while the
+record→decode pipeline keeps advancing; a stall of 90 s withholds the
+ping and systemd restarts it at 120 s. `TimeoutStartSec=180` is generous
+for the two-channel layout because each channel is a setpolicy
+round-trip with radiod.
+
+The instance name is escaped by systemd but not by the config path — a
+reporter id like `AC0G=S` is `meteor-scatter@AC0G\x3dS.service` as a unit
+and `/etc/meteor-scatter/AC0G=S.toml` as a file. `smd watch meteor
+--instance AC0G=S` handles the translation for you.
+
+After repeated start failures systemd gives up
+(`StartLimitBurst=10` / `StartLimitIntervalSec=300`):
 
 ```bash
-sudo systemctl reset-failed meteor-scatter@<radiod_id>
+sudo systemctl reset-failed meteor-scatter@<instance>
 ```
+
+One exit is special: **78** (`EX_CONFIG`) means the daemon found the
+`<configure-via-config-init>` placeholder as a radiod status. The unit's
+`RestartPreventExitStatus=78` stops it cleanly rather than crash-looping
+a config that can never succeed. Fix it with `meteor-scatter config init`.
+
+## ⛔ Restarting meteor-scatter bounces the radio
+
+meteor-scatter declares `requires = ["ka9q-python", "ka9q-radio"]` in
+sigmond's catalog, and `smd restart` expands that requires-closure. So
+`smd restart meteor-scatter` restarts **radiod for the whole station** —
+every other recorder loses its RTP anchor, and hf-timestd's timing
+products need roughly ten minutes to re-settle. See sigmond's
+[troubleshooting §"what a restart actually touches"](https://github.com/HamSCI/sigmond/blob/main/docs/operator/troubleshooting.md)
+for the full table and the narrow-action guidance.
+
+Since the radio is going to bounce anyway, bounce it **once**: prefer
+`smd restart all` (one clean bounce, everything re-anchored together)
+over restarting one name and leaving the rest stale. A plain
+`sudo systemctl restart meteor-scatter@<instance>` does *not* expand the
+closure and is the genuinely narrow action when you only want this
+daemon back — the cost is that it re-anchors only itself.
 
 ## Logs
 
-Three log streams per instance:
+Two log streams per instance:
 
 | Stream | Written by | Contents |
 |---|---|---|
-| systemd journal (`SyslogIdentifier=meteor-scatter@<id>`) | the daemon's stdout (`StandardOutput=journal`) | Process log: startup, channel provisioning, slot stats, errors. |
-| `/var/log/meteor-scatter/<id>-ft8.log` | the decoder (forked per slot) | One line per FT8 spot. Tailed by `pskreporter-sender`. |
-| `/var/log/meteor-scatter/<id>-ft4.log` | the decoder (forked per slot) | One line per FT4 spot. Tailed by `pskreporter-sender`. |
+| systemd journal (`SyslogIdentifier=meteor-scatter@<instance>`) | the daemon's stdout (`StandardOutput=journal`) | Process log: settle gate, channel provisioning, per-cycle commits, 60 s stats, errors |
+| `/var/log/meteor-scatter/<radiod_id>-msk144.log` | `SlotWorker` (normalized from jt9's `decoded.txt`) | One line per decoded ping. Read by `ChTailer` and by `smd watch meteor` |
 
-`journalctl -u meteor-scatter@<id>` (or `smd log meteor-scatter`) shows the
-process log; the per-mode spot logs stay as files. Only the file-based
-spot logs are listed in `inventory --json` `log_paths`.
+```bash
+journalctl -fu meteor-scatter@<instance>
+smd log meteor-scatter
+tail -f /var/log/meteor-scatter/<radiod_id>-msk144.log
+```
 
-### Per-minute stats lines
+Only the file-based spot log is listed in `inventory --json`'s
+`log_paths` (the journal is not a file sink). The log key is the
+**radiod status name**, not the systemd instance name — on a
+reporter-keyed instance the two differ.
 
-The recorder emits a line per mode every 60s:
+The spot-log line shape (`core.decoder.normalize_log_line`):
 
 ```
-INFO:meteor_scatter.core.recorder:stats FT8: spots=10 decodes=44/44 slots_empty=0 freqs=11 (60s window)
+YYYY/MM/DD HH:MM:SS <snr_db> <dt> <abs_freq_hz> & <message>
+```
+
+`&` is MSK144's sync indicator — the same field layout psk-recorder's
+logs use, where the separator is `~` (decode_ft8) instead. The
+timestamp is the RTP-anchored slot boundary, not jt9's own time column.
+
+### `smd watch meteor`
+
+```bash
+smd watch meteor                      # every receiver, summary counts
+smd watch meteor 5                    # first 5 decodes per cycle
+smd watch meteor -v                   # every decode
+smd watch meteor --instance <rid>     # scope to one instance
+```
+
+It polls each receiver's `<radiod_id>-msk144.log` every 15 s plus a 4 s
+settle and prints what landed since the last fire. It watches the
+**decoder → per-mode log** stage: pre-SQLite, pre-upload. That is also
+why `smd watch psk` does not show MSK144 — it tails psk-recorder's own
+`-ft8.log` / `-ft4.log`, a different producer, even though both clients
+end up in one `psk.spots` table.
+
+For the upload-side audit — lost / in-flight / delivered / cadence — use
+`smd admin verifier report --target psk`. That is the surface
+`deploy.toml`'s `[client_features.verifier] verb = "psk"` registers, and
+it covers MSK144 rows because they live in the same `psk.spots` queue.
+(`smd watch verifier` is a different thing: it replays wspr-recorder's
+verifier journal events.)
+
+### The 60 s stats line
+
+```
+INFO:meteor_scatter.core.recorder:stats MSK144 rx=<radiod_id>: spots=0 decodes=4/4 slots_empty=0 freqs=2 (60s window)
 ```
 
 | Field | Meaning |
 |---|---|
-| `spots` | New spots written to the spot log this window. |
-| `decodes=N/M` | N successful `decode_ft8` exits out of M invocations. |
-| `slots_empty` | Slots where the ring buffer didn't have enough samples — usually startup transient or a dropped/restored stream. |
-| `freqs` | Number of channels active for this mode. |
+| `spots` | New lines appended to that receiver's spot log this window. **Zero is normal.** |
+| `decodes=N/M` | N clean `jt9` exits out of M invocations. |
+| `slots_empty` | Slots where the ring did not hold enough samples — a startup transient, or a dropped/restored stream. |
+| `freqs` | Channels active for this receiver. |
 
-A healthy FT8 instance typically shows `decodes=freqs×4` (60s ÷ 15s)
-and a non-zero `spots` value during reasonable propagation. FT4 has
-half the slots per minute (`freqs×8`) and lower spot density.
+## Health signs
 
-## Validating and inventorying
+Read them in this order; each one rules out a layer.
+
+1. **`decodes=N/M` with `N == M` and `M ≈ freqs × 60/tr_period_sec`.**
+   At the default 30 s T/R period and two channels that is `4/4` per
+   minute. This is the liveness signal — audio is arriving, slots are
+   completing, jt9 is running and exiting cleanly. It is also exactly
+   what the watchdog counts.
+2. **`slots_empty` at 0** after the first minute. Sustained non-zero
+   means RTP is not arriving reliably.
+3. **`spots` occasionally non-zero** over hours, and rising during a
+   meteor shower. Never treat a zero-spot hour as a fault on its own.
+4. **A per-cycle commit line** from the batcher when spots do land, and
+   a matching row count in the sink:
+   ```bash
+   sqlite3 /var/lib/sigmond/sink.db \
+     "SELECT COUNT(*) FROM pending_uploads
+       WHERE target_db='psk' AND target_table='spots'
+         AND json_extract(payload_json,'\$.mode')='msk144';"
+   ```
+   (the sink is a queue table, `pending_uploads`, keyed by
+   `target_db`/`target_table` — `psk.spots` is that pair, not a table
+   name you can select from directly.)
+5. **Delivery consistent with the mode you configured** — in `deposit`
+   the journal says so at startup ("PSKReporter uploader disabled …
+   deposit to the psk.spots sink only") and rows carry
+   `forward_to_pskreporter=1`; in `direct` an `HsPskReporterUploader`
+   line appears and it pumps every 30 s.
 
 ```bash
-meteor-scatter validate --json
-meteor-scatter inventory --json
+meteor-scatter validate --json | jq        # exit 0 and no severity:"fail"
+meteor-scatter inventory --json | jq
 meteor-scatter version --json
 ```
 
-These commands keep stdout clean for piping into `jq`. All app logging
-goes to stderr.
+All three keep stdout clean for `jq`; logging goes to stderr.
 
-`validate` reports config errors and warnings. Exit code 0 if no
-`severity: fail`.
-
-`inventory` returns the full per-instance resource view that sigmond
-uses for cross-client coordination. See
-[SIGMOND-CONTRACT.md §3](SIGMOND-CONTRACT.md).
-
-## Verifying uploads
-
-### Locally
-
-```bash
-ps -ef | grep pskreporter-sender    # one per (radiod_id, mode)
-sudo ss -tnp | grep 4739            # active TCP conn (only during upload window)
-sudo journalctl -u meteor-scatter@<id> -f | grep -E 'tcp_upload|uploading'
-```
-
-`pskreporter-sender` connects to `report.pskreporter.info:4739` only
-when it has a batch to send (~3 min jitter). With TCP, the connection
-is reopened each upload cycle (a deliberate workaround for
-half-closed-socket loss; see commit history of
-[ftlib-pskreporter](https://github.com/pjsg/ftlib-pskreporter)).
-
-### Remotely
-
-PSK Reporter's retrieve API:
-
-```
-https://www.pskreporter.info/cgi-bin/pskquery5.pl?senderCallsign=<callsign>&flowStartSeconds=-3600
-```
-
-Look for spots with your callsign as `senderCallsign` (you uploaded
-them) within the last hour.
+⚠ `meteor-scatter status` is a **stub** in this build — it
+unconditionally prints "not running (Phase 1 not yet implemented)" and
+exits 2, whatever the daemon is doing. Ignore it; there is also no
+contract §13 control socket yet. Use the journal, the stats line and
+`smd watch meteor` instead (see
+[SIGMOND-CONTRACT.md](SIGMOND-CONTRACT.md)).
 
 ## Common failure modes
 
 ### "Failed to resolve `<host>-status.local`"
 
-Avahi can't see the radiod. Either `radiod@<id>.service` is not
-running on the LAN, or mDNS is broken. Check:
+Avahi cannot see the radiod. Either `radiod@<id>.service` is not running
+on the LAN, or mDNS is broken:
 
 ```bash
 systemctl is-active radiod@<id>
 avahi-resolve -n <host>-status.local
 ```
 
-### "insufficient samples, skipping" (sustained, not just startup)
-
-The ring buffer doesn't have a full slot of audio when the slot
-worker fires. Usually means the RTP stream dropped. Check the journal
-for `on_stream_dropped` / `on_stream_restored` events and verify
-network multicast is reaching the host. Brief bursts of these
-warnings on startup are normal.
-
-### `decodes=N/N spots=0` for many minutes on one mode (esp. FT4)
-
-Decoder is running but finding no signals. Could be:
-- Bands genuinely quiet for that mode (FT4 is sparser than FT8).
-- Wrong audio level — check that other modes on the same radiod
-  produce spots.
-- Slot timing off — set `keep_wav = true` (see [CONFIG.md](CONFIG.md)),
-  catch a few WAVs, run `decode_ft8 -4 -f <mhz> <wav>` by hand and
-  verify in a hex editor that you have a full 7.5 s of audio.
-
-### "Dropping N spots as too old (without connectivity)"
-
-`pskreporter-sender` ignores spots older than ~50 minutes. On
-startup it tails the existing spot log and may pick up entries from
-prior days. This is benign — only worry if it happens to fresh
-spots, which would indicate the upload pipe is broken (check network,
-then `pskreporter_tcp` setting).
-
 ### Service in `failed` state with `result 'protocol'`
 
-systemd `Type=notify` saw the daemon exit before sending `READY=1`.
-The app log will have the actual error — usually mDNS resolution
-failure (above) or a config validation fault.
+`Type=notify` saw the daemon exit before `READY=1`. The journal carries
+the real error — usually the mDNS failure above or a config validation
+fault.
 
-### `pskreporter-sender` exits and restarts in a loop
+### Exits 78 immediately and stays stopped
 
-The supervisor in `uploader.py` restarts on exit with backoff. Look
-in the journal (`journalctl -u meteor-scatter@<id>`) for
-`[pskreporter-ft8]` / `[pskreporter-ft4]` stderr lines — the sender's argparse output
-appears there, and any Python tracebacks. A common cause is the
-sender importing the wrong `pskreporter` Python module if the
-configured binary uses `#!/usr/bin/env python3` outside the venv.
+The radiod `status` is still the `<configure-via-config-init>`
+placeholder. That is the fail-fast working as designed; run
+`meteor-scatter config init`.
 
-## Debugging WAVs — the decoder shim pattern
+### Channel verify warnings, then fewer `freqs` than configured
 
-`keep_wav = true` by itself is not enough. `decode_ft8` unconditionally
-unlinks the WAV it just decoded (contract §12.4), so the spool dir
-stays empty no matter what the config says. To capture WAVs for
-inspection, install a shim decoder that copies the file aside before
-exec'ing the real one. Put it under a path in the unit's
-`ReadWritePaths`:
+A cold or busy radiod is slow to confirm new channels. Each channel gets
+10 s × 2 attempts inside a 120 s whole-provisioning budget, then is
+skipped with a warning rather than killing the daemon. Raise
+`METEOR_SCATTER_CHANNEL_VERIFY_TIMEOUT_S` / `_BUDGET_S` on a host where
+radiod is habitually loaded, and check whether radiod itself is
+overloaded by peer clients.
 
-```bash
-sudo mkdir -p /var/lib/meteor-scatter/debug
-sudo chown meteorscat:meteorscat /var/lib/meteor-scatter/debug
-sudo tee /usr/local/bin/decode_ft8-shim >/dev/null <<'SH'
-#!/bin/bash
-set -e
-wav="${@: -1}"
-mode=ft8
-for arg in "$@"; do [[ "$arg" == "-4" ]] && mode=ft4; done
-cp -p "$wav" "/var/lib/meteor-scatter/debug/${mode}_$(basename $wav)" 2>/dev/null || true
-exec /usr/local/bin/decode_ft8 "$@"
-SH
-sudo chmod 0755 /usr/local/bin/decode_ft8-shim
+### Sustained `slots_empty`, or "insufficient samples"
+
+The ring did not hold a full slot when the worker fired. Usually the RTP
+stream dropped: look for `on_stream_dropped` / `on_stream_restored` in
+the journal and verify multicast is reaching the host. Bursts at startup
+are normal.
+
+### `decodes=N/N` but the spot log never grows
+
+Expected most of the time — see the expectations note at the top. Rule
+out the boring causes first: is `tr_period_sec` the period the stations
+you monitor actually transmit on (a mismatch decodes but smears `dt`
+across adjacent slots)? Is the `usb` preset still full-width (a narrowed
+filter clips MSK144's ~2.5 kHz and kills decodes outright)? Then keep a
+few slots and try by hand:
+
+```toml
+[paths]
+keep_wav = true
 ```
 
-Point the config at the shim and restart:
-
 ```bash
-sudo sed -i 's|^decoder.*|decoder     = "/usr/local/bin/decode_ft8-shim"|' \
-    /etc/meteor-scatter/meteor-scatter-config.toml
-sudo systemctl restart meteor-scatter@<radiod_id>
+sudo systemctl restart meteor-scatter@<instance>
+ls /var/lib/meteor-scatter/<radiod_id>/msk144/ | head
+cd /tmp && touch plotspec decdata
+jt9 -Y --msk144 -p 30 -f 1500 -a /tmp /var/lib/meteor-scatter/<radiod_id>/msk144/<slot>.wav
+cat /tmp/decoded.txt
 ```
 
-Then inspect:
+Note that jt9 prints only `<DecodeFinished> …` to stdout; the decodes
+are in `decoded.txt` in the `-a` directory. Unlike `decode_ft8`, jt9
+does **not** unlink the WAV it decoded, so `keep_wav = true` is
+sufficient here — no shim decoder needed. Turn it back off when you are
+done; the spool grows ~24 KB/s per channel.
 
-```bash
-ls /var/lib/meteor-scatter/debug/ | head
-python3 -c "
-import wave, struct, math
-w = wave.open('/var/lib/meteor-scatter/debug/ft4_XXXXXX_14080.wav')
-n = w.getnframes(); raw = w.readframes(n)
-s = struct.unpack(f'<{len(raw)//2}h', raw)
-print(f'frames={n} rate={w.getframerate()} '
-      f'peak={max(abs(x) for x in s)} '
-      f'rms={math.sqrt(sum(x*x for x in s)/n):.1f}')
-"
-/usr/local/bin/decode_ft8 -4 -f 14.080000 /var/lib/meteor-scatter/debug/ft4_*_14080.wav
+### Rows in the sink but nothing at PSKReporter
+
+Check the delivery mode first (`grep DELIVERY
+/etc/meteor-scatter/env/<instance>.env`). In `deposit` this is correct
+behaviour — the wsprdaemon server's forwarder owns that hop, and the
+row's `forward_to_pskreporter=1` is what tells it so. In `direct`,
+confirm the uploader started at all: it refuses (with a warning) when
+`[station].callsign` or `grid_square` is empty.
+
+### The direct pipeline stalls every 30 s with `disk I/O error`
+
+`METEOR_SCATTER_DIRECT_DEDUP=1` on a host that shares `sink.db` with
+wspr-recorder: the dedup CTE's materialisation trips
+`sqlite3.OperationalError`. Set it back to `0` (the default). A
+single-source host has nothing to dedup anyway.
+
+### "attempt to write a readonly database" from any hs-uploader client
+
+Something re-chowned `/var/lib/hs-uploader`. It is shared across client
+service users and its `root:sigmond` 02775 shape belongs to
+`tmpfiles.d/hs-uploader.conf`. Restore it; do not let any unit chown it.
+
+### Slot timestamps look wrong after a host clock jump
+
+The daemon anchors each channel once, after the chrony settle gate
+passes. If `chronyc` was unavailable the journal says so loudly and the
+anchor was taken unverified. Restart the instance after the clock is
+disciplined — but read the restart-cost section first.
+
+## Where the spots go
+
+```
+<radiod_id>-msk144.log  →  ChTailer  →  cycle batcher  →  psk.spots (mode="msk144")
+                                                              │
+                                     DELIVERY_MODE=direct ────┼──► pskreporter.info
+                                     DELIVERY_MODE=deposit ───┘    (server forwarder)
 ```
 
-Clean up when done: point `decoder` back at `/usr/local/bin/decode_ft8`,
-restart, `rm -rf /var/lib/meteor-scatter/debug /usr/local/bin/decode_ft8-shim`.
-The shim dir fills fast — a full FT8+FT4 install across many bands is
-on the order of GB/hour.
-
-This pattern is how the April 2026 "silent FT4" investigation caught
-the low-amplitude bug ([src/meteor_scatter/core/wav.py](../src/meteor_scatter/core/wav.py)
-RMS-target normalization): radiod was delivering real audio at
-`peak ≈ 30` out of an int16 range of 32767, below what `decode_ft8`
-could reliably find FT4 signals in.
+The sink table is **`psk.spots`**, shared with psk-recorder's FT8/FT4
+rows — MSK144 is a value of the per-row `mode` column, not a table of
+its own. One consequence worth knowing: sigmond's `storage_trim`
+retention policy keys on `("psk","spots")` as a whole, so MSK144 rows
+are trimmed by the same policy as PSK rows.

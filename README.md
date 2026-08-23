@@ -1,46 +1,80 @@
 # meteor-scatter
 
-FT4/FT8 spot recorder and PSK Reporter uploader for [ka9q-radio][ka9q].
-Replaces the native `ft8-record` / `ft8-decode` / `pskreporter@` shell
-pipeline with a coordinated Python client that follows the HamSCI
-sigmond [client contract][contract] (v0.8).
+Meteor-scatter **ping recorder and decoder** for [ka9q-radio][ka9q].
+Receives WSJT-X **MSK144** monitoring channels from `radiod` via
+[ka9q-python][ka9qpy], records T/R-aligned slots, decodes each with
+`jt9 --msk144`, and stages the resulting spots into the HamSCI sigmond
+suite's shared spot sink. Follows the sigmond [client contract][contract]
+(v0.8).
+
+Meteor trails ionize for milliseconds to a couple of seconds, opening
+ultra-short propagation windows. MSK144 — WSJT-X's FEC'd successor to
+FSK441 — packs 72 ms frames with aggressive LDPC coding so that a single
+ping can carry a whole decode. This client monitors the conventional
+MSK144 channels (10 m @ 28.145 MHz, 6 m @ 50.260 MHz) and reports every
+ping it hears. It is passive monitoring, not QSO operation.
 
 ```
 radiod (ka9q-radio)
-  │   RTP multicast, one stream per (band, mode) channel
+  │   RTP multicast, one stream per MSK144 channel (usb, 12 kHz, s16be)
   ▼
 meteor-scatter daemon (one per radiod)
-  ├─ per-channel: ring buffer → 15s/7.5s slot WAV → fork decode_ft8
-  ├─ per-mode log file (decode_ft8 native format)
-  ├─ per-mode: pskreporter-sender (UDP or TCP to pskreporter.info)
-  └─ per-mode: ChTailer → sigmond.hamsci_sink.Writer → psk.spots
+  ├─ per-channel: RTP-anchored SlotClock → ring → T/R slot WAV
+  │               → fork `jt9 -Y --msk144 -p <tr> -f 1500 -a <wd>`
+  │               → read the delta appended to jt9's decoded.txt
+  ├─ per-radiod:  <radiod_id>-msk144.log   (normalized decode lines)
+  └─ ChTailer → callhash resolution → cycle batcher
+       → sigmond.hamsci_sink.Writer → psk.spots (per-row mode="msk144")
+            └─ hs-uploader → pskreporter.info   (direct mode only)
 ```
 
-meteor-scatter decodes with ka9q/ft8_lib's `decode_ft8`.  Rows tag
-themselves via `decoder_kind` in `psk.spots`, and ChTailer parses the
-decoder output into `psk.spots` rows.
+Two details that are easy to assume wrong:
 
-One `meteor-scatter@<radiod_id>.service` instance per radiod. Each
-instance handles all configured FT8 and FT4 frequencies on that
-radiod.
+* **The sink target is `psk.spots`, not `msk144.spots`.** MSK144 is a
+  value of the per-row `mode` column in the same table psk-recorder's
+  FT8/FT4 rows use, so one PSKReporter pipeline
+  (`mode IN (ft8, ft4, msk144)`) delivers all three.
+* **The default T/R period is 30 s**, matching a stock WSJT-X MSK144
+  install. `[radiod.msk144].tr_period_sec` overrides it (WSJT-X also
+  offers 5/10/15 s; 15 s is the 2 m VHF meteor-ping convention). That one
+  number is the slot length, the decode cadence and `jt9 -p`.
+
+Compound callsigns are recovered through the shared [callhash][callhash]
+library: `jt9 -Y` emits an unresolved compound call as a numeric 22-bit
+`<NNNNNNN>` hash, and the cross-mode table substitutes the plaintext back
+from accumulated sightings — so a call learned on FT8 or WSPR resolves an
+MSK144 hash and vice-versa.
+
+One `meteor-scatter@<instance>.service` per radiod; each instance handles
+every MSK144 frequency configured on that radiod.
 
 ## Quickstart
 
-External binaries must be present first:
-- `decode_ft8` from [ka9q/ft8_lib][ft8_lib] → `/usr/local/bin/decode_ft8` —
-  meteor-scatter's FT4/FT8 decoder.
-- `pskreporter-sender` from [pjsg/ftlib-pskreporter][ftlib] → `/usr/local/bin/pskreporter-sender`
-- A working `radiod@<id>.service` from [ka9q/ka9q-radio][ka9q]
+Prerequisites:
+- A working `radiod@<id>.service` from [ka9q/ka9q-radio][ka9q], reachable
+  by its mDNS status name, covering the bands you want (6 m included).
+- `jt9` (WSJT-X 3.0.2) at `/usr/local/bin/jt9`. On a sigmond host
+  `smd` builds it from pinned source; **no decoder binaries ship in this
+  repo**.
 
 Then:
 
 ```bash
 git clone https://github.com/HamSCI/meteor-scatter /opt/git/sigmond/meteor-scatter
-sudo /opt/git/sigmond/meteor-scatter/scripts/install.sh   # creates user, venv, config, units
-sudo meteor-scatter config edit                           # interactive wizard (whiptail) -- see below
-sudo systemctl start meteor-scatter@<radiod_id>
-journalctl -fu meteor-scatter@<radiod_id>
+sudo /opt/git/sigmond/meteor-scatter/scripts/install.sh   # user, venv (uv), dirs, unit
+sudo meteor-scatter config init                           # interactive wizard -- see below
+sudo systemctl start meteor-scatter@<instance>
+journalctl -fu meteor-scatter@<instance>
 ```
+
+Under sigmond, `smd install meteor-scatter` runs that same `install.sh`,
+and `smd config init meteor-scatter` / `smd start --components
+meteor-scatter` replace the last two steps. `install.sh` deliberately
+writes no config and enables no instance — configuration comes first.
+
+⛔ Restarting meteor-scatter through `smd` bounces radiod for the whole
+station (it declares `requires = ["ka9q-python", "ka9q-radio"]`). See
+[docs/OPERATIONS.md](docs/OPERATIONS.md) before you restart anything.
 
 ### Configuration
 
@@ -48,51 +82,49 @@ meteor-scatter's operator-facing config spans **three persistence layers**:
 
 | Layer | Path | Owner | Holds |
 |---|---|---|---|
-| **TOML config** | `/etc/meteor-scatter/meteor-scatter-config.toml` | meteor-scatter | `[station]`, `[paths]`, `[processing]`, `[timing]`, `[[radiod]]` blocks |
-| **Coordination env** | `/etc/sigmond/coordination.env` | sigmond | `STATION_CALL`, `STATION_GRID`, `SIGMOND_SQLITE_PATH`, host-wide identity |
-| **Per-instance env** | `/etc/meteor-scatter/env/<radiod_id>.env` | meteor-scatter | `METEOR_SCATTER_DELIVERY_PIPELINES`, `METEOR_SCATTER_USE_HS_UPLOADER`, `METEOR_SCATTER_DIRECT_DEDUP` — the upload destination knobs |
+| **TOML config** | `/etc/meteor-scatter/<instance>.toml` (legacy: `meteor-scatter-config.toml`) | meteor-scatter | `[station]`, `[paths]`, `[processing]`, `[timing]`, `[instance]`, `[[radiod]]` + `[radiod.msk144]` |
+| **Coordination env** | `/etc/sigmond/coordination.env` | sigmond | `STATION_CALL`, `STATION_GRID`, `STATION_REPORTER_ID`, `SIGMOND_SQLITE_PATH`, `RADIOD_<id>_CHAIN_DELAY_NS` |
+| **Per-instance env** | `/etc/meteor-scatter/env/<instance>.env` | sigmond seeds it; edit by hand | `METEOR_SCATTER_DELIVERY_MODE`, `METEOR_SCATTER_DIRECT_DEDUP`, `METEOR_SCATTER_LOG_LEVEL` |
 
-The wizard manages layers 1 and 3; it reads from layer 2 (sigmond's
-coordination env) for pre-fills but never writes there.
+The wizard manages layer 1; it reads layer 2 for pre-fills and never
+writes there. Layer 3 is seeded by sigmond from `deploy.toml
+[contract.instance_env]` (`METEOR_SCATTER_DELIVERY_MODE = "deposit"` on a
+host whose hs-uploader daemon owns egress).
+
+⚠ `meteor-scatter env apply` manages **no** keys in this build
+(`_ENV_WRITABLE_KEYS` is empty), so the wizard's *Delivery* menu item
+fails and layer 3 must be edited directly. `env show` works.
 
 #### Interactive wizard (default)
 
 When stdout is a TTY and `whiptail` is installed, `meteor-scatter config
-init` (first time) and `meteor-scatter config edit` (subsequent) launch
-a menu-driven wizard:
+init` (first time) and `config edit` (subsequent) launch a menu-driven
+wizard:
 
 ```
 Station    Call=AC0G  Grid=EM38ww40pk
-Paths      spool=/var/lib/meteor-scatter  decoder=decode_ft8
+Paths      spool=/var/lib/meteor-scatter  decoder=jt9
 Processing lifetime=6000 frames
 Timing     chain_delay=0 ns (sigmond usually overrides)
-Radiod     blocks: bee1-rx888
-Delivery   pipelines: direct,server-raw (per-instance env)
+Radiod     blocks: sigma-rx888mk2-status.local
+Delivery   pipelines: ... (per-instance env — see the warning above)
 Edit-TOML  Open raw config in $EDITOR (for freqs_hz lists)
 Apply      Review and write changes
 Cancel     Discard pending changes and exit
 ```
 
-Inside a section, Cancel drops back to the menu — effective "back"
-navigation.  Each section walks its questions linearly with per-field
-help and validation.
+Cancel inside a section drops back to the menu — effective "back"
+navigation. Each section walks its questions linearly with per-field help
+and validation.
 
 - **Station / Paths / Processing / Timing** edit the TOML through
   `config apply`.
-- **Radiod** lets you pick an existing `[[radiod]]` block to edit
-  (`id`, `radiod_status`) or add a new one.  `freqs_hz` arrays stay
-  in the raw TOML — use the **Edit-TOML** menu item for those.
-- **Delivery** edits `/etc/meteor-scatter/env/<radiod_id>.env` through
-  `env apply`.  Shows `SIGMOND_SQLITE_PATH` from coordination.env
-  read-only for context.  Auto-downgrades `direct + server-merge` to
-  `direct + server-raw` so the wsprdaemon server doesn't double-post.
+- **Radiod** picks an existing `[[radiod]]` block to edit (its `status`
+  mDNS name) or adds a new one. `freqs_hz` arrays stay in raw TOML — use
+  **Edit-TOML** for those.
 
 Per-key help lives in `config/help.toml`; pre-fills come from
-`/etc/sigmond/coordination.env` (`STATION_CALL`, `STATION_GRID`) and
-the current TOML / env files.
-
-Same UI pattern mag-recorder uses; see that repo's README for the
-basic shape.
+`/etc/sigmond/coordination.env` and the current TOML.
 
 #### Headless / scripted
 
@@ -100,43 +132,39 @@ basic shape.
 meteor-scatter config init --non-interactive
 ```
 
-Renders the template with `STATION_CALL` / `SIGMOND_INSTANCE` /
-`SIGMOND_RADIOD_STATUS` env-bag substitutions, no prompts.
+Renders the template with `STATION_CALL` / `STATION_GRID` /
+`SIGMOND_INSTANCE` / `SIGMOND_RADIOD_STATUS` env-bag substitutions, no
+prompts.
 
 #### Hand-edit
 
 ```bash
-sudoedit /etc/meteor-scatter/meteor-scatter-config.toml
-sudoedit /etc/meteor-scatter/env/<radiod_id>.env
+sudoedit /etc/meteor-scatter/<instance>.toml
+sudoedit /etc/meteor-scatter/env/<instance>.env
 ```
 
-Operator who values inline comments / formatting should pick this
-path; the wizard's `config apply` rewrites the TOML cleanly and
-doesn't preserve comments.
+Prefer this if you value the template's inline comments — `config apply`
+rewrites the TOML cleanly and does not preserve them.
 
 #### JSON entry points (for sigmond / other tooling)
 
 ```bash
 meteor-scatter config show  --json [--defaults]              # → TOML as JSON
 meteor-scatter config apply --json -                         # ← stdin JSON, validated, atomic write
-meteor-scatter env    show  --json --instance <radiod_id>    # → env file as JSON
-meteor-scatter env    apply --json - --instance <radiod_id>  # ← stdin JSON, validated, atomic write
+meteor-scatter env    show  --json --instance <instance>     # → env file as JSON
+meteor-scatter inventory --json                              # contract v0.8 resource view
+meteor-scatter validate  --json                              # contract v0.8 validation
+meteor-scatter version   --json
 ```
 
-`config apply` writes `[station]`, `[paths]`, `[processing]`,
-`[timing]`, and `[[radiod]]` (overlay-wins for the radiod list — the
-operator's full list replaces the file's list; per-band `freqs_hz`
-must be passed back in the payload if you want to preserve them).
-
-`env apply` writes `METEOR_SCATTER_DELIVERY_PIPELINES`, `METEOR_SCATTER_USE_HS_UPLOADER`,
-`METEOR_SCATTER_DIRECT_DEDUP`, and the legacy `METEOR_SCATTER_DELIVERY_MODE`.  Keys outside
-that set are rejected so a typo doesn't silently land in the env
-file.  Setting a key to JSON `null` deletes it.
+`config apply` writes `[station]`, `[paths]`, `[processing]`, `[timing]`
+and `[[radiod]]` (overlay-wins for the radiod list — pass `freqs_hz` back
+in the payload to preserve it).
 
 For ongoing development on a checked-out repo:
 
 ```bash
-sudo /opt/git/sigmond/meteor-scatter/scripts/deploy.sh         # pip install -e + restart instances
+sudo /opt/git/sigmond/meteor-scatter/scripts/deploy.sh         # refresh + restart
 sudo /opt/git/sigmond/meteor-scatter/scripts/deploy.sh --pull  # git pull then deploy
 ```
 
@@ -144,38 +172,48 @@ For tests (no venv needed):
 
 ```bash
 PYTHONPATH=src python3 -m pytest tests/ -v
+uv sync --extra dev && uv run pytest tests/ -v    # canonical
 ```
 
 ## Documentation
 
-- [docs/INSTALL.md](docs/INSTALL.md) — full install (deps, multi-radiod, paths, permissions)
-- [docs/CONFIG.md](docs/CONFIG.md) — TOML schema reference (every section, every key)
-- [docs/OPERATIONS.md](docs/OPERATIONS.md) — running it: logs, monitoring, common failures
+Start at [docs/INDEX.md](docs/INDEX.md).
+
+- [docs/INSTALL.md](docs/INSTALL.md) — install and upgrade: deps, multi-radiod, paths, permissions
+- [docs/CONFIG.md](docs/CONFIG.md) — every TOML key and environment variable
+- [docs/OPERATIONS.md](docs/OPERATIONS.md) — running it: control, logs, health signs, failures
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — internals for contributors
-- [docs/SIGMOND-CONTRACT.md](docs/SIGMOND-CONTRACT.md) — how meteor-scatter satisfies the HamSCI client contract
-- [CLAUDE.md](CLAUDE.md) — development briefing (workflow, conventions)
+- [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md) — formal requirements register (`MTS-*`)
+- [docs/SIGMOND-CONTRACT.md](docs/SIGMOND-CONTRACT.md) — section-by-section contract conformance
+- [CLAUDE.md](CLAUDE.md) — development briefing
 
 ## What it does and does not
 
-**Does:** receive RTP multicast from `radiod`, slot-align audio to FT8
-(15s) or FT4 (7.5s) cadence, write a WAV per slot, fork `decode_ft8`,
-append spots to per-mode log files in decode_ft8's native format,
-supervise a long-running
-`pskreporter-sender` per mode that tails those logs and uploads to
-pskreporter.info, and stream parsed rows into `psk.spots` via
-`sigmond.hamsci_sink.Writer` (sigmond's local SQLite sink by default).
+**Does:** receive RTP multicast from `radiod`; anchor a slot clock once
+off radiod's GPS-true RTP timestamp and defer to RTP thereafter;
+slot-align audio to the configured MSK144 T/R period; write one mono
+12 kHz WAV per slot; fork `jt9 --msk144` and read its `decoded.txt`
+delta; normalize each decode into a per-radiod spot log; resolve
+compound-call hashes through the shared callhash table; stamp timing
+provenance and reporter identity on every row; stage rows into
+`psk.spots`; and — in `direct` delivery mode — POST them to
+pskreporter.info through hs-uploader's `PskReporterTcp` transport.
 
-**Does not:** reimplement the FT8/FT4 decoder, reimplement the
-pskreporter protocol, or talk to `radiod` over anything but
+**Does not:** decode FT8 or FT4 (that is [psk-recorder][psk]);
+reimplement the MSK144 decoder (it shells out to WSJT-X's `jt9`);
+reimplement the PSKReporter protocol (hs-uploader owns the socket);
+transmit anything; or talk to `radiod` over anything but
 [ka9q-python][ka9qpy]. Multicast destination addresses are *resolved
 from* radiod, never specified by meteor-scatter.
 
 ## License
 
 MIT. See [LICENSE](LICENSE). Author: Michael Hauan, AC0G.
+`jt9` is WSJT-X, GPLv3, built from source on the host — not
+redistributed here.
 
 [ka9q]: https://github.com/ka9q/ka9q-radio
 [ka9qpy]: https://github.com/HamSCI/ka9q-python
-[ft8_lib]: https://github.com/ka9q/ft8_lib
-[ftlib]: https://github.com/pjsg/ftlib-pskreporter
+[callhash]: https://github.com/HamSCI/callhash
+[psk]: https://github.com/HamSCI/psk-recorder
 [contract]: https://github.com/HamSCI/sigmond/blob/main/docs/CLIENT-CONTRACT.md

@@ -2,7 +2,7 @@
 
 > **Audience:** all
 > **Status:** current
-> **Verified against:** meteor-scatter 21cd2f4 on 2026-08-23 — code
+> **Verified against:** meteor-scatter bac2116 on 2026-08-23 — code
 > **Canonical for:** the map of this repo's docs
 
 ★ = canonical; when two docs disagree the ★ one wins. Suite-wide front door:
@@ -10,11 +10,10 @@
 
 | Doc | Audience | What it gives you |
 |-----|----------|-------------------|
-| ⚠ | all | ARCHITECTURE/CONFIG/INSTALL/OPERATIONS/SIGMOND-CONTRACT are a stale copy of psk-recorder's text (they say FT8/FT4; this client decodes MSK144 via `jt9 --msk144`). `REQUIREMENTS.md` is the one accurate document. Truthing is scheduled (docs program Phase 3). |
-| [../README.md](../README.md) | all | what this client is: FT4/FT8 spot recorder and PSK Reporter uploader for ka9q-radio (see warning above) |
-| [ARCHITECTURE.md](ARCHITECTURE.md) ★ | contributor | internals: the high-level pipeline |
-| [CONFIG.md](CONFIG.md) ★ | operator/contributor | TOML config reference |
-| [INSTALL.md](INSTALL.md) | contributor | production install: deps, systemd |
-| [OPERATIONS.md](OPERATIONS.md) ★ | operator/contributor | running it day-to-day: starting/stopping, logs, health, troubleshooting |
-| [REQUIREMENTS.md](REQUIREMENTS.md) | contributor | formal requirements, reconciled to code — the accurate document (MSK144, not FT4/FT8) |
-| [SIGMOND-CONTRACT.md](SIGMOND-CONTRACT.md) ★ | contributor | conformance map to sigmond's CLIENT-CONTRACT |
+| [../README.md](../README.md) | all | what this client is: an MSK144 meteor-scatter ping recorder/decoder for ka9q-radio, and how to install and configure it |
+| [ARCHITECTURE.md](ARCHITECTURE.md) ★ | contributor | internals: the record → `jt9 --msk144` → callhash → `psk.spots` pipeline, module by module |
+| [CONFIG.md](CONFIG.md) ★ | operator/contributor | every TOML key and environment variable, with its default and where the code reads it |
+| [INSTALL.md](INSTALL.md) ★ | operator/contributor | install and upgrade: prerequisites, `install.sh` step by step, paths, multi-radiod, uninstall |
+| [OPERATIONS.md](OPERATIONS.md) ★ | operator/contributor | running it day-to-day: control, logs, `smd watch meteor`, health signs, failure modes, restart cost |
+| [REQUIREMENTS.md](REQUIREMENTS.md) ★ | contributor | the formal requirements register (`MTS-*` IDs, gaps, traceability), reconciled to code 2026-06-25 — a few details have since drifted (see SIGMOND-CONTRACT.md "Known drift") |
+| [SIGMOND-CONTRACT.md](SIGMOND-CONTRACT.md) ★ | contributor | section-by-section conformance map to sigmond's CLIENT-CONTRACT v0.8, including the gaps and the product-file drift list |

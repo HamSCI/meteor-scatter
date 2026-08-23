@@ -1,282 +1,384 @@
 # Sigmond client contract conformance
 
-⚠ This is a stale copy of psk-recorder's text (it says FT8/FT4; this client decodes MSK144 via `jt9 --msk144`). See `REQUIREMENTS.md` for the accurate document. Truthing is scheduled (docs program Phase 3).
+> **Audience:** contributor
+> **Status:** current
+> **Verified against:** meteor-scatter bac2116 on 2026-08-23 — code
+> **Canonical for:** how meteor-scatter maps onto the HamSCI client contract
 
 meteor-scatter implements the [HamSCI client contract][contract] (v0.8),
-maintained in the sigmond repository at
-[`docs/CLIENT-CONTRACT.md`][contract]. It is the contract's
-**greenfield v0.3 reference implementation** (per §9) and surfaced
-all six v0.4 hardening items (§12) during its Phase 1 deploy.
+maintained in the sigmond repository at [`docs/CLIENT-CONTRACT.md`][contract].
+`src/meteor_scatter/contract.py` declares `CONTRACT_VERSION = "0.8"` and
+`deploy.toml` declares `contract_version = "0.8"`; the catalog entry
+(`sigmond/etc/catalog.toml [client.meteor-scatter]`) matches.
 
-This document is a section-by-section map of how meteor-scatter
-satisfies each contract surface. The contract itself is the
-authoritative spec; this is the implementation index.
+This is a section-by-section map of what meteor-scatter actually does.
+The contract is the norm; where the two disagree the contract wins and
+this page is the bug. Sections marked **not implemented** are honest
+gaps, not omissions from this page.
+
+**Scope note.** meteor-scatter was scaffolded from psk-recorder and
+inherits its contract surface almost verbatim; the differences are the
+single mode (`msk144`), the decoder (`jt9`, not `decode_ft8`), and the
+shared-not-separate sink namespace.
 
 ## What the contract is for
 
-Sigmond is a coordinator across multiple HamSCI clients running on
-the same station (hf-timestd, wsprdaemon, meteor-scatter, ka9q-web).
-The contract is the *only* interface between sigmond and a client:
-
-- Sigmond never imports client code, never edits client config files,
-  never shells into a client.
-- Every client must run **standalone with no sigmond present**.
-- When sigmond is present, it learns about a client by shelling
-  `<client> inventory --json` and `<client> validate --json`, and it
-  influences a client only by writing `/etc/sigmond/coordination.env`
-  and per-unit drop-ins in the client's `<unit>.d/` namespace.
-
-A client is contract-conformant if the same binary runs unchanged
-under both regimes.
+Sigmond installs, configures, starts, monitors and coordinates a fleet
+of independent clients without knowing anything client-specific. The
+contract is the interface that makes that possible: a client that
+implements it can be dropped into `/opt/git/sigmond/<name>` and
+discovered from its own `deploy.toml`, with no sigmond-side edits.
 
 ## §1 — Native config
 
-Lives at `/etc/meteor-scatter/meteor-scatter-config.toml`. Schema is
-meteor-scatter's own — see [CONFIG.md](CONFIG.md). Cross-station
-concerns (chain-delay correction, log level) come from sigmond's
-coordination.env, not from this file.
+✅ Implemented. `/etc/meteor-scatter/<instance>.toml` (preferred) or the
+legacy shared `/etc/meteor-scatter/meteor-scatter-config.toml`, plain
+TOML, loaded by `config.load_config()` with defaults merged in. Sigmond
+never edits it — it invokes meteor-scatter's own `config init|edit`
+(§14). See [CONFIG.md](CONFIG.md).
 
-## §2 — Binding to radiod by id
+## §2 — Binding to radiod by status name
 
-Each `[[radiod]]` block in the config names its upstream radiod by an
-`id` field and a `radiod_status` mDNS hostname:
+✅ Implemented, at the v0.8 cutover point. The `[[radiod]]` block's
+canonical identifier is its **mDNS control/status multicast name**
+(`status = "sigma-rx888mk2-status.local"`), per
+RADIOD-IDENTIFICATION.md §3.1 — never an IP.
 
-```toml
-[[radiod]]
-id            = "bee1-rx888"
-radiod_status = "bee1-status.local"
-```
+`config.resolve_radiod_block()` matches `--radiod-id` against `status`
+and has **removed** acceptance of the legacy `id` field; a config that
+still carries `id` / `radiod_status` fails with an explicit pointer to
+`sudo smd radiod migrate --yes`. `config.resolve_radiod_status()` and
+`derive_source_key()` (→ `radiod:<status>`, matching
+`sigmond.sources.SourceKey` and wspr-recorder's `SourceConfig.key`)
+build everything else from that one field.
 
-Sigmond may override the status name at runtime by setting
-`RADIOD_BEE1_RX888_STATUS=...` in coordination.env. meteor-scatter
-reads this in [src/meteor_scatter/config.py:107](../src/meteor_scatter/config.py)
-(`resolve_radiod_status`) before falling back to the config field.
-Standalone deployments work without the env var.
+The unconfigured sentinel `<configure-via-config-init>` mirrors
+`sigmond.harmonize._RADIOD_STATUS_PLACEHOLDER`: `validate` fails on it
+and the daemon exits `EX_CONFIG` (78) rather than crash-looping.
 
 ## §3 — Self-describe CLI
 
-Three JSON subcommands. All three keep stdout pristine — the CLI
-installs a guard at the top of `main()` that redirects the root
-logger to stderr before parsing args, so `inventory --json | jq` never
-chokes on a stray banner line.
+✅ `inventory --json`, `validate --json`, `version --json`, all pure
+stdout JSON with logging forced to stderr by the CLI's
+stdout-cleanliness guard.
 
-```bash
-meteor-scatter inventory --json
-meteor-scatter validate  --json
-meteor-scatter version   --json
-```
+`contract.build_inventory()` emits:
 
-`inventory --json` shape (representative):
+| Top-level key | Value |
+|---|---|
+| `client` | `"meteor-scatter"` |
+| `version` | `importlib.metadata.version("meteor-scatter")`, falling back to `"0.4.0"` |
+| `contract_version` | `"0.8"` |
+| `config_path` | absolute path actually loaded (§12.3) |
+| `git` | `version.GIT_INFO` when present |
+| `log_paths` | `{<radiod_id>: {"spots": {"msk144": "<log_dir>/<radiod_id>-msk144.log"}}}` (§10) |
+| `log_level` | effective root level name (§11) |
+| `instances` | one entry per `[[radiod]]` block |
+| `deps` | git + pypi declarations |
+| `issues` | the same list `validate` returns |
 
-```json
-{
-  "client": "meteor-scatter",
-  "version": "0.1.0",
-  "contract_version": "0.8",
-  "config_path": "/etc/meteor-scatter/meteor-scatter-config.toml",
-  "git": {"sha": "...", "short": "...", "ref": "main", "dirty": false},
-  "log_paths": {
-    "bee1-rx888": {
-      "spots": {
-        "ft8": "/var/log/meteor-scatter/bee1-rx888-ft8.log",
-        "ft4": "/var/log/meteor-scatter/bee1-rx888-ft4.log"
-      }
-    }
-  },
-  "log_level": "INFO",
-  "instances": [
-    {
-      "instance": "bee1-rx888",
-      "radiod_id": "bee1-rx888",
-      "radiod_status_dns": "bee1-status.local",
-      "data_destination": "239.7.245.164",
-      "ka9q_channels": 20,
-      "frequencies_hz": [...],
-      "modes": ["ft8", "ft4"],
-      "disk_writes": [...],
-      "uses_timing_calibration": false,
-      "provides_timing_calibration": false,
-      "chain_delay_ns_applied": 0
-    }
-  ],
-  "deps": {"git": [...], "pypi": [...]},
-  "issues": []
-}
-```
+Per instance:
 
-Builders are in [src/meteor_scatter/contract.py](../src/meteor_scatter/contract.py).
+| Field | Value |
+|---|---|
+| `instance` / `radiod_id` / `radiod_status_dns` | all three are the mDNS status name — the only functional identifier (§2, RADIOD-IDENTIFICATION.md §3.2) |
+| `host` | `"localhost"` |
+| `data_destination` | `null` — see §7 |
+| `ka9q_channels` / `frequencies_hz` | count and sorted list of `[radiod.msk144].freqs_hz` |
+| `modes` | `["msk144"]` when frequencies are configured, else `[]` |
+| `data_sinks` | two `kind="file"` entries — the spool and the log dir (§17) |
+| `uses_timing_calibration` / `provides_timing_calibration` | `false` / `false` |
+| `chain_delay_ns_applied` | `RADIOD_<ID>_CHAIN_DELAY_NS` from env, else `null` (§8) |
+| `timing_authority_applied` | `null` — RTP-default mode (§18) |
+
+⚠ Two shapes to know about: the payload carries **no `templated_units`
+key** (sigmond reads the unit list from `deploy.toml [systemd].units`
+instead), and `deps.git` still names `ka9q-radio` with the note "jt9
+--msk144 decoder (bundled in-repo)", which is doubly wrong — jt9 comes
+from WSJT-X, and nothing is bundled (see §"Known drift" below).
+
+An unreadable or invalid config does **not** crash `inventory`: the CLI
+catches it and emits a well-formed payload whose `issues` carries a
+`severity: "fail"` explanation, because sigmond probing as the operator
+against a mode-0640 service-user-owned config is a normal condition.
 
 ## §4 — Systemd units
 
-Templated unit `meteor-scatter@.service` with `%i` matching the
-`[[radiod]].id`. Sources both the sigmond coordination env and an
-optional per-instance env file, both with the leading dash so the
-unit runs without sigmond installed:
+✅ One templated unit, `systemd/meteor-scatter@.service`, installed to
+`/etc/systemd/system/` and declared in `deploy.toml [systemd].units`.
+`Type=notify`, `WatchdogSec=120`, `NotifyAccess=main`, `Restart=always`,
+`RestartPreventExitStatus=78`, `TimeoutStartSec=180`, hardened with
+`ProtectSystem=strict` + explicit `ReadWritePaths` (including
+`/var/lib/sigmond`, without which the sink writer silently no-ops) and
+`ReadOnlyPaths=/etc/meteor-scatter`, and bounded by `MemoryMax=1G` /
+`MemorySwapMax=0` because each concurrent jt9 child mmaps ~60 MB.
 
-```ini
-EnvironmentFile=-/etc/sigmond/coordination.env
-EnvironmentFile=-/etc/meteor-scatter/env/%i.env
-```
-
-Sigmond is welcome to drop CPU-affinity files at
-`/etc/systemd/system/meteor-scatter@<id>.service.d/10-sigmond-cpu-affinity.conf`;
-meteor-scatter writes nothing under that path itself. Full unit at
-[systemd/meteor-scatter@.service](../systemd/meteor-scatter@.service).
+`EnvironmentFile=` reads `/etc/sigmond/coordination.env` then
+`/etc/meteor-scatter/env/%i.env` (and `%I.env` for hosts that worked
+around the old bug — `%I` unescapes dashes into slashes, so `%i` is the
+working key).
 
 ## §5 — Deploy manifest
 
-[`deploy.toml`](../deploy.toml) at the repo root declares build
-steps, install steps, the systemd unit list, and external deps
-(`ka9q-radio` for `decode_ft8`, `ftlib-pskreporter` for
-`pskreporter-sender`, `ka9q-python` from PyPI). Sigmond uses this to
-install/upgrade meteor-scatter without carrying any meteor-scatter-specific
-knowledge in its own code.
+✅ `deploy.toml` declares `[package]` (name, version 0.4.0,
+contract_version 0.8, license), `[contract.config]` init/edit commands,
+`[contract.instance_env]` greenfield env defaults, `[build]` steps and
+`produces`, `[[install.steps]]` (link the CLI, link the unit, render the
+config `if_absent`, mkdir spool + log owned `meteorscat:meteorscat`),
+`[systemd].units`, `[[deps.git]]` / `[[deps.pypi]]` / `[[deps.apt]]`,
+sigmond UI hooks under `[client_features]`, and one
+`[[hs_uploader.pipeline]]`.
 
-The standalone-safe equivalent is `scripts/install.sh` — same
-production layout, no sigmond required.
+The `[client_features]` hooks are what register meteor-scatter with
+sigmond's UI without a sigmond-side edit:
+
+| Hook | Value | Effect |
+|---|---|---|
+| `watch.verb` | `meteor` | `smd watch meteor` — per-cycle decode activity |
+| `verifier.verb` / `.kind` | `psk` / `spot_queue` | `smd admin verifier report --target psk` covers MSK144, since the rows share `psk.spots` |
+| `receiver_channels` | `sigmond_tui.parse_receiver_channels` | the TUI Activity panel's channel list |
+
+The `[[hs_uploader.pipeline]]` block deliberately declares the **same**
+`psk-pskreporter` pipeline psk-recorder declares (`mode IN
+(ft8, ft4, msk144)`, `forward_to_pskreporter = 0`). `smd admin uploader
+manifest` dedups identical pipelines by name, so the two collapse to one
+where both clients are enabled, while a meteor-only host still gets
+egress.
 
 ## §6 — Talking to radiod
 
-meteor-scatter talks to `radiod` exclusively through `ka9q-python`'s
-`RadiodControl`. It never speaks the radiod control protocol
-directly. See [src/meteor_scatter/core/recorder.py](../src/meteor_scatter/core/recorder.py)
-(`_provision_channels`).
+✅ Exclusively through `ka9q-python` (`RadiodControl.ensure_channel`,
+`MultiStream`, `SlotClock`, `StatusListener`). meteor-scatter never
+speaks radiod's control protocol directly and never runs radiod itself.
+`deploy.toml` and the catalog both declare `requires = ["ka9q-python",
+"ka9q-radio"]` — which is also why restarting it through `smd` bounces
+the radio (see [OPERATIONS.md](OPERATIONS.md)).
 
-## §7 — Deterministic data multicast destination (v0.3)
+## §7 — Deterministic data multicast destination
 
-meteor-scatter calls `RadiodControl.ensure_channel(...)` **without**
-passing `destination=`. `ka9q-python` derives the multicast group per
-client identity and returns the resolved address in `ChannelInfo`.
-meteor-scatter reads it from `ChannelInfo.destination` for the
-`data_destination` field in `inventory --json` but never selects or
-computes it.
+✅ `ensure_channel()` is never called with `destination=`; ka9q-python
+allocates it and meteor-scatter reads the resolved address back from
+`ChannelInfo`.
 
-There is no `data_destination` key in meteor-scatter's config schema —
-operator overrides go in radiod config or ka9q-python configuration,
-not here.
+⚠ The inventory's per-instance `data_destination` is hardcoded `null` in
+`contract.build_inventory` — the builder works from the config file, not
+from a live channel, so it has no `ChannelInfo` to read. The contract
+permits `null` where the client has not resolved a destination; a client
+that has channels up should report the resolved address, so this is a
+partial. The *runtime* behaviour (never specifying a destination) is
+fully conformant.
 
 ## §8 — Radiod-scoped facts: chain delay
 
-On startup and on SIGHUP, meteor-scatter reads
-`RADIOD_<ID>_CHAIN_DELAY_NS` from the environment and surfaces the
-value in `inventory --json` as `chain_delay_ns_applied`. The
-standalone fallback is `[timing].chain_delay_ns` in the config.
+✅ Read as a hook. `contract.build_inventory` derives the env key
+`RADIOD_<ID>_CHAIN_DELAY_NS` (status name uppercased, `-` and `.` → `_`)
+and surfaces the value as `chain_delay_ns_applied`, `null` when unset.
+`[timing].chain_delay_ns` is the standalone fallback.
 
-meteor-scatter is **not** the calibrator (that's hf-timestd) and does
-not currently apply the correction to its sample-to-UTC conversion —
-spot timestamps are accurate to ~1 second from FT8/FT4 slot
-quantization, well outside the chain-delay regime. The contract hook
-is in place so a future tightening (sub-second timestamping for, say,
-millisecond-accurate skew studies) requires no contract-level work.
+Not *applied* to sample→UTC conversion, deliberately: MSK144 spot times
+are quantized to the T/R slot boundary, which is orders of magnitude
+coarser than any chain delay.
 
-## §10 — Logging discipline
+## §9 — Reference implementations
 
-- The process log goes to the systemd journal via the unit's
-  `StandardOutput=journal` (`SyslogIdentifier=meteor-scatter@<id>`) —
-  query it with `journalctl -u meteor-scatter@<id>` or `smd log
-  meteor-scatter`. It is journal-only; there is no per-instance process
-  log file.
-- Spot logs go to `/var/log/meteor-scatter/<radiod_id>-{ft8,ft4}.log`.
-- The file-based spot-log paths are surfaced in `inventory --json`
-  under the top-level `log_paths` object, keyed by radiod id (since
-  one `meteor-scatter` install can host multiple instances). The
-  journal-only process log is not listed there.
+meteor-scatter is not one. psk-recorder is the greenfield v0.3
+reference; meteor-scatter is a *descendant* of that reference, and this
+repo's documentation drift (below) is the cautionary tale attached to
+that lineage.
+
+## §10 — Logging discipline and discovery
+
+✅ The process log goes to the journal (`StandardOutput=journal`,
+`SyslogIdentifier=meteor-scatter@%I`) and `log_paths` lists only the
+file-based spot log, keyed by radiod id → `{"spots": {"msk144": …}}`, so
+`smd log --files` finds it. `smd log meteor-scatter` covers the journal.
 
 ## §11 — Runtime log level
 
-meteor-scatter honors:
-
-1. `--log-level <LEVEL>` CLI flag
-2. `METEOR_SCATTER_LOG_LEVEL` env var (sigmond-published)
-3. `CLIENT_LOG_LEVEL` env var (sigmond generic fallback)
-4. Default: `INFO`
-
-A SIGHUP handler in the daemon's main loop re-reads (2) and (3) and
-re-applies the level to the root logger without restarting RTP
-streams. `smd log --level=DEBUG meteor-scatter` is therefore a one-step
-operation.
-
-Resolution code: [src/meteor_scatter/cli.py:22-34](../src/meteor_scatter/cli.py).
+✅ `--log-level` → `METEOR_SCATTER_LOG_LEVEL` → `CLIENT_LOG_LEVEL` →
+`INFO` (`cli._resolve_log_level`), re-resolved on `SIGHUP`
+(`cli._install_sighup_handler`) without restarting RTP streams, and
+reported as `log_level` in inventory.
 
 ## §12 — Validate hardening (v0.4)
 
-The six items in §12 were surfaced by meteor-scatter's own Phase 1
-deploy on 2026-04-13. Status of each in meteor-scatter:
+| Item | Status |
+|---|---|
+| **12.1 Entry-point reachability (MUST)** | ⚠ **not checked by `validate`.** The property itself holds — `cli.py` carries the `if __name__ == "__main__": main()` guard, `__main__.py` calls `main()`, and the unit's `ExecStart` is `python3 -m meteor_scatter.cli daemon` — but nothing asserts it. This is a real MUST gap. |
+| **12.2 SSRC uniqueness (MUST)** | ✅ implemented. `_collect_issues` walks every `(freq, preset, sample_rate, encoding)` tuple per block and fails on a duplicate, naming both entries — because `MultiStream` keys its slot dict by SSRC and the second `add_channel()` would silently overwrite the first. |
+| **12.3 Config-path disclosure (MUST)** | ✅ implemented. `build_validate` and `build_inventory` both emit the absolute `config_path` actually loaded. |
+| **12.4 Decoder-spool mutation (SHOULD)** | ✅ documented, and structurally not a problem here: unlike `decode_ft8`, `jt9` does not unlink the WAV it decoded, so `SlotWorker`'s own `keep_wav` check is sufficient and `keep_wav = true` really does retain slots. [CONFIG.md](CONFIG.md) documents the flag next to the retention note. |
+| **12.5 Pattern A layout (SHOULD)** | ✅ `install.sh` symlinks the checkout **into** `/opt/git/sigmond/meteor-scatter` (never the reverse), and smoke-tests that `meteorscat` can import the package — the traversability check the anti-pattern fails. |
+| **12.6 ka9q-python PyPI lag (SHOULD)** | ⬜ not implemented. `validate` does not compare the installed `ka9q-python.__version__` against the declared minimum. |
 
-### §12.1 Entry-point reachability (MUST) — implemented
+Beyond the six, `validate` fails on: no `[[radiod]]` blocks, a block
+with no `status`, and a `status` still set to the placeholder. It warns
+on: empty callsign, empty grid square, no MSK144 frequencies, and an
+unresolvable decoder override.
 
-`cli.py` has the `if __name__ == "__main__": main()` guard. Added in
-[`520e39f`][520e39f] after the unit's `python -m meteor_scatter.cli`
-silently no-op'd because the guard was missing.
+## §13 — Control surface (v0.5)
 
-### §12.2 SSRC uniqueness (MUST) — implemented
+⛔ **Not implemented.** There is no
+`/run/meteor-scatter/<instance>.control.sock`, and therefore no
+`/healthz`, `/readyz`, `/status` or `/metrics`. `meteor-scatter status`
+is a stub that prints "not running (Phase 1 not yet implemented)" and
+exits 2 regardless of daemon state.
 
-`validate` rejects configs where two channels in the same
-`[[radiod]]` block share `(freq, preset, sample_rate, encoding)`.
-Surfaced when an FT4 entry on 1.840 MHz collided with the FT8 entry
-on the same dial — `ka9q-python`'s `MultiStream` keys callbacks by
-SSRC and silently overwrote one. See [`be4a050`][be4a050].
+The live view available today is the journal (the 60 s per-mode stats
+line and the per-cycle batcher commit line), `smd watch meteor`, and the
+sink itself. `config show` / `config apply` (§14) are implemented and do
+round-trip the config as JSON through the daemon's own validator.
 
-### §12.3 Config path disclosure (MUST) — implemented
+## §14 — Configuration interview
 
-`config_path` is a top-level field in both `inventory --json` and
-`validate --json`, holding the absolute path of the file actually
-loaded after env-var overrides and CLI flag resolution. Eliminates
-"I edited the config and nothing changed" — the running daemon's
-inventory output names the file it read.
+✅ Implemented in `configurator.py`, registered in `deploy.toml
+[contract.config]` as `meteor-scatter config init` / `config edit` so
+sigmond drives the client's own interview rather than editing TOML.
+A whiptail wizard (`scripts/config-wizard.sh`, driven by
+`config/help.toml`) with a stdin-prompt fallback when whiptail is absent
+or stdout is not a TTY; `--non-interactive` renders from the §14.3 env
+bag (`STATION_CALL`, `STATION_GRID`, `SIGMOND_INSTANCE`,
+`SIGMOND_RADIOD_STATUS`, plus `SIGMOND_RADIOD_COUNT` / `_INDEX` for
+multi-radiod hosts). `config show --json` / `config apply --json -`
+are the machine entry points, validated and atomically written.
 
-### §12.4 Decoder-spool mutation (SHOULD) — documented
+⚠ `env show` works but **`env apply` manages no keys**:
+`_ENV_WRITABLE_KEYS` is the empty set, so every payload is rejected with
+"this build manages no env knobs yet". Sigmond does not depend on it —
+`instance.py` writes the per-instance env stub directly from
+`deploy.toml [contract.instance_env]`. `config/help.toml` still
+documents an `[env.*]` section (`METEOR_SCATTER_DELIVERY_PIPELINES`,
+`_USE_HS_UPLOADER`) whose variables no Python source reads — they live
+only in `config/help.toml` and `scripts/config-wizard.sh`, inherited
+from psk-recorder — and the
+wizard's **Delivery** section submits exactly those keys through
+`env apply` — so that menu item always ends in the "env apply failed"
+dialog. Edit `/etc/meteor-scatter/env/<instance>.env` by hand instead.
 
-`decode_ft8` unconditionally unlinks the WAV it just decoded. With
-`keep_wav = true`, meteor-scatter still skips its own unlink, but the
-WAV is gone before it returns from `wait()` because the decoder
-deleted it first. To retain WAVs for debugging, snapshot the file
-*before* forking (e.g. by holding a hardlink in a separate dir under
-`ReadWritePaths`). This is documented in
-[OPERATIONS.md](OPERATIONS.md#debugging-wavs--the-decoder-shim-pattern).
+## §15 — Radiod channel contributions
 
-### §12.5 Pattern A canonical layout (SHOULD) — implemented
+N/A. meteor-scatter declares no `[[radiod.fragment]]` blocks: it creates
+its channels dynamically through `ensure_channel()` rather than
+contributing a `radiod@<id>.conf.d/` fragment, and it uses radiod's
+stock `usb` preset unmodified.
 
-Repo lives at `/opt/git/sigmond/meteor-scatter` (group-readable by the service
-user `meteorscat`). `scripts/install.sh` enforces this and verifies
-traversability with a `sudo -u meteorscat test -r ...` check. The
-anti-pattern (`/opt/git/sigmond/...` as a symlink to `~/git/...`) is rejected
-by the install script — the service user can't traverse a mode-700
-home.
+## §16 — Independent data-source clients
 
-### §12.6 ka9q-python PyPI-lag check (SHOULD) — pending
+N/A. meteor-scatter's input is radiod RTP, so it is a §6/§7 client, not
+an independent-source one; it emits no `data_path` block.
 
-Not yet implemented. `validate` should warn when the installed
-`ka9q_python.__version__` is older than the minimum declared in
-`pyproject.toml` (currently `>=3.8.0`). Tracked as a v0.1.1 retrofit
-item.
+## §17 — Output sinks
+
+✅ Two `data_sinks` entries per instance, both `kind = "file"`:
+
+| Target | `retention_days` | `mb_per_day` |
+|---|---|---|
+| `<spool_dir>/<radiod_id>` — the WAV spool | `0` (deleted after decode) | `0` |
+| `<log_dir>` — the per-mode spot logs | `365` | `5` |
+
+The SQLite sink is reached through `sigmond.hamsci_sink.Writer`, which
+resolves its own backend from the environment; from the contract's point
+of view it is sigmond's own store, not a client-declared sink.
+
+The staged target is **`psk.spots`** —
+`Writer.from_env(table="spots", mode="psk", schema_version=2)` — with
+MSK144 carried as the per-row `mode="msk144"` value. That is
+intentional: the wsprdaemon server unifies `ft8`/`ft4`/`msk144` in one
+`psk.spots` table behind one PSKReporter forwarder, so one pipeline
+delivers all three and the cycle-tar path carries MSK144 for free.
+`schema_version=2` must match what hs-uploader's reader filters on, or
+rows are silently treated as stale-schema and never ship.
+
+## §18 — Timing authority and the RTP-default fallback
+
+✅ Subscriber, deliberately in **RTP-default mode**. `inventory` reports
+`uses_timing_calibration = false` and `timing_authority_applied = null`.
+
+Two distinct uses of the authority, easy to conflate:
+
+* **Anchoring** — `ChannelSink` reads hf-timestd's authority through
+  `hamsci_dsp.timing.AuthorityReader` to obtain the dynamic RTP→UTC
+  offset when it takes its one-time anchor. Falls back to the host wall
+  clock when `channel_info` is unavailable.
+* **Provenance** — `ChTailer` reads the authority once per chunk and
+  stamps a `timing_authority` block (source / tier / σ / age, or
+  `standalone_timing_authority()` when hf-timestd is absent or stale)
+  onto every spot row.
+
+What it does *not* do is gate or correct timing against the authority:
+MSK144 spot times are T/R-slot quantized, so RTP-default is sufficient.
+That is a decision (sigmond #36), not an open gap.
+
+There is no `core/authority_reader.py` in this build despite what
+`CLAUDE.md` says — the reader moved to the shared `hamsci_dsp.timing`.
+
+## §19 — Per-reporter instance and `reporter_id` row tag
+
+✅ Implemented. `config.extract_reporter_id()` reads `[instance]
+reporter_id`; `cli` falls back to `STATION_REPORTER_ID` from
+coordination.env, and warns loudly when neither is set, because the
+last-resort radiod-hostname fallback misattributes spots all the way to
+PSKReporter. Every row carries `reporter_id`, plus the legacy `instance`
+field (= radiod_id, slated for removal in sigmond Phase 9) and
+`rx_source` (`radiod:<status>`).
+
+`config.resolve_config_path()` prefers `/etc/meteor-scatter/<instance>.toml`
+and emits a one-line `DeprecationWarning` pointing at
+`sudo smd instance migrate` when it has to fall back to the shared
+legacy config.
 
 ## What sigmond promises in return
 
-(From the contract; informational here.)
+Install and upgrade through the client's own `install.sh`; unit
+resolution from `deploy.toml`; the coordination env
+(`STATION_*`, `SIGMOND_SQLITE_PATH`, `RADIOD_<id>_CHAIN_DELAY_NS`,
+`CLIENT_LOG_LEVEL`); the shared SQLite sink and the hs-uploader egress;
+lifecycle locking and start ordering (radiod first); log discovery; and
+`smd watch meteor` / TUI surfaces from the `[client_features]`
+declarations.
 
-- Never edits `/etc/meteor-scatter/meteor-scatter-config.toml`.
-- Reads inventory output to learn what meteor-scatter wants.
-- Publishes per-radiod facts and per-client log levels in
-  `coordination.env`, atomic on each `smd apply`.
-- Writes CPU affinity drop-ins only at
-  `/etc/systemd/system/meteor-scatter@<id>.service.d/10-sigmond-cpu-affinity.conf`.
-- Sends SIGHUP after rewriting log levels.
-- Never depends on meteor-scatter code or shells out to `meteor-scatter`
-  for anything beyond `inventory --json` and `validate --json`.
+CPU isolation is one of those promises, and it **is** kept for this
+client: `'meteor-scatter@.service': 'other'` is in `AFFINITY_UNITS`
+(`sigmond/lib/sigmond/cpu.py`), added in sigmond `6a9fe3f` (2026-07-20)
+after the unit was found running unconfined on B4-100's radiod HT pair.
+`smd admin diag cpu-affinity --apply` therefore writes the standard
+non-radiod drop-in for it, keeping jt9's decode bursts off the cores
+radiod's cache-hit rate depends on. This satisfies `MTS-Q-008` in
+[REQUIREMENTS.md](REQUIREMENTS.md) §7, which asked for the membership to
+be verified — it is there. What is still missing is anything that would
+*keep* it there: no test asserts that a client with a templated decoder
+unit appears in the map.
+
+## Known drift (as of this verification)
+
+Product files that still describe the psk-recorder parent rather than
+this client. None of them break anything today; all of them will mislead
+the next reader.
+
+| Where | What it says | Truth |
+|---|---|---|
+| `contract.py` `deps.git` | `ka9q-radio` provides "jt9 --msk144 decoder (bundled in-repo)" | jt9 is WSJT-X's, built from source to `/usr/local/bin` by sigmond; nothing is bundled |
+| `deploy.toml [[deps.git]]` | `ft8_lib` → `decode_ft8`, `ftlib-pskreporter` → `pskreporter-sender` | neither is on meteor-scatter's runtime path |
+| `config/help.toml` | `[paths].decoder_kind` offers `decode_ft8` vs `jt9`; `[radiod.ft8]`/`[radiod.ft4]` sections; `[env.METEOR_SCATTER_DELIVERY_PIPELINES]` etc. | one mode (`msk144`), one decoder kind (`jt9`); the `[env.*]` variables are read by no Python source, and `env apply` manages no keys |
+| `config/*.toml.template` | jt9 "bundled in-repo at bin/decoders/…"; `jt9 --msk144 -p 15` in a comment | no `bin/decoders/` in the repo; the default `-p` is 30 |
+| `install.sh` `_verify_jt9` | probes `bin/decoders/jt9-<arch>-v*` | always warns and falls through to PATH resolution |
+| `deploy.sh` | `VENV_DIR=/opt/meteor-scatter/venv` | `install.sh` creates `/opt/git/sigmond/meteor-scatter/venv` |
+| `core/wav.py` docstring | "for decode_ft8 input" | the same format jt9 consumes |
+| `CLAUDE.md` | FT8/FT4 architecture diagram, `decode_ft8`, `[radiod.ft8]`/`[radiod.ft4]` schema, `core/authority_reader.py`, sink `msk144.spots` | see this page and [ARCHITECTURE.md](ARCHITECTURE.md) |
+| `REQUIREMENTS.md` | `MSK144_TR_PERIOD_SEC = 15`, sink `msk144.spots`, bundled arch-resolved jt9 | 30 s default, `psk.spots`, PATH-resolved jt9 — the code moved after that doc was reconciled on 2026-06-25 |
+
+These are product-file (not documentation) changes and are out of scope
+for the docs program; they are recorded here so the next contributor
+does not treat them as truth. `REQUIREMENTS.md` remains the formal
+requirements register — read it for `MTS-*` requirement IDs and the gap
+list, and read the ★ pages in [INDEX.md](INDEX.md) for current behaviour.
 
 ## Versioning
 
-meteor-scatter reports `contract_version` in inventory output. Bump
-when adopting a new contract version after auditing the changelog at
-the top of the canonical doc.
-
-| meteor-scatter release | contract version | Notes |
-|---|---|---|
-| 0.1.0 | 0.3 | Greenfield v0.3 reference. |
-| 0.1.0 (current) | 0.4 | §12 retrofit landed at [`b5eb378`][b5eb378] (config_path + SSRC uniqueness check). |
+`contract.py` `CONTRACT_VERSION`, `deploy.toml
+[package].contract_version` and the sigmond catalog's `contract` field
+must be bumped together. Sigmond compares the client's declared version
+to its own supported version and warns on a mismatch, so a stale
+declaration is visible in `smd status` rather than silent.
 
 [contract]: https://github.com/HamSCI/sigmond/blob/main/docs/CLIENT-CONTRACT.md
-[520e39f]: https://github.com/HamSCI/meteor-scatter/commit/520e39f
-[be4a050]: https://github.com/HamSCI/meteor-scatter/commit/be4a050
-[b5eb378]: https://github.com/HamSCI/meteor-scatter/commit/b5eb378
