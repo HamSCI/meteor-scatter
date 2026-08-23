@@ -1,5 +1,7 @@
 # Installation
 
+⚠ This is a stale copy of psk-recorder's text (it says FT8/FT4; this client decodes MSK144 via `jt9 --msk144`). See `REQUIREMENTS.md` for the accurate document. Truthing is scheduled (docs program Phase 3).
+
 Production install on Linux with systemd. Tested on Debian 13.
 
 ## Prerequisites

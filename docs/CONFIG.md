@@ -1,5 +1,7 @@
 # Configuration reference
 
+⚠ This is a stale copy of psk-recorder's text (it says FT8/FT4; this client decodes MSK144 via `jt9 --msk144`). See `REQUIREMENTS.md` for the accurate document. Truthing is scheduled (docs program Phase 3).
+
 Config file: `/etc/meteor-scatter/meteor-scatter-config.toml` (override
 with `--config` or `METEOR_SCATTER_CONFIG`). TOML format.
 

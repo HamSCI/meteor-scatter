@@ -1,5 +1,7 @@
 # Sigmond client contract conformance
 
+⚠ This is a stale copy of psk-recorder's text (it says FT8/FT4; this client decodes MSK144 via `jt9 --msk144`). See `REQUIREMENTS.md` for the accurate document. Truthing is scheduled (docs program Phase 3).
+
 meteor-scatter implements the [HamSCI client contract][contract] (v0.8),
 maintained in the sigmond repository at
 [`docs/CLIENT-CONTRACT.md`][contract]. It is the contract's
@@ -231,7 +233,7 @@ WAV is gone before it returns from `wait()` because the decoder
 deleted it first. To retain WAVs for debugging, snapshot the file
 *before* forking (e.g. by holding a hardlink in a separate dir under
 `ReadWritePaths`). This is documented in
-[OPERATIONS.md](OPERATIONS.md#debugging-with-keep_wav).
+[OPERATIONS.md](OPERATIONS.md#debugging-wavs--the-decoder-shim-pattern).
 
 ### §12.5 Pattern A canonical layout (SHOULD) — implemented
 
