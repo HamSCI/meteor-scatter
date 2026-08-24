@@ -2,7 +2,7 @@
 
 > **Audience:** contributor
 > **Status:** current
-> **Verified against:** meteor-scatter bac2116 on 2026-08-23 — code
+> **Verified against:** meteor-scatter d29f733 on 2026-08-24 — code
 > **Canonical for:** meteor-scatter internals — the MSK144 record → decode → sink pipeline
 
 meteor-scatter monitors **meteor-scatter pings** on the conventional
@@ -88,7 +88,7 @@ src/meteor_scatter/
     ch_tailer.py           # ChTailer — mode log → callhash → spot rows
     hs_uploader_shim.py    # HsPskReporterUploader — the only upload path
     wav.py                 # write_wav() — mono s16le RIFF
-tests/                # 17 test modules; fixtures in tests/fixtures/
+tests/                # 16 test modules; fixtures in tests/fixtures/
 config/               # meteor-scatter-config.toml.template + help.toml
 scripts/              # install.sh, deploy.sh, config-wizard.sh
 systemd/              # meteor-scatter@.service template unit
