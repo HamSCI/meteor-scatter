@@ -508,6 +508,45 @@ class ReceiverManager:
 
     # --- shutdown ------------------------------------------------------
 
+    def reset_source(self, **provision_kwargs) -> bool:
+        """Tear this radiod's channels down and rebuild them in place.
+
+        The scoped alternative to letting _ProgressGate withhold the
+        systemd watchdog ping.  That works and costs the whole process:
+        every sink, every decoder, and any peer radiod that was perfectly
+        healthy.  This rebuilds one source.
+
+        Returns True when the rebuild completed.  A failure is logged and
+        reported, never raised: the caller is a recovery loop, and a
+        recovery attempt that kills the recorder is worse than the fault
+        it was answering.
+        """
+        logger.warning(
+            "ReceiverManager %s: rebuilding source in place (scoped reset)",
+            self._radiod_id,
+        )
+        try:
+            self.stop()
+        except Exception:
+            logger.exception(
+                "ReceiverManager %s: error during reset teardown",
+                self._radiod_id,
+            )
+        try:
+            self.provision_channels(**provision_kwargs)
+            self.start_streams()
+        except Exception as exc:  # noqa: BLE001 — recovery must not kill us
+            logger.error(
+                "ReceiverManager %s: scoped reset failed: %s",
+                self._radiod_id, exc,
+            )
+            return False
+        logger.info(
+            "ReceiverManager %s: source rebuilt, %d sink(s)",
+            self._radiod_id, len(self._sinks),
+        )
+        return True
+
     def stop(self) -> None:
         """Idempotent shutdown — safe to call multiple times."""
         if self._status_listener is not None:

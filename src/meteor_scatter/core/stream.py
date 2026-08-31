@@ -172,6 +172,12 @@ class ChannelSink:
         return {
             "mode": self._mode,
             "freq": self._frequency_hz,
+            # Delivery progress is the health signal the recovery ladder
+            # reads.  A sink whose delivered count stops advancing is not
+            # receiving, whatever its thread is doing -- exactly the state
+            # a radiod restart leaves behind, since the SSRC it was
+            # reading no longer exists.
+            "delivered": self._total_delivered,
             "decodes_ok": sw.decodes_ok,
             "decodes_fail": sw.decodes_fail,
             "slots_empty": sw.slots_empty,

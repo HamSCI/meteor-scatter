@@ -259,6 +259,12 @@ class MeteorScatterRecorder:
         # single process-global keepalive thread so we don't spawn
         # N threads for N sources.
         self._lifetime_entries: list[tuple[object, int]] = []
+        # Recorded so a scoped rebuild can repeat the original call.
+        self._provision_kwargs: dict = {}
+        # One ladder per source: a fault on one radiod must never
+        # escalate a healthy peer.
+        self._ladders: dict = {}
+        self._delivered_prev: dict = {}
         self._lifetime_thread: Optional[threading.Thread] = None
 
         # Phase C: one MeteorScatterCycleBatcher per process; all
@@ -378,12 +384,13 @@ class MeteorScatterRecorder:
         )
 
         for rx in self._receivers:
-            rx.provision_channels(
+            self._provision_kwargs = dict(
                 decoder=decoder,
                 decoder_kind=decoder_kind,
                 keep_wav=keep_wav,
                 spool_spots=spool_spots,
             )
+            rx.provision_channels(**self._provision_kwargs)
             # Gather this manager's lifetime entries for the global
             # keepalive thread.  Each manager's list is stable after
             # provision_channels returns.
@@ -699,6 +706,59 @@ class MeteorScatterRecorder:
                     logger.warning(
                         "lifetime keepalive failed (ssrc=%s): %s", ssrc, exc,
                     )
+            self._check_source_health()
+
+    def _check_source_health(self) -> None:
+        """Rebuild a source that has stopped delivering.
+
+        _ProgressGate already catches a wholly stalled pipeline by
+        withholding the systemd watchdog ping, which restarts the entire
+        process.  That is right as a backstop and expensive as a first
+        resort: it discards every sink and decoder, including peers on a
+        radiod that was fine.  This notices one source going quiet and
+        rebuilds just that one.
+
+        Delivery progress is the signal.  A sink whose delivered count
+        stops advancing is not receiving, whatever its thread is doing --
+        the state a radiod restart leaves behind, since the SSRC it was
+        reading no longer exists.  Failures are logged, never raised: a
+        recovery attempt that kills the recorder is worse than the fault.
+        """
+        try:
+            from ka9q import RecoveryAction, RecoveryLadder
+        except Exception:  # noqa: BLE001 — older ka9q-python: backstop still works
+            return
+        for rx in self._receivers:
+            key = rx.radiod_id
+            try:
+                delivered = sum(
+                    int(sink.stats_snapshot().get("delivered", 0))
+                    for sink in rx.sinks
+                )
+            except Exception:  # noqa: BLE001
+                continue
+            prev = self._delivered_prev.get(key)
+            self._delivered_prev[key] = delivered
+            if prev is None:
+                continue                      # first observation: no verdict
+            ladder = self._ladders.setdefault(key, RecoveryLadder())
+            action = ladder.observe(healthy=delivered > prev)
+            if action is RecoveryAction.NONE:
+                continue
+            logger.warning(
+                "source %s: no delivery progress for %d check(s) — %s",
+                key, ladder.consecutive_degraded, action.value,
+            )
+            if rx.reset_source(**self._provision_kwargs):
+                # A rebuild replaces the MultiStreams the keepalive
+                # thread was holding, so refresh its entry list.
+                self._lifetime_entries = [
+                    e for r in self._receivers for e in r.lifetime_entries
+                ]
+                self._delivered_prev[key] = sum(
+                    int(sink.stats_snapshot().get("delivered", 0))
+                    for sink in rx.sinks
+                )
 
     def _stats_loop(self) -> None:
         """Every 60 s, log a summary of decode + spot activity per mode.
