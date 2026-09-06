@@ -7,7 +7,7 @@
 #   1. Creates service user meteorscat:meteorscat
 #   2. Clones/links repo to /opt/git/sigmond/meteor-scatter
 #   3. Creates venv at /opt/git/sigmond/meteor-scatter/venv with editable install
-#   4. Verifies the bundled jt9 MSK144 decoder for this arch
+#   4. Verifies the jt9 MSK144 decoder on PATH (/usr/local/bin/jt9)
 #   5. Renders config template (non-destructive — never overwrites)
 #   6. Installs systemd unit template
 #   7. Enables meteor-scatter@<radiod_id> instances from config
@@ -216,31 +216,27 @@ if ! sudo -u "$SERVICE_USER" "$VENV_DIR/bin/python3" -c 'import meteor_scatter' 
 fi
 ui_info "Post-install verify OK"
 
-# --- Phase 2.5: verify the bundled jt9 MSK144 decoder ---
-# meteor-scatter decodes with WSJT-X's jt9 (`jt9 --msk144`), bundled
-# in-repo at bin/decoders/jt9-{x86,arm32,arm64}-v*.  No build step — just
-# confirm the arch-specific binary is present, executable, and advertises
-# the MSK144 mode.  Non-fatal: the recorder still records slots without a
-# working decoder; it just can't decode until the binary resolves (the
-# runtime falls back to a PATH `jt9` if the bundle is missing).
+# --- Phase 2.5: verify the jt9 MSK144 decoder ---
+# meteor-scatter decodes with WSJT-X's jt9 (`jt9 --msk144`), which sigmond
+# builds from retained source on the host (_build_wsjtx_decoders) and installs
+# at /usr/local/bin/jt9; the runtime resolves it from PATH (see
+# core/decoder.py resolve_jt9_binary).  No binaries are bundled in-repo any
+# more — the old check for bin/decoders/jt9-<arch>-v27 warned "will NOT
+# decode" on every install of a host that was decoding fine (AI6VN v3.37,
+# 2026-09-06).  Non-fatal: the recorder still records slots without a
+# decoder; it just cannot decode until jt9 appears on PATH.
 _verify_jt9() {
-    local arch name jt9
-    arch="$(uname -m)"
-    case "$arch" in
-        x86_64|amd64)  name="jt9-x86-v27" ;;
-        aarch64|arm64) name="jt9-arm64-v27" ;;
-        armv7l|armv6l) name="jt9-arm32-v26" ;;
-        *) ui_warn "no bundled jt9 for arch $arch — decoder falls back to PATH jt9"; return 0 ;;
-    esac
-    jt9="$REPO_SOURCE/bin/decoders/$name"
-    if [[ ! -x "$jt9" ]]; then
-        ui_warn "bundled jt9 $jt9 missing or not executable — recorder will record but NOT decode until resolved"
+    local jt9
+    jt9="$(command -v jt9 2>/dev/null || true)"
+    [[ -z "$jt9" && -x /usr/local/bin/jt9 ]] && jt9=/usr/local/bin/jt9
+    if [[ -z "$jt9" ]]; then
+        ui_warn "no jt9 on PATH (/usr/local/bin/jt9) — recorder will record but NOT decode until sigmond's wsjtx-decoders build installs it"
         return 0
     fi
     if "$jt9" --help 2>&1 | grep -qi -- '--msk144'; then
-        ui_info "jt9 MSK144 decoder OK ($name)"
+        ui_info "jt9 MSK144 decoder OK ($jt9)"
     else
-        ui_warn "$jt9 does not advertise --msk144 — unexpected binary, decode may fail"
+        ui_warn "$jt9 does not advertise --msk144 — unexpected binary (need WSJT-X 3.0.2+), decode may fail"
     fi
 }
 _verify_jt9

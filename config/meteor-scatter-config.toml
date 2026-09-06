@@ -18,11 +18,12 @@ log_dir     = "/var/log/meteor-scatter"
 keep_wav    = false
 
 # Decoder.  meteor-scatter decodes with WSJT-X's `jt9` in MSK144 mode
-# (`jt9 --msk144 -p 15`).  The arch-specific binary is bundled in-repo at
-# bin/decoders/jt9-{x86,arm32,arm64}-v27 and resolved automatically; set
-# `decoder_jt9` only to override that resolution with an explicit path.
+# (`jt9 --msk144 -p 15`).  jt9 is resolved from PATH at runtime — sigmond
+# builds WSJT-X 3.0.2 from source on the host and installs /usr/local/bin/jt9;
+# no binaries are bundled.  Set `decoder_jt9` only to override that with an
+# explicit path.
 decoder_kind = "jt9"
-# decoder_jt9 = "/opt/git/sigmond/meteor-scatter/bin/decoders/jt9-x86-v27"
+# decoder_jt9 = "/usr/local/bin/jt9"
 
 # Optional standalone fallback for chain-delay correction (contract v0.3 §8).
 # Overridden by RADIOD_<id>_CHAIN_DELAY_NS in coordination.env when present.
