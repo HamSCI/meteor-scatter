@@ -61,6 +61,16 @@ DECODER_JT9 = "jt9"
 VALID_DECODER_KINDS = (DECODER_JT9,)
 
 
+def inflight_from(pending_procs, now_mono: float) -> tuple[int, float]:
+    """Pure core of SlotWorker.inflight_snapshot (tested without a worker).
+
+    Each pending entry is (proc, wav_path, slot_start_utc, fork_monotonic);
+    a decoder's age is measured from its fork.
+    """
+    ages = [now_mono - entry[3] for entry in pending_procs]
+    return len(ages), (max(ages) if ages else 0.0)
+
+
 class SlotWorker:
     """Extracts cadence-aligned audio slots from a Ring and decodes them."""
 
@@ -138,6 +148,15 @@ class SlotWorker:
         self.decodes_ok = 0
         self.decodes_fail = 0
         self.slots_empty = 0
+
+    def inflight_snapshot(self) -> tuple[int, float]:
+        """(jt9 decodes not yet reaped, age of the oldest in seconds).
+
+        The decode-backlog signal (see core/backlog.py): decoders from an
+        earlier slot still running when the next slot fires means this
+        channel is not keeping up.
+        """
+        return inflight_from(self._pending_procs, time.monotonic())
 
     def reset_boundary(self) -> None:
         """Drop the cached next-boundary UTC so the worker re-seeds at the new

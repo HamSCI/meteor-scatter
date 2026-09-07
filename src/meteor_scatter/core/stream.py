@@ -181,7 +181,7 @@ class ChannelSink:
             "decodes_ok": sw.decodes_ok,
             "decodes_fail": sw.decodes_fail,
             "slots_empty": sw.slots_empty,
-        }
+        } | dict(zip(("inflight", "oldest_inflight_s"), sw.inflight_snapshot()))
 
     def start(self) -> None:
         self._slot_worker.start()
