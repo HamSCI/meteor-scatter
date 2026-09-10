@@ -17,6 +17,7 @@ from meteor_scatter.config import (
     is_placeholder_status,
 )
 from meteor_scatter.version import GIT_INFO
+from hamsci_dsp.timing import read_applied_state
 
 logger = logging.getLogger(__name__)
 
@@ -96,17 +97,25 @@ def build_inventory(config: dict, config_path: Path) -> dict:
             "frequencies_hz": all_freqs,
             "modes": modes,
             "data_sinks": data_sinks,
-            "uses_timing_calibration": False,
+            # §3: capability, not the active mode.  The recorder anchors
+            # every channel through hamsci_dsp.timing.acquire_anchor_utc,
+            # which applies hf-timestd's published offset whenever
+            # authority.json is fresh — so it subscribes whenever it can.
+            "uses_timing_calibration": True,
             "provides_timing_calibration": False,
             "chain_delay_ns_applied": chain_delay,
-            # CONTRACT v0.7 §18 — runtime-state field for the §18
-            # subscription. meteor-scatter runs in RTP-default mode (PSK
-            # decoding is ms-tolerant; no hard-deadline scheduling
-            # against UTC, so subscribing to a peer authority would
-            # not improve spot quality). Reported as null to satisfy
-            # the v0.7 inventory shape and signal "contract-aware,
-            # currently default mode."
-            "timing_authority_applied": None,
+            # §18.5 (amendment 2026-09-04): the field describes the
+            # LABELS the running recorder writes.  MSK144 dt is slot-
+            # relative and cancels a constant bias, but the spot's
+            # absolute UTC does not, and it must sit on the same
+            # timeline as the psk, wspr and magnetometer records from
+            # this station.  The daemon leaves the block it applies at
+            # <spool>/<radiod_id>/timing-authority.json once a minute
+            # (core/applied_state.py); stale or absent reads as null —
+            # nothing running means nothing applied.
+            "timing_authority_applied": read_applied_state(
+                Path(spool_path) / "timing-authority.json",
+            ),
         }
         instances.append(instance)
 

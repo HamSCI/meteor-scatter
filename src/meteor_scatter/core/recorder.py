@@ -791,6 +791,7 @@ class MeteorScatterRecorder:
         # sum the deltas, not point at one file.
 
         while self._running:
+            self._write_applied_state()
             # Aggregate per (radiod, mode) so the multi-source case
             # surfaces each source's contribution.  Single-source
             # deployments emit one line per mode exactly like before.
@@ -854,6 +855,24 @@ class MeteorScatterRecorder:
                 prev_spot_lines[prev_key] = spot_lines_total
 
             time.sleep(60.0)
+
+    def _write_applied_state(self) -> None:
+        """Leave each instance's §3 ``timing_authority_applied`` block at
+        ``<spool>/<radiod_id>/timing-authority.json`` for ``inventory
+        --json`` (another process) to report.  See core/applied_state.py.
+        Best-effort: the report must never take the recorder down."""
+        from hamsci_dsp.timing import write_applied_state
+        from meteor_scatter.core.applied_state import applied_state_for
+        spool_root = Path(self._paths.get("spool_dir", "/var/lib/meteor-scatter"))
+        for rx in self._receivers:
+            try:
+                write_applied_state(
+                    spool_root / rx.radiod_id / "timing-authority.json",
+                    applied_state_for(rx.sinks, client_radiod=rx.radiod_id),
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("applied-state write for %s failed: %s",
+                             rx.radiod_id, exc)
 
     def _pipeline_progress(self):
         """Monotonic count of decode slots processed across all channels:

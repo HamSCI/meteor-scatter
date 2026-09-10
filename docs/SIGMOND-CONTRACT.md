@@ -87,9 +87,9 @@ Per instance:
 | `ka9q_channels` / `frequencies_hz` | count and sorted list of `[radiod.msk144].freqs_hz` |
 | `modes` | `["msk144"]` when frequencies are configured, else `[]` |
 | `data_sinks` | two `kind="file"` entries — the spool and the log dir (§17) |
-| `uses_timing_calibration` / `provides_timing_calibration` | `false` / `false` |
+| `uses_timing_calibration` / `provides_timing_calibration` | `true` / `false` |
 | `chain_delay_ns_applied` | `RADIOD_<ID>_CHAIN_DELAY_NS` from env, else `null` (§8) |
-| `timing_authority_applied` | `null` — RTP-default mode (§18) |
+| `timing_authority_applied` | the block the running daemon left at `<spool>/<radiod_id>/timing-authority.json`; `null` when stale, absent, or the daemon anchors without an authority (§18.5) |
 
 ⚠ Two shapes to know about: the payload carries **no `templated_units`
 key** (sigmond reads the unit list from `deploy.toml [systemd].units`
@@ -291,8 +291,13 @@ rows are silently treated as stale-schema and never ship.
 
 ## §18 — Timing authority and the RTP-default fallback
 
-✅ Subscriber, deliberately in **RTP-default mode**. `inventory` reports
-`uses_timing_calibration = false` and `timing_authority_applied = null`.
+✅ Subscriber.  Every channel anchors through the suite-shared
+`hamsci_dsp.timing.acquire_anchor_utc`, which applies hf-timestd's published
+offset to the labels whenever `authority.json` is fresh.  `inventory` reports
+`uses_timing_calibration = true`, and `timing_authority_applied` comes from
+the block the daemon writes once a minute (`core/applied_state.py`) — the
+§18.5 amendment of 2026-09-04 wants the field to describe the labels, not a
+reading habit.
 
 Two distinct uses of the authority, easy to conflate:
 

@@ -15,7 +15,7 @@ dependencies = [
     "ka9q-python>=3.22.0",
     "callhash>=1.0.0",
     "hs-uploader>=0.1.0",
-    "hamsci-dsp>=0.3.0",
+    "hamsci-dsp>=0.8.0",
     "numpy>=1.24.0",
     "tomli>=2.0; python_version < '3.11'",
 ]

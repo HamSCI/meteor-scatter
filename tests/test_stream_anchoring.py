@@ -234,3 +234,92 @@ class TestDesyncRecovery(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class _FullSnap:
+    """AuthoritySnapshot stand-in with the fields the §3 report needs."""
+    offset_usable = True
+    offset_seconds = 0.004250
+    rtp_to_utc_offset_ns = 4_250_000
+    t_level_active = "T6"
+    sigma_ns = 4210
+    governor_radiod = "AC0G-B4-status.local"
+    utc_published = None
+    host_clock = {"verdict": "ok"}
+
+
+class _FullReader:
+    def read(self):
+        return _FullSnap()
+
+
+class TestSlideFollowWrapHint(unittest.TestCase):
+    """AC0G-B4 2026-09-08: the slide-follow re-pin mapped the FIXED anchor RTP
+    with hint=now.  49.7 h after anchoring the wrap epoch flipped, the anchor's
+    UTC jumped +99.42 h, and 136 FT8 spots were uploaded labelled four days
+    ahead.  The hint for a fixed anchor must be the anchor's own UTC."""
+
+    def test_repin_hints_with_the_anchor_utc_not_now(self):
+        sink = _make_sink(authority_reader=_NoAuthority())
+        sink.set_channel_info(_FakeChannelInfo())
+        try:
+            n = 2400
+            q = _FakeQuality(last_rtp_timestamp=1_000_000 + n)
+            with mock.patch("ka9q.rtp_to_utc", return_value=1_700_000_500.0):
+                with mock.patch("hamsci_dsp.timing.time.time",
+                                return_value=1_700_000_500.0):
+                    with mock.patch.object(sink._ring, "push"):
+                        sink.on_samples(np.zeros(n, dtype=np.float32), q)
+            hints = []
+
+            def _record(rtp, ci, wallclock_hint_sec=None):
+                hints.append(wallclock_hint_sec)
+                return 1_700_000_500.0
+            # Five days later, "now" is more than P/2 past the anchor.
+            with mock.patch("ka9q.rtp_to_utc", side_effect=_record):
+                with mock.patch("hamsci_dsp.timing.time.time",
+                                return_value=1_700_432_500.0):
+                    sink._anchor_utc_now()
+            self.assertEqual(len(hints), 1)
+            self.assertAlmostEqual(hints[0], 1_700_000_500.0, places=3)
+        finally:
+            _cleanup_sink(sink)
+
+
+class TestAnchorExposedForTheReport(unittest.TestCase):
+    """The recorder reports what its labels ride (CLIENT-CONTRACT §18.5), so
+    the sink keeps the AnchorUTC it pinned, not just a source string."""
+
+    def test_sink_keeps_the_anchor_it_pinned(self):
+        sink = _make_sink(authority_reader=_FullReader())
+        sink.set_channel_info(_FakeChannelInfo())
+        try:
+            self.assertIsNone(sink.anchor)
+            n = 2400
+            q = _FakeQuality(last_rtp_timestamp=1_000_000 + n)
+            with mock.patch("ka9q.rtp_to_utc", return_value=1_700_000_500.0):
+                with mock.patch("hamsci_dsp.timing.time.time",
+                                return_value=1_700_000_500.0):
+                    with mock.patch.object(sink._ring, "push"):
+                        sink.on_samples(np.zeros(n, dtype=np.float32), q)
+            self.assertEqual(sink.anchor.offset_ns, 4_250_000)
+            self.assertEqual(sink.anchor.source, "rtp_to_utc+authority")
+            block = sink.anchor.timing_authority_applied(client_radiod="rx")
+            self.assertEqual(block["tier"], "T6")
+        finally:
+            _cleanup_sink(sink)
+
+    def test_reset_drops_the_anchor(self):
+        sink = _make_sink(authority_reader=_FullReader())
+        sink.set_channel_info(_FakeChannelInfo())
+        try:
+            n = 2400
+            q = _FakeQuality(last_rtp_timestamp=1_000_000 + n)
+            with mock.patch("ka9q.rtp_to_utc", return_value=1_700_000_500.0):
+                with mock.patch.object(sink._ring, "push"):
+                    sink.on_samples(np.zeros(n, dtype=np.float32), q)
+            self.assertIsNotNone(sink.anchor)
+            sink.on_stream_restored(_FakeChannelInfo(rtp_timesnap=9))
+            self.assertIsNone(sink.anchor)
+        finally:
+            _cleanup_sink(sink)

@@ -314,15 +314,17 @@ target) · `hf-timestd` (§18 timing-authority producer, optional) · sigmond
   `uses_timing_calibration=false`. Field semantics: see
   [CLIENT-CONTRACT.md](https://github.com/HamSCI/sigmond/blob/main/docs/CLIENT-CONTRACT.md)
   §3/§7/§17 — not restated here.
-- `MTS-I-002` `[CODE]` ✅ **§18 timing authority read-and-stamped for provenance,
-  intentionally NOT applied to gate timing:** reads hf-timestd's authority via
-  `authority_reader.py`, stamps a `timing_authority` block into every row for
-  provenance, and falls back to the standalone marker when absent.
-  **Does NOT apply the authority** — `inventory` reports
-  `uses_timing_calibration=false`, `timing_authority_applied=null`. meteor-scatter's
-  products are MSK144 ~15 s slot-quantized (jt9 MSK144), so RTP-default timing is
-  sufficient. This is a deliberate design decision (sigmond #36), not an open gap.
-  Subscriber obligations are defined by the contract, not here.
+- `MTS-I-002` `[CODE]` ✅ **§18 timing-authority subscriber:** every channel
+  anchors through `hamsci_dsp.timing.acquire_anchor_utc`, which applies
+  hf-timestd's published RTP→UTC offset to the slot labels whenever
+  `authority.json` is fresh, and stamps a `timing_authority` block into every
+  row (standalone marker when absent).  MSK144 dt cancels a constant bias, but
+  the spot's absolute UTC does not, and it must share one registration with
+  the psk, wspr and magnetometer records from the same station.  `inventory`
+  reports `uses_timing_calibration=true` and `timing_authority_applied` from
+  the block the running daemon writes once a minute (`core/applied_state.py`),
+  per the §18.5 amendment of 2026-09-04.  A stale file reads as null.
+  Subscriber obligations remain the contract's.
 - `MTS-I-003` `[DOC]` ✅ The §14 configuration interview is delegated to
   meteor-scatter's own `config init|edit` argparse subcommands (registered in
   `deploy.toml [contract.config]`); sigmond never edits the TOML.

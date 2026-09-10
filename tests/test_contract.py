@@ -270,3 +270,45 @@ class RadiodSchemaTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TimingAuthorityAppliedFromRuntimeState(unittest.TestCase):
+    """§18.5: the field describes the labels the RUNNING recorder writes.
+    The daemon leaves its applied block at <spool>/<radiod_id>/
+    timing-authority.json; inventory (another process) reports it while it
+    is fresh and null otherwise."""
+
+    STATE = Path("/tmp/meteor-scatter-test/spool/test-status.local/timing-authority.json")
+
+    def tearDown(self):
+        self.STATE.unlink(missing_ok=True)
+
+    def _inventory(self):
+        env = os.environ.copy()
+        env["PSK_RECORDER_CONFIG"] = str(TEST_CONFIG)
+        env["PYTHONPATH"] = SRC_DIR + os.pathsep + env.get("PYTHONPATH", "")
+        proc = subprocess.run(
+            [sys.executable, "-m", "meteor_scatter", "inventory", "--json",
+             "--config", str(TEST_CONFIG)],
+            capture_output=True, text=True, timeout=10, env=env, cwd=str(REPO_ROOT),
+        )
+        return json.loads(proc.stdout)["instances"][0]
+
+    def test_fresh_state_file_is_reported_verbatim(self):
+        from hamsci_dsp.timing import write_applied_state
+        block = {"source": "hf-timestd@gov", "tier": "T6", "sigma_ns": 4210,
+                 "snapshot_age_s": 1.0, "radiod_id": "test-status.local"}
+        write_applied_state(self.STATE, block)
+        inst = self._inventory()
+        self.assertEqual(inst["timing_authority_applied"], block)
+
+    def test_stale_state_file_reports_null(self):
+        import time
+        from hamsci_dsp.timing import write_applied_state
+        write_applied_state(self.STATE, {"tier": "T6"}, now_fn=lambda: time.time() - 3600)
+        self.assertIsNone(self._inventory()["timing_authority_applied"])
+
+    def test_capability_is_declared(self):
+        # The recorder subscribes whenever an authority is published (§3:
+        # capability, not the currently active mode).
+        self.assertTrue(self._inventory()["uses_timing_calibration"])

@@ -189,10 +189,14 @@ Sections meteor-scatter implements:
   (`STATION_*`, `SIGMOND_INSTANCE`, `SIGMOND_RADIOD_STATUS`).
 - **§17** — output sinks in inventory (SQLite sink + per-mode log
   files, both `kind = "file"`).
-- **§18 (new in v0.7)** — timing-authority subscriber via
-  `authority_reader.py`; inventory carries
-  `timing_authority_applied` per instance (null = RTP-default mode,
-  populated = authority-corrected with source/tier/σ/age).
+- **§18** — every channel anchors through
+  `hamsci_dsp.timing.acquire_anchor_utc`, which applies hf-timestd's
+  published offset whenever `authority.json` is fresh.  The slide-follow
+  re-pin passes the anchor's own UTC as the wrap hint (never "now"; see
+  `stream.py`).  `inventory` reports `uses_timing_calibration = true` and
+  reads `timing_authority_applied` from the block the running daemon
+  leaves at `<spool>/<radiod_id>/timing-authority.json` once a minute
+  (`core/applied_state.py`); stale or absent reads as null.
 
 ## External dependencies (not pip-installable)
 
