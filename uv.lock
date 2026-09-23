@@ -47,7 +47,7 @@ wheels = [
 
 [[package]]
 name = "hamsci-dsp"
-version = "0.4.0"
+version = "0.8.0"
 source = { editable = "../hamsci-dsp" }
 dependencies = [
     { name = "geographiclib" },
@@ -94,7 +94,7 @@ wheels = [
 
 [[package]]
 name = "ka9q-python"
-version = "3.22.0"
+version = "3.26.0"
 source = { editable = "../ka9q-python" }
 dependencies = [
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
