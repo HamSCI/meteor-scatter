@@ -1,4 +1,4 @@
-"""Interactive `config init` and `config edit` for meteor-scatter.
+r"""Interactive `config init` and `config edit` for meteor-scatter.
 
 Three operator-facing paths:
 
@@ -31,6 +31,12 @@ across a round-trip.  The wizard offers an "Edit raw TOML in
 """
 
 from __future__ import annotations
+
+# Values `_collect_init_values` uses when nothing real is known yet.  Fine in
+# a config file an operator will edit; never acceptable as a systemd instance
+# name.  See _enable_instance.
+PLACEHOLDER_RADIOD_IDS = frozenset({"my-rx888"})
+
 
 import argparse
 import copy
@@ -119,6 +125,25 @@ def _enable_instance(radiod_id: str) -> None:
     import subprocess
     if not radiod_id:
         return
+    # ⛔ NEVER enable an instance named after the TEMPLATE PLACEHOLDER.
+    # `_collect_init_values` substitutes "my-rx888" when no radiod instance
+    # is known yet.  That serves the sample CONFIG, where an operator edits
+    # it; it must not become a systemd unit.  On a greenfield AC0G-B4
+    # (2026-09-23) it produced an enabled meteor-scatter@my-rx888.service
+    # NINE MINUTES before the real meteor-scatter@AC0G=B4 — dead at every
+    # boot, and passing sigmond/install.sh's `real()` filter because systemd
+    # genuinely reports it "enabled".  An earlier phantom of the same name
+    # was swept into radiod's Wants= by a glob, wiring a guaranteed failure
+    # into every radiod restart.
+    #
+    # scripts/install.sh already states the rule this restores: "There is
+    # nothing to enable here until at least one radiod has been configured."
+    if radiod_id in PLACEHOLDER_RADIOD_IDS:
+        _info(f"not enabling meteor-scatter@{radiod_id}.service — "
+              f"{radiod_id!r} is the template placeholder, not a configured "
+              f"radiod.  Set a real radiod id in the config and re-run "
+              f"`config init`, or enable the instance by hand.")
+        return
     sctl = shutil.which("systemctl")
     if not sctl:
         return
@@ -161,8 +186,10 @@ def _legacy_config_init(args) -> int:
     _info("Next steps:")
     _info(f"  1. Review the [radiod.msk144] freqs_hz array in {target}")
     _info(f"  2. Validate: meteor-scatter validate --json")
+    _enabled_note = ("" if values["radiod_id"] in PLACEHOLDER_RADIOD_IDS
+                     else "  (instance already enabled)")
     _info(f"  3. Start:    sudo systemctl start "
-          f"meteor-scatter@{values['radiod_id']}.service  (instance already enabled)")
+          f"meteor-scatter@{values['radiod_id']}.service{_enabled_note}")
     return 0
 
 

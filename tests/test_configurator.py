@@ -326,6 +326,57 @@ class DiscoveryFlowTests(unittest.TestCase):
         self.assertEqual(_derive_label_from_status(''), 'default')
 
 
+class PlaceholderInstanceTests(unittest.TestCase):
+    """The template placeholder must never become a systemd unit.
+
+    On a greenfield AC0G-B4 (2026-09-23) `config init` ran before any
+    radiod was configured, defaulted radiod_id to "my-rx888", and ENABLED
+    meteor-scatter@my-rx888.service — nine minutes before the real
+    meteor-scatter@AC0G=B4.  It sat dead at every boot and passed
+    sigmond/install.sh's `real()` filter, because systemd reported it
+    genuinely "enabled".
+    """
+
+    def test_placeholder_id_is_never_enabled(self):
+        from meteor_scatter import configurator
+        calls = []
+        with mock.patch.object(configurator.shutil, 'which',
+                               return_value='/bin/systemctl'), \
+             mock.patch.object(configurator.subprocess, 'run',
+                               side_effect=lambda *a, **k: calls.append(a)):
+            configurator._enable_instance('my-rx888')
+        self.assertEqual(calls, [], "systemctl was invoked for the placeholder")
+
+    def test_a_real_radiod_id_still_enables(self):
+        from meteor_scatter import configurator
+        calls = []
+
+        class _R:
+            returncode = 0
+            stdout = stderr = ''
+
+        def _run(*a, **k):
+            calls.append(a[0])
+            return _R()
+
+        with mock.patch.object(configurator.shutil, 'which',
+                               return_value='/bin/systemctl'), \
+             mock.patch.object(configurator.subprocess, 'run', _run):
+            configurator._enable_instance('AC0G=B4')
+        self.assertEqual(len(calls), 1, "a real id must still be enabled")
+        self.assertIn('meteor-scatter@AC0G=B4.service', calls[0])
+
+    def test_empty_id_still_short_circuits(self):
+        from meteor_scatter import configurator
+        calls = []
+        with mock.patch.object(configurator.shutil, 'which',
+                               return_value='/bin/systemctl'), \
+             mock.patch.object(configurator.subprocess, 'run',
+                               side_effect=lambda *a, **k: calls.append(a)):
+            configurator._enable_instance('')
+        self.assertEqual(calls, [])
+
+
 def _clear_env(*names):
     """Helper: remove env vars (no-op if absent)."""
     for n in names:
