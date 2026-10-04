@@ -385,3 +385,117 @@ def _clear_env(*names):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class StrayInstanceTests(unittest.TestCase):
+    """HamSCI/meteor-scatter#4 — KE8UQV, 2026-10-04.
+
+    He typed 192.168.0.1 at the radiod prompt; config init enabled
+    meteor-scatter@192.168.0.1.service.  Re-running init with 127.0.0.1
+    enabled a second instance and left the first enabled and failing, with
+    no way back short of systemctl by hand.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        root = Path(self.tmp.name)
+        self.wants = root / "systemd" / "multi-user.target.wants"
+        self.wants.mkdir(parents=True)
+        self.etc = root / "etc-meteor-scatter"
+        (self.etc / "env").mkdir(parents=True)
+        p = mock.patch.object(configurator, "SYSTEMD_ETC", str(root / "systemd"))
+        p.start(); self.addCleanup(p.stop)
+
+    def _enable(self, inst):
+        (self.wants / f"meteor-scatter@{inst}.service").symlink_to("/dev/null")
+
+    # -- the unicast prompt ------------------------------------------------
+
+    def test_unicast_addresses_are_recognised(self):
+        self.assertTrue(configurator._is_unicast_ip("192.168.0.1"))
+        self.assertTrue(configurator._is_unicast_ip("127.0.0.1"))
+        self.assertFalse(configurator._is_unicast_ip("239.1.2.3"))      # multicast
+        self.assertFalse(configurator._is_unicast_ip("bee1-status.local"))
+        self.assertFalse(configurator._is_unicast_ip(""))
+
+    def test_a_unicast_status_is_questioned_and_replaced_on_no(self):
+        answers = iter(["n", "bee1-status.local"])
+        with mock.patch.object(configurator, "_prompt", lambda *a, **k: next(answers)):
+            got = configurator._confirm_unless_unicast("192.168.0.1")
+        self.assertEqual(got, "bee1-status.local")
+
+    def test_a_unicast_status_is_kept_on_an_explicit_yes(self):
+        with mock.patch.object(configurator, "_prompt", lambda *a, **k: "y"):
+            self.assertEqual(configurator._confirm_unless_unicast("127.0.0.1"), "127.0.0.1")
+
+    def test_an_mdns_status_is_never_questioned(self):
+        with mock.patch.object(configurator, "_prompt",
+                               side_effect=AssertionError("must not prompt")):
+            self.assertEqual(configurator._confirm_unless_unicast("bee1-status.local"),
+                             "bee1-status.local")
+
+    # -- retiring the orphan -------------------------------------------------
+
+    def test_only_the_orphan_is_stale(self):
+        self._enable("192.168.0.1")          # Robert's stray
+        self._enable("127.0.0.1")            # what init just enabled
+        self._enable("AC0G=B4")              # a sigmond per-instance config
+        (self.etc / "AC0G=B4.toml").write_text("")
+        self._enable("bee2")                 # a per-instance env file
+        (self.etc / "env" / "bee2.env").write_text("")
+        self.assertEqual(configurator._stale_instances("127.0.0.1", self.etc),
+                         ["192.168.0.1"])
+
+    def test_interactive_init_disables_the_orphan_on_yes(self):
+        self._enable("192.168.0.1")
+        calls = []
+
+        class _R:
+            returncode = 0
+            stdout = stderr = ""
+
+        with mock.patch.object(configurator.shutil, "which", return_value="/bin/systemctl"), \
+             mock.patch.object(configurator.subprocess, "run",
+                               side_effect=lambda argv, **k: calls.append(argv) or _R()), \
+             mock.patch.object(configurator, "_prompt", lambda *a, **k: "y"):
+            configurator._retire_stale_instances("127.0.0.1", self.etc, interactive=True)
+        self.assertIn(["/bin/systemctl", "disable", "--now",
+                       "meteor-scatter@192.168.0.1.service"], calls)
+        self.assertIn(["/bin/systemctl", "reset-failed",
+                       "meteor-scatter@192.168.0.1.service"], calls)
+
+    def test_unattended_init_only_names_the_orphan(self):
+        self._enable("192.168.0.1")
+        with mock.patch.object(configurator.shutil, "which", return_value="/bin/systemctl"), \
+             mock.patch.object(configurator.subprocess, "run",
+                               side_effect=AssertionError("must not touch systemd")), \
+             mock.patch.object(configurator, "_info") as info:
+            configurator._retire_stale_instances("127.0.0.1", self.etc, interactive=False)
+        said = " ".join(str(c.args[0]) for c in info.call_args_list)
+        self.assertIn("meteor-scatter@192.168.0.1.service", said)
+        self.assertIn("disable --now", said)
+
+    def test_config_init_retires_after_enabling(self):
+        """The wiring: init hands its new radiod id and the config dir over."""
+        with tempfile.TemporaryDirectory() as d:
+            target = Path(d) / "cfg.toml"
+            with mock.patch.dict(os.environ, {"SIGMOND_INSTANCE": "127.0.0.1",
+                                              "SIGMOND_RADIOD_STATUS": "127.0.0.1"}), \
+                 mock.patch.object(configurator, "_enable_instance"), \
+                 mock.patch.object(configurator, "_retire_stale_instances") as retire:
+                self.assertEqual(configurator.cmd_config_init(_ns(config=target)), 0)
+        retire.assert_called_once_with("127.0.0.1", target.parent, interactive=False)
+
+    def test_interactive_collection_questions_a_unicast_status(self):
+        """The wiring: what the operator picks passes through the check."""
+        with mock.patch.object(configurator, "_discover_radiods", return_value=[]), \
+             mock.patch.object(configurator, "_pick_radiod_status_from_discovery",
+                               return_value="192.168.0.1"), \
+             mock.patch.object(configurator, "_confirm_unless_unicast",
+                               return_value="bee1-status.local") as confirm, \
+             mock.patch.object(configurator, "_prompt", lambda label, default, **k: default or "X"):
+            vals = configurator._collect_init_values(_ns(non_interactive=False))
+        confirm.assert_called_once_with("192.168.0.1")
+        self.assertEqual(vals["radiod_status"], "bee1-status.local")
+        self.assertEqual(vals["radiod_id"], "bee1")

@@ -37,9 +37,14 @@ from __future__ import annotations
 # name.  See _enable_instance.
 PLACEHOLDER_RADIOD_IDS = frozenset({"my-rx888"})
 
+# Where systemd records enabled template instances: one symlink per enabled
+# meteor-scatter@<id>.service in a *.wants/ directory.  Overridable for tests.
+SYSTEMD_ETC = "/etc/systemd/system"
+
 
 import argparse
 import copy
+import ipaddress
 import io
 import json
 import os
@@ -180,6 +185,8 @@ def _legacy_config_init(args) -> int:
     target.write_text(body)
     _ok(f"wrote {target}")
     _enable_instance(values["radiod_id"])
+    _retire_stale_instances(values["radiod_id"], target.parent,
+                            interactive=not getattr(args, "non_interactive", False))
     _info(f"reporter: {values['callsign']}    grid: {values['grid']}")
     _info(f"radiod:   id={values['radiod_id']}  status={values['radiod_status']}")
     _info("")
@@ -401,6 +408,7 @@ def _collect_init_values(args) -> dict:
     discovered = _discover_radiods()
     radiod_status = _pick_radiod_status_from_discovery(
         discovered, env_status, instance)
+    radiod_status = _confirm_unless_unicast(radiod_status)
 
     # Legacy `id` local label.  Phase 6 cutover removes this from the
     # interactive flow entirely; for now it's still asked because
@@ -416,6 +424,81 @@ def _collect_init_values(args) -> dict:
         "radiod_id":     radiod_id,
         "radiod_status": radiod_status,
     }
+
+
+def _is_unicast_ip(value: str) -> bool:
+    """True for a literal IP address that is NOT multicast.
+
+    radiod's status travels on a multicast group, named by mDNS
+    (``bee1-status.local``) or given as a multicast address (224.0.0.0/4).
+    A unicast address such as a router's ``192.168.0.1`` cannot carry it,
+    and as an instance label it names a service that can only fail
+    (HamSCI/meteor-scatter#4)."""
+    try:
+        return not ipaddress.ip_address((value or "").strip()).is_multicast
+    except ValueError:
+        return False
+
+
+def _confirm_unless_unicast(status: str) -> str:
+    """Ask before accepting a unicast IP as the radiod status; re-prompt on no."""
+    while _is_unicast_ip(status):
+        _info(f"⚠ {status!r} is a unicast IP address.  radiod's status is a "
+              "multicast group, normally an mDNS name such as "
+              "'bee1-status.local' (run `ka9q-python list` to see yours).  "
+              "It also becomes the name of this client's service.")
+        ans = _prompt("Use it anyway? (y/N)", "n")
+        if ans.strip().lower().startswith("y"):
+            return status
+        status = _prompt("Radiod status DNS", "", required=True)
+    return status
+
+
+def _stale_instances(keep_id: str, etc_dir: Path) -> list:
+    """Enabled meteor-scatter@<id> instances that nothing configures any more.
+
+    An instance is kept when it is the one init just enabled, or when sigmond
+    gave it a per-instance config or env file (multi-radiod hosts:
+    /etc/meteor-scatter/<id>.toml, env/<id>.env).  Anything else is an
+    orphan left by an earlier `config init` (HamSCI/meteor-scatter#4)."""
+    found = set()
+    for link in Path(SYSTEMD_ETC).glob("*.wants/meteor-scatter@*.service"):
+        m = re.fullmatch(r"meteor-scatter@(.+)\.service", link.name)
+        if m:
+            found.add(m.group(1))
+    stale = []
+    for inst in sorted(found):
+        if inst == keep_id:
+            continue
+        if (etc_dir / f"{inst}.toml").exists() or (etc_dir / "env" / f"{inst}.env").exists():
+            continue
+        stale.append(inst)
+    return stale
+
+
+def _retire_stale_instances(keep_id: str, etc_dir: Path, *, interactive: bool) -> None:
+    """Offer to disable orphaned instances; unattended, only name them."""
+    stale = _stale_instances(keep_id, etc_dir)
+    sctl = shutil.which("systemctl")
+    for inst in stale:
+        unit = f"meteor-scatter@{inst}.service"
+        if not interactive or not sctl:
+            _info(f"⚠ {unit} is enabled but no config names it any more; "
+                  f"disable it with:  sudo systemctl disable --now {unit} && "
+                  f"sudo systemctl reset-failed {unit}")
+            continue
+        ans = _prompt(f"{unit} is enabled but no config names it any more.  "
+                      "Disable it? (Y/n)", "y")
+        if not ans.strip().lower().startswith("y"):
+            _info(f"left {unit} enabled")
+            continue
+        r = subprocess.run([sctl, "disable", "--now", unit], capture_output=True, text=True)
+        subprocess.run([sctl, "reset-failed", unit], capture_output=True, text=True)
+        if r.returncode == 0:
+            _ok(f"disabled stale {unit}")
+        else:
+            _info(f"(could not disable {unit}: {r.stderr.strip()} -- run: "
+                  f"sudo systemctl disable --now {unit})")
 
 
 def _derive_label_from_status(status: str) -> str:
