@@ -423,7 +423,8 @@ class MeteorScatterRecorder:
         # server owns the PSKReporter hop (flag True, like ft8/ft4); in
         # "direct" mode the in-process uploader POSTs from this host, so
         # the flag stays False to keep the server from double-posting.
-        # "off"/"none"/"disabled" publish nothing externally (False).
+        # "off"/"none"/"disabled" start no sender here and flag False, so a
+        # host's hs-uploader daemon (psk-pskreporter) posts the rows.
         forward_flag = self._delivery_mode() == "deposit"
 
         # One shared cycle batcher per process; every ReceiverManager's
@@ -577,8 +578,10 @@ class MeteorScatterRecorder:
         "deposit" — sink-only here; rows carry forward_to_pskreporter=True
                     and the wsprdaemon server's pskreporter_forwarder owns
                     the PSKReporter hop (same server-merge path as ft8/ft4).
-        "off"/"none"/"disabled" — no external publish (rows still deposit
-                    to the sink and ride the wsprdaemon tar for ingest).
+        "off"/"none"/"disabled" — no in-process sender; rows carry
+                    forward_to_pskreporter=False, so a host's hs-uploader
+                    daemon (psk-pskreporter) posts them.  Without the daemon
+                    nothing publishes; rows still ride the tar.
         """
         return (
             os.environ.get("METEOR_SCATTER_DELIVERY_MODE") or "direct"

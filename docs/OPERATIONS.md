@@ -2,7 +2,7 @@
 
 > **Audience:** operator/contributor
 > **Status:** current
-> **Verified against:** meteor-scatter bac2116 on 2026-08-23 — code
+> **Verified against:** meteor-scatter 7a34b06 on 2026-10-06 — delivery-mode text checked against deploy.toml and core/recorder.py
 > **Canonical for:** running meteor-scatter day-to-day — control, logs, health, failures
 
 Running meteor-scatter day-to-day: starting and stopping, reading logs,
@@ -159,11 +159,14 @@ Read them in this order; each one rules out a layer.
    (the sink is a queue table, `pending_uploads`, keyed by
    `target_db`/`target_table` — `psk.spots` is that pair, not a table
    name you can select from directly.)
-5. **Delivery consistent with the mode you configured** — in `deposit`
-   the journal says so at startup ("PSKReporter uploader disabled …
-   deposit to the psk.spots sink only") and rows carry
-   `forward_to_pskreporter=1`; in `direct` an `HsPskReporterUploader`
-   line appears and it pumps every 30 s.
+5. **Delivery consistent with the mode you configured** — in `off` (what
+   sigmond seeds) and in `deposit` the journal says so at startup
+   ("PSKReporter uploader disabled … deposit to the psk.spots sink only").
+   `off` rows carry `forward_to_pskreporter=0`, and the host's hs-uploader
+   daemon posts them through its `psk-pskreporter` pipeline; `deposit` rows
+   carry `forward_to_pskreporter=1` for the wsprdaemon server's forwarder.
+   In `direct` an `HsPskReporterUploader` line appears and it pumps every
+   30 s.
 
 ```bash
 meteor-scatter validate --json | jq        # exit 0 and no severity:"fail"
@@ -251,10 +254,13 @@ done; the spool grows ~24 KB/s per channel.
 ### Rows in the sink but nothing at PSKReporter
 
 Check the delivery mode first (`grep DELIVERY
-/etc/meteor-scatter/env/<instance>.env`). In `deposit` this is correct
-behaviour — the wsprdaemon server's forwarder owns that hop, and the
-row's `forward_to_pskreporter=1` is what tells it so. In `direct`,
-confirm the uploader started at all: it refuses (with a warning) when
+/etc/meteor-scatter/env/<instance>.env`). In `off`, the host's hs-uploader
+daemon posts these rows: check that the site sink switch lets it send
+(`smd sink status` should say `site sink: upload`) and that
+`hs-uploader.service` runs. In `deposit` this is correct behaviour — the
+wsprdaemon server's forwarder owns that hop, and the row's
+`forward_to_pskreporter=1` is what tells it so. In `direct`, confirm the
+uploader started at all: it refuses (with a warning) when
 `[station].callsign` or `grid_square` is empty.
 
 ### The direct pipeline stalls every 30 s with `disk I/O error`
@@ -282,7 +288,8 @@ disciplined — but read the restart-cost section first.
 ```
 <radiod_id>-msk144.log  →  ChTailer  →  cycle batcher  →  psk.spots (mode="msk144")
                                                               │
-                                     DELIVERY_MODE=direct ────┼──► pskreporter.info
+                                     DELIVERY_MODE=direct ────┼──► pskreporter.info (this process)
+                                     DELIVERY_MODE=off ───────┼──► hs-uploader daemon ──► pskreporter.info
                                      DELIVERY_MODE=deposit ───┘    (server forwarder)
 ```
 

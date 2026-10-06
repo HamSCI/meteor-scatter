@@ -329,7 +329,7 @@ class HsPskReporterUploader:
             # ``mode IN ["msk144"]`` filter below scopes this direct-delivery
             # source to OUR rows only, so it never double-posts psk-recorder's
             # ft8/ft4.  In the sigmond single-host model meteor runs sink-only
-            # (METEOR_SCATTER_DELIVERY_MODE=deposit) and the daemon's unified
+            # (METEOR_SCATTER_DELIVERY_MODE=off) and the daemon's unified
             # psk→PSKReporter pipeline delivers; this direct path is the
             # standalone/no-daemon fallback.
             database="psk",

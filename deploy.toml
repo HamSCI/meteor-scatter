@@ -13,13 +13,14 @@ edit = ["/usr/local/bin/meteor-scatter", "config", "edit"]
 
 # Greenfield per-instance env sigmond seeds into
 # /etc/meteor-scatter/env/<reporter_id>.env when it creates an instance.
-# On a sigmond single-host uploader host the daemon owns delivery, so
-# meteor decodes to the shared psk.spots sink only (mode="msk144") and does
-# NOT run its own in-process PSKReporter uploader — mirrors psk-recorder
-# being sink-only after Stage 5.  Flip to "direct" for a standalone host
-# with no hs-uploader daemon.
+# "off" starts no in-process PSKReporter sender and marks every row
+# forward_to_pskreporter = false, so the station's hs-uploader daemon -- the
+# one sender per set of rows -- posts MSK144 under the site sink switch
+# (sigmond tasks/plan-sink-control.md §10.2 step 1).  "deposit" would mark
+# rows for wd30's forwarder, which drops spots older than 50 minutes.  A
+# standalone host with no hs-uploader daemon sets "direct" by hand.
 [contract.instance_env]
-METEOR_SCATTER_DELIVERY_MODE = "deposit"
+METEOR_SCATTER_DELIVERY_MODE = "off"
 
 [build]
 steps = [
@@ -120,10 +121,10 @@ parser_attr  = "parse_receiver_channels"
 # provides the egress on a meteor-only host.  MSK144 also rides the cycle-tar
 # server-forwarded path for free (WsprCycleSource include_psk reads psk.spots).
 #
-# Fold onto the daemon on a host: [contract.instance_env] below defaults meteor
-# to METEOR_SCATTER_DELIVERY_MODE=deposit (decode/sink-only; the daemon's
-# unified psk pipeline delivers), then `smd admin uploader manifest
-# --write --enable`.
+# Fold onto the daemon on a host: [contract.instance_env] above seeds new
+# instances with METEOR_SCATTER_DELIVERY_MODE=off (decode/sink-only, rows
+# flagged forward_to_pskreporter=0, which this pipeline selects), then
+# `smd admin uploader manifest --write --enable`.
 # ---------------------------------------------------------------------------
 
 # PSK/MSK144 spot rows -> pskreporter.info (TCP) — shared with psk-recorder.

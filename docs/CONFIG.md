@@ -2,7 +2,7 @@
 
 > **Audience:** operator/contributor
 > **Status:** current
-> **Verified against:** meteor-scatter bac2116 on 2026-08-23 — code
+> **Verified against:** meteor-scatter 7a34b06 on 2026-10-06 — delivery-mode text checked against deploy.toml and core/recorder.py
 > **Canonical for:** every meteor-scatter TOML key and environment variable
 
 Config file: `/etc/meteor-scatter/<instance>.toml` (preferred) or the
@@ -136,7 +136,7 @@ slashes).
 | Variable | Default | Effect |
 |---|---|---|
 | `METEOR_SCATTER_CONFIG` | — | Config path override (below `--config`). |
-| `METEOR_SCATTER_DELIVERY_MODE` | `direct` | `direct` runs the in-process PSKReporter uploader; `deposit` leaves rows in the sink flagged `forward_to_pskreporter=True` for the wsprdaemon server's forwarder; `off`/`none`/`disabled` publish nothing. sigmond seeds `deposit` from `deploy.toml [contract.instance_env]`. |
+| `METEOR_SCATTER_DELIVERY_MODE` | `direct` | `direct` runs the in-process PSKReporter uploader; `deposit` leaves rows in the sink flagged `forward_to_pskreporter=True` for the wsprdaemon server's forwarder; `off`/`none`/`disabled` start no sender and flag rows `False`, so the host's hs-uploader daemon posts them through `psk-pskreporter`; a host without the daemon publishes nothing. sigmond seeds `off` from `deploy.toml [contract.instance_env]`. |
 | `METEOR_SCATTER_DIRECT_DEDUP` | `0` | Opt in to the cross-rx dedup CTE in the direct pipeline. Off by default because the CTE trips `disk I/O error` when `sink.db` is shared with wspr-recorder. |
 | `METEOR_SCATTER_LOG_LEVEL` | — | Log level; beaten only by `--log-level`. Re-read on `SIGHUP`. |
 | `CLIENT_LOG_LEVEL` | — | Suite-wide fallback for the above (contract §11). |

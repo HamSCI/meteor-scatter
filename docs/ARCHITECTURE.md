@@ -2,7 +2,7 @@
 
 > **Audience:** contributor
 > **Status:** current
-> **Verified against:** meteor-scatter d29f733 on 2026-08-24 — code
+> **Verified against:** meteor-scatter 7a34b06 on 2026-10-06 — delivery-mode text checked against deploy.toml and core/recorder.py
 > **Canonical for:** meteor-scatter internals — the MSK144 record → decode → sink pipeline
 
 meteor-scatter monitors **meteor-scatter pings** on the conventional
@@ -108,16 +108,17 @@ authority is read through the suite-shared `hamsci_dsp.timing`
 |---|---|---|---|
 | `direct` (code default) | started in-process | `False` | this host, via `HsPskReporterUploader` |
 | `deposit` | not started | `True` | the wsprdaemon server's elected forwarder |
-| `off` / `none` / `disabled` | not started | `False` | nobody — rows sit in the sink and ride the cycle tar |
+| `off` / `none` / `disabled` | not started | `False` | the host's hs-uploader daemon (`psk-pskreporter` selects rows flagged `False`); nobody on a host without it |
 
-A sigmond-managed host lands on **`deposit`**: `deploy.toml`'s
-`[contract.instance_env]` seeds `METEOR_SCATTER_DELIVERY_MODE = "deposit"`
+A sigmond-managed host lands on **`off`**: `deploy.toml`'s
+`[contract.instance_env]` seeds `METEOR_SCATTER_DELIVERY_MODE = "off"`
 into `/etc/meteor-scatter/env/<reporter_id>.env` when sigmond creates the
 instance, because on such a host the single hs-uploader daemon owns
-egress for every client. Flip to `direct` on a standalone host with no
-hs-uploader daemon. The uploader also refuses to start when
-`[station].callsign` or `grid_square` is empty (it logs a warning and
-returns).
+egress for every client and posts MSK144 under the site sink switch.
+Instances created earlier keep the `deposit` they were seeded with.
+Flip to `direct` on a standalone host with no hs-uploader daemon. The
+uploader also refuses to start when `[station].callsign` or `grid_square`
+is empty (it logs a warning and returns).
 
 ## Per-module responsibilities
 
@@ -376,8 +377,10 @@ restarting RTP streams.
    shared table, stamps provenance, and hands the row to the batcher.
 8. The batcher flushes the cycle into `psk.spots` with `mode="msk144"`,
    `schema_version=2`.
-9. Either the in-process uploader POSTs it to pskreporter.info (mode
-   `msk144` → `MSK144`), or — in `deposit` mode — the row carries
+9. In `direct` the in-process uploader POSTs it to pskreporter.info (mode
+   `msk144` → `MSK144`). In `off`, what sigmond seeds, the row carries
+   `forward_to_pskreporter=False` and the host's hs-uploader daemon posts
+   it through `psk-pskreporter`. In `deposit` the row carries
    `forward_to_pskreporter=True` and the wsprdaemon server's forwarder
    owns that hop.
 

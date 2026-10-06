@@ -102,13 +102,16 @@ RTP multicast ──► meteor-scatter daemon (one per radiod)
 Pump cadence is 30 s (`hs_uploader_shim.PUMP_INTERVAL_SEC`), matching
 the FT4/FT8 slot rate and the legacy `PSKREPORTER_INTERVAL`.
 
-Two delivery modes selected by `METEOR_SCATTER_DELIVERY_MODE`:
+Three delivery modes selected by `METEOR_SCATTER_DELIVERY_MODE`:
 
 - **direct** — client POSTs spots directly to pskreporter.info; cross-rx
   dedup applies in the local pipeline.
 - **server-forwarded** — spots are tagged `forward_to_pskreporter=True`
   in the local sink so a downstream `pskreporter_forwarder` service
   (Phase D, gw1-elected) does the upload.
+- **off** (what sigmond seeds for new instances) — no in-process sender;
+  rows carry `forward_to_pskreporter=False` and the host's hs-uploader
+  daemon posts them through `psk-pskreporter`.
 
 ## Project structure
 

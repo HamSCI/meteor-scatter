@@ -88,7 +88,7 @@ meteor-scatter's operator-facing config spans **three persistence layers**:
 
 The wizard manages layer 1; it reads layer 2 for pre-fills and never
 writes there. Layer 3 is seeded by sigmond from `deploy.toml
-[contract.instance_env]` (`METEOR_SCATTER_DELIVERY_MODE = "deposit"` on a
+[contract.instance_env]` (`METEOR_SCATTER_DELIVERY_MODE = "off"` on a
 host whose hs-uploader daemon owns egress).
 
 ⚠ `meteor-scatter env apply` manages **no** keys in this build
