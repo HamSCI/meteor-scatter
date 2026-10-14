@@ -51,8 +51,11 @@ class StrayDirTests(unittest.TestCase):
 
     def test_a_dir_with_nested_dirs_stays(self):
         (self.stray / MODE / "2026").mkdir(parents=True)
-        self._run()
+        r = self._run()
+        self.assertEqual(r.returncode, 0)
         self.assertTrue((self.stray / MODE / "2026").is_dir())
+        self.assertIn("[WARN]", r.stderr)
+        self.assertIn(str(self.stray), r.stderr)
 
     def test_real_spool_dirs_are_never_touched(self):
         spool = self.root / "B4-100-rx888mk2-status.local" / MODE
@@ -71,6 +74,27 @@ class StrayDirTests(unittest.TestCase):
         self._run()
         self.assertTrue(self.stray.is_symlink())
         self.assertTrue(target.is_dir())
+
+    def test_a_mode_dir_that_is_a_symlink_keeps_the_stray_and_target(self):
+        target = self.root / "elsewhere"
+        target.mkdir()
+        (target / "keep.txt").write_text("x")
+        self.stray.mkdir()
+        os.symlink(target, self.stray / MODE)
+        r = self._run()
+        self.assertEqual(r.returncode, 0)
+        self.assertTrue(self.stray.is_dir())
+        self.assertTrue((self.stray / MODE).is_symlink())
+        self.assertEqual((target / "keep.txt").read_text(), "x")
+        self.assertIn("[WARN]", r.stderr)
+
+    def test_a_mode_dir_holding_a_file_stays_with_a_warning(self):
+        (self.stray / MODE).mkdir(parents=True)
+        (self.stray / MODE / "f").write_text("x")
+        r = self._run()
+        self.assertEqual(r.returncode, 0)
+        self.assertTrue((self.stray / MODE / "f").exists())
+        self.assertIn("[WARN]", r.stderr)
 
     def test_a_missing_root_is_fine(self):
         self.assertEqual(self._run(self.root / "absent").returncode, 0)
