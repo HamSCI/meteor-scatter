@@ -30,7 +30,7 @@ def to_storage(text: str) -> str:
     '/' -> '='.  Reporter ids are upper case only, so ac0g/b4 names AC0G=B4.
     Raises ValueError on text that is no reporter id (bee1-status.local)."""
     rid = unescape_systemd_instance(text.strip()).upper().replace("/", "=")
-    if not _RID.match(rid):
+    if not _RID.fullmatch(rid):    # `$` alone lets "AC0G\n" through
         raise ValueError(f"not a reporter id: {text!r}")
     return rid
 

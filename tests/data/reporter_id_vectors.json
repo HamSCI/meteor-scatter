@@ -20,7 +20,7 @@
     {"name": "AC0G-B4-status.local", "systemd": "AC0G-B4-status.local"},
     {"name": "KA9Q_0-10",            "systemd": "KA9Q_0-10"}
   ],
-  "invalid": ["", "   ", "/B4", "AC0G/", "AC0G/B4!", "AC0G\\x5cx3dB4", "bee1-status.local", "KA9Q_0-10"],
+  "invalid": ["", "   ", "/B4", "AC0G/", "AC0G/B4!", "AC0G\\x5cx3dB4", "AC0G\\x0a", "bee1-status.local", "KA9Q_0-10"],
   "display_only": [
     {"input": "AC0G\\x5cx3dB4", "display": "AC0G/B4"}
   ]
