@@ -24,9 +24,13 @@ EnvironmentFile=-/etc/meteor-scatter/env/%I.env
 
 WorkingDirectory=/opt/git/sigmond/meteor-scatter
 
-ExecStartPre=+/bin/mkdir -p /var/lib/meteor-scatter/%i/msk144
+# No per-instance directory under /var/lib/meteor-scatter: the spool keys on
+# the radiod id (<spool_dir>/<radiod_id>/msk144), and the daemon creates it
+# on first write.  These lines used to build a %i directory there, and
+# %i keeps systemd's spelling, which left a stray AC0G\x3dB4/ beside the real
+# spool (sigmond tasks/spec-reporter-id-v372.md §5).  install.sh removes
+# those leftovers while they are empty.
 ExecStartPre=+/bin/mkdir -p /var/log/meteor-scatter
-ExecStartPre=+/usr/bin/chown -R meteorscat:meteorscat /var/lib/meteor-scatter/%i
 ExecStartPre=+/usr/bin/chown -R meteorscat:meteorscat /var/log/meteor-scatter
 # /var/lib/hs-uploader is SHARED across HamSCI client users (meteorscat,
 # wsprdaemon, ...) — its setgid+group-write shape is owned by

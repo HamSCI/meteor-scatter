@@ -268,6 +268,12 @@ install -o root -g root -m 644 \
     /etc/systemd/system/meteor-scatter@.service
 systemctl daemon-reload
 
+# --- Phase 5.5: stray per-instance directories ---
+# The unit template before v3.72 built /var/lib/meteor-scatter/%i, and %i
+# keeps systemd's spelling (AC0G\x3dB4).  Nothing reads those directories;
+# the spool keys on the radiod id.  Removed only while empty.
+bash "$REPO_SOURCE/scripts/remove-stray-instance-dirs.sh" "$SPOOL_DIR"
+
 # --- Phase 6: (none) ---
 # Unlike psk/wspr-recorder, meteor-scatter does NOT replace any native
 # ka9q-radio decoder service: MSK144 monitors its own dial frequencies
