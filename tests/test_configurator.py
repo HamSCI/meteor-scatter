@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
 import os
 import sys
 import tempfile
@@ -440,12 +442,72 @@ class StrayInstanceTests(unittest.TestCase):
     def test_only_the_orphan_is_stale(self):
         self._enable("192.168.0.1")          # Robert's stray
         self._enable("127.0.0.1")            # what init just enabled
-        self._enable("AC0G=B4")              # a sigmond per-instance config
+        self._enable("AC0G\\x3dB4")          # a sigmond per-instance config; the
+                                             # link carries systemd's spelling
         (self.etc / "AC0G=B4.toml").write_text("")
         self._enable("bee2")                 # a per-instance env file
         (self.etc / "env" / "bee2.env").write_text("")
         self.assertEqual(configurator._stale_instances("127.0.0.1", self.etc),
                          ["192.168.0.1"])
+
+    def test_a_live_instance_is_never_stale_under_any_spelling(self):
+        # M2: on AC0G-B4 the link reads meteor-scatter@AC0G\\x3dB4.service and
+        # the config AC0G=B4.toml; init offered to disable the live instance.
+        self._enable("AC0G\\x3dB4")
+        (self.etc / "env" / "AC0G=B4.env").write_text("")
+        self.assertEqual(configurator._stale_instances("127.0.0.1", self.etc), [])
+
+    def test_a_stale_reporter_instance_is_named_for_a_person(self):
+        # M3: prompts show AC0G/B5; systemctl gets AC0G\\x3dB5.
+        self._enable("AC0G\\x3dB5")
+        with mock.patch.object(configurator.shutil, "which", return_value="/bin/systemctl"), \
+             mock.patch.object(configurator.subprocess, "run",
+                               side_effect=AssertionError("must not touch systemd")), \
+             mock.patch.object(configurator, "_info") as info:
+            configurator._retire_stale_instances("127.0.0.1", self.etc, interactive=False)
+        said = " ".join(str(c.args[0]) for c in info.call_args_list)
+        self.assertIn("meteor-scatter@AC0G/B5 is enabled", said)
+        self.assertIn("sudo systemctl disable --now 'meteor-scatter@AC0G\\x3dB5.service'", said)
+
+    def test_interactive_disable_sends_the_unit_systemd_named(self):
+        self._enable("AC0G\\x3dB5")
+        calls = []
+
+        class _R:
+            returncode = 0
+            stdout = stderr = ""
+
+        with mock.patch.object(configurator.shutil, "which", return_value="/bin/systemctl"), \
+             mock.patch.object(configurator.subprocess, "run",
+                               side_effect=lambda argv, **k: calls.append(argv) or _R()), \
+             mock.patch.object(configurator, "_prompt", lambda *a, **k: "y"), \
+             mock.patch.object(configurator, "_ok"):
+            configurator._retire_stale_instances("127.0.0.1", self.etc, interactive=True)
+        self.assertIn(["/bin/systemctl", "disable", "--now",
+                       "meteor-scatter@AC0G\\x3dB5.service"], calls)
+
+    def test_env_file_path_takes_any_spelling(self):
+        # M4
+        for typed in ("AC0G\\x3dB4", "AC0G/B4", "AC0G=B4", "ac0g/b4"):
+            with self.subTest(typed=typed):
+                self.assertEqual(configurator._env_file_path(typed),
+                                 configurator._ENV_DIR / "AC0G=B4.env")
+        self.assertEqual(configurator._env_file_path("bee1-status.local"),
+                         configurator._ENV_DIR / "bee1-status.local.env")
+
+    def test_env_file_path_falls_back_to_a_legacy_file_with_a_hint(self):
+        env_dir = self.etc / "env"
+        (env_dir / "my-rx888.env").write_text("")
+        err = io.StringIO()
+        with mock.patch.object(configurator, "_ENV_DIR", env_dir), \
+             contextlib.redirect_stderr(err):
+            got = configurator._env_file_path("my-rx888")
+        self.assertEqual(got, env_dir / "my-rx888.env")
+        self.assertIn("legacy instance name my-rx888; run: smd admin instance migrate",
+                      err.getvalue())
+        with mock.patch.object(configurator, "_ENV_DIR", env_dir):
+            self.assertEqual(configurator._env_file_path("my-rx999"),
+                             env_dir / "MY-RX999.env")
 
     def test_interactive_init_disables_the_orphan_on_yes(self):
         self._enable("192.168.0.1")

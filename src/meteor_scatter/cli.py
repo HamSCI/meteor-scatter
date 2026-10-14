@@ -317,6 +317,22 @@ def _handle_version(args):
     print(json.dumps(payload, indent=2))
 
 
+def _normalize_instance_args(args) -> None:
+    """Turn --instance and --radiod-id back into the storage form.
+
+    The unit template passes `--instance %i --radiod-id %i`, and %i keeps
+    systemd's spelling (AC0G\\x3dB4).  Config lookup, block matching and
+    log lines all want AC0G=B4, so decode every \\xHH here, once, before
+    anything reads them.  Plain names (AC0G-B4, bee1-status.local) pass
+    through unchanged.
+    """
+    from meteor_scatter._reporter_id import unescape_systemd_instance
+    if getattr(args, "instance", None):
+        args.instance = unescape_systemd_instance(args.instance)
+    if getattr(args, "radiod_id", None):
+        args.radiod_id = unescape_systemd_instance(args.radiod_id)
+
+
 def _handle_daemon(args):
     _install_sighup_handler()
     logger = logging.getLogger("meteor_scatter.daemon")
@@ -338,12 +354,7 @@ def _handle_daemon(args):
     # file exists; fall back to legacy shared with a deprecation
     # warning otherwise.  --config still wins over both (operator
     # override).
-    # systemd escapes '=' in unit instance names to '\x3d', so with the
-    # %i unit templates a '='-style (reporter-id sentinel) instance
-    # reaches the daemon in escaped form.  Unescape so config lookup
-    # works for both naming styles ('-' names pass through untouched).
-    if args.instance:
-        args.instance = args.instance.replace("\\x3d", "=")
+    _normalize_instance_args(args)
 
     config_path = resolve_config_path(
         instance=args.instance, explicit_path=args.config,

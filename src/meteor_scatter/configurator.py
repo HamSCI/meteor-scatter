@@ -61,6 +61,7 @@ try:
 except ModuleNotFoundError:
     import tomli as tomllib  # type: ignore[no-redef]
 
+from ._reporter_id import display, systemd_instance, to_storage, unescape_systemd_instance
 from .config import DEFAULT_CONFIG_PATH, DEFAULTS, load_config
 
 
@@ -465,10 +466,13 @@ def _stale_instances(keep_id: str, etc_dir: Path) -> list:
     for link in Path(SYSTEMD_ETC).glob("*.wants/meteor-scatter@*.service"):
         m = re.fullmatch(r"meteor-scatter@(.+)\.service", link.name)
         if m:
-            found.add(m.group(1))
+            # systemd names the link in its own spelling (AC0G\\x3dB4); the
+            # config and env files carry the storage form (AC0G=B4).
+            found.add(unescape_systemd_instance(m.group(1)))
+    keep = unescape_systemd_instance(keep_id)
     stale = []
     for inst in sorted(found):
-        if inst == keep_id:
+        if inst == keep:
             continue
         if (etc_dir / f"{inst}.toml").exists() or (etc_dir / "env" / f"{inst}.env").exists():
             continue
@@ -481,24 +485,25 @@ def _retire_stale_instances(keep_id: str, etc_dir: Path, *, interactive: bool) -
     stale = _stale_instances(keep_id, etc_dir)
     sctl = shutil.which("systemctl")
     for inst in stale:
-        unit = f"meteor-scatter@{inst}.service"
+        unit = f"meteor-scatter@{systemd_instance(inst)}.service"   # for systemctl
+        label = f"meteor-scatter@{display(inst)}"                   # for a person
         if not interactive or not sctl:
-            _info(f"⚠ {unit} is enabled but no config names it any more; "
-                  f"disable it with:  sudo systemctl disable --now {unit} && "
-                  f"sudo systemctl reset-failed {unit}")
+            _info(f"⚠ {label} is enabled but no config names it any more; "
+                  f"disable it with:  sudo systemctl disable --now '{unit}' && "
+                  f"sudo systemctl reset-failed '{unit}'")
             continue
-        ans = _prompt(f"{unit} is enabled but no config names it any more.  "
+        ans = _prompt(f"{label} is enabled but no config names it any more.  "
                       "Disable it? (Y/n)", "y")
         if not ans.strip().lower().startswith("y"):
-            _info(f"left {unit} enabled")
+            _info(f"left {label} enabled")
             continue
         r = subprocess.run([sctl, "disable", "--now", unit], capture_output=True, text=True)
         subprocess.run([sctl, "reset-failed", unit], capture_output=True, text=True)
         if r.returncode == 0:
-            _ok(f"disabled stale {unit}")
+            _ok(f"disabled stale {label}")
         else:
-            _info(f"(could not disable {unit}: {r.stderr.strip()} -- run: "
-                  f"sudo systemctl disable --now {unit})")
+            _info(f"(could not disable {label}: {r.stderr.strip()} -- run: "
+                  f"sudo systemctl disable --now '{unit}')")
 
 
 def _derive_label_from_status(status: str) -> str:
@@ -1177,7 +1182,26 @@ _ENV_WRITABLE_KEYS: "set[str]" = set()
 
 
 def _env_file_path(instance: str) -> Path:
-    return _ENV_DIR / f"{instance}.env"
+    """The env file for an instance named in any spelling.
+
+    A reporter id in any spelling (AC0G/B4, AC0G=B4, AC0G\\x3dB4, ac0g/b4)
+    names AC0G=B4.env.  A radiod id, which is no reporter id
+    (bee1-status.local), names its own file.  One fallback for a legacy
+    instance: when the storage-form file is absent and a file named
+    exactly as typed exists (my-rx888.env), use it and say so on stderr.
+    """
+    exact = unescape_systemd_instance(instance.strip())
+    try:
+        stem = to_storage(instance)
+    except ValueError:
+        return _ENV_DIR / f"{exact}.env"
+    path = _ENV_DIR / f"{stem}.env"
+    legacy = _ENV_DIR / f"{exact}.env"
+    if exact != stem and not path.exists() and legacy.exists():
+        print(f"legacy instance name {exact}; run: smd admin instance migrate",
+              file=sys.stderr)
+        return legacy
+    return path
 
 
 def _parse_env_file(path: Path) -> "dict[str, str]":

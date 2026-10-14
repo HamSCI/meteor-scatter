@@ -1,0 +1,27 @@
+{
+  "about": "Reporter-id spellings: display AC0G/B4, storage AC0G=B4, systemd AC0G\\x3dB4. Reporter ids are upper case only; lower case typed by a person reaches the upper-case id. The original lives in sigmond tests/data/; psk-recorder, meteor-scatter and wspr-recorder keep byte-identical copies in their own tests/data/. Edit sigmond's copy, then cp it to each client. sigmond tests/test_reporter_id_drift.py fails while any copy differs.",
+  "reporter_ids": [
+    {"input": "AC0G/B4",     "storage": "AC0G=B4",     "systemd": "AC0G\\x3dB4",       "display": "AC0G/B4"},
+    {"input": "AC0G=B4",     "storage": "AC0G=B4",     "systemd": "AC0G\\x3dB4",       "display": "AC0G/B4"},
+    {"input": "AC0G\\x3dB4", "storage": "AC0G=B4",     "systemd": "AC0G\\x3dB4",       "display": "AC0G/B4"},
+    {"input": "ac0g/b4",     "storage": "AC0G=B4",     "systemd": "AC0G\\x3dB4",       "display": "AC0G/B4"},
+    {"input": " ac0g/b4 ",   "storage": "AC0G=B4",     "systemd": "AC0G\\x3dB4",       "display": "AC0G/B4"},
+    {"input": "AC0G-B4",     "storage": "AC0G-B4",     "systemd": "AC0G-B4",           "display": "AC0G-B4"},
+    {"input": "W1ABC-5",     "storage": "W1ABC-5",     "systemd": "W1ABC-5",           "display": "W1ABC-5"},
+    {"input": "w1abc-5",     "storage": "W1ABC-5",     "systemd": "W1ABC-5",           "display": "W1ABC-5"},
+    {"input": "KP4MD-RPI-4", "storage": "KP4MD-RPI-4", "systemd": "KP4MD-RPI-4",       "display": "KP4MD-RPI-4"},
+    {"input": "AI6VN/P",     "storage": "AI6VN=P",     "systemd": "AI6VN\\x3dP",       "display": "AI6VN/P"},
+    {"input": "ai6vn=p",     "storage": "AI6VN=P",     "systemd": "AI6VN\\x3dP",       "display": "AI6VN/P"},
+    {"input": "AC0G/B4/P",   "storage": "AC0G=B4=P",   "systemd": "AC0G\\x3dB4\\x3dP", "display": "AC0G/B4/P"}
+  ],
+  "escape_only": [
+    {"name": "my-rx888",             "systemd": "my-rx888"},
+    {"name": "B4-100-rx888mk2",      "systemd": "B4-100-rx888mk2"},
+    {"name": "AC0G-B4-status.local", "systemd": "AC0G-B4-status.local"},
+    {"name": "KA9Q_0-10",            "systemd": "KA9Q_0-10"}
+  ],
+  "invalid": ["", "   ", "/B4", "AC0G/", "AC0G/B4!", "AC0G\\x5cx3dB4", "bee1-status.local", "KA9Q_0-10"],
+  "display_only": [
+    {"input": "AC0G\\x5cx3dB4", "display": "AC0G/B4"}
+  ]
+}
