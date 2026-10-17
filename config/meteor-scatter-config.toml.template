@@ -15,7 +15,6 @@ grid_square = "AA00aa"
 [paths]
 spool_dir   = "/var/lib/meteor-scatter"
 log_dir     = "/var/log/meteor-scatter"
-keep_wav    = false
 
 # Decoder.  meteor-scatter decodes with WSJT-X's `jt9` in MSK144 mode
 # (`jt9 --msk144 -p 15`).  The arch-specific binary is bundled in-repo at
@@ -61,3 +60,18 @@ freqs_hz      = [
   28_145_000,
   50_260_000,
 ]
+# Written by calibration, keyed by frequency in Hz as a string:
+#[radiod.msk144.scale_db]
+#"28145000" = 31.5
+#[radiod.msk144.noise_cal_dbfs]
+#"28145000" = -81.5
+
+# Meteor Scatter QSO Party archive (docs/OPERATIONS.md, "MSQP").
+#[msqp]
+#archive_max_days  = 90
+#archive_max_gb    = 2
+#operator          = ""   # operator names and calls, for the Zenodo description
+#contact_email     = ""
+#antenna           = ""
+#comments          = ""
+#zenodo_token_path = "/etc/meteor-scatter/zenodo-token"

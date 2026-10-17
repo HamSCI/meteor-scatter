@@ -880,7 +880,7 @@ def cmd_config_show(args) -> int:
 # "Edit raw TOML" option.  Merge semantics: the operator's full
 # block list REPLACES the file's list (overlay-wins), since deep-merge
 # doesn't compose for arrays-of-tables.
-_APPLY_ALLOWED_SECTIONS = {"station", "paths", "processing", "timing", "radiod"}
+_APPLY_ALLOWED_SECTIONS = {"station", "paths", "processing", "timing", "radiod", "msqp"}
 
 
 def cmd_config_apply(args) -> int:

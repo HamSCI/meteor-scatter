@@ -136,10 +136,10 @@ def test_apply_rejects_unknown_section(tmp_path: Path, capsys) -> None:
 
 
 def test_apply_rejects_wrong_type(tmp_path: Path, capsys) -> None:
-    """paths.keep_wav is a bool; a string must be rejected."""
-    rv = _apply({"paths": {"keep_wav": "yes"}}, tmp_path)
+    """radiod_lifetime_frames is a number; a string must be rejected."""
+    rv = _apply({"processing": {"radiod_lifetime_frames": "soon"}}, tmp_path)
     assert rv == 2
-    assert "expects bool" in capsys.readouterr().err.lower()
+    assert "expects number" in capsys.readouterr().err.lower()
 
 
 def test_apply_rejects_negative_lifetime(tmp_path: Path, capsys) -> None:
@@ -190,6 +190,37 @@ def test_apply_deep_merges_with_existing(tmp_path: Path) -> None:
     assert loaded["station"]["callsign"]    == "K1JT"      # overwritten
     assert loaded["station"]["grid_square"] == "EM38ww40pk"  # preserved
     assert loaded["paths"]["keep_wav"]      is False         # preserved
+
+
+def test_apply_msqp_round_trips_through_show(tmp_path: Path, capsys) -> None:
+    rv = _apply({"msqp": {"operator": "AC0G"}}, tmp_path,
+                existing=_FIXTURE_WITH_RADIOD)
+    assert rv == 0
+    capsys.readouterr()
+    rv = configurator.cmd_config_show(
+        _ns(config=tmp_path / "c.toml", defaults=False))
+    assert rv == 0
+    shown = json.loads(capsys.readouterr().out)
+    assert shown["msqp"]["operator"] == "AC0G"
+
+
+def test_apply_scale_db_preserves_freqs(tmp_path: Path) -> None:
+    block = {"status": "test-status.local",
+             "msk144": {"freqs_hz": [28145000, 50260000],
+                        "scale_db": {"28145000": 31.5}}}
+    rv = _apply({"radiod": [block]}, tmp_path, existing=_FIXTURE_WITH_RADIOD)
+    assert rv == 0
+    with open(tmp_path / "c.toml", "rb") as f:
+        loaded = tomllib.load(f)
+    m = loaded["radiod"][0]["msk144"]
+    assert m["freqs_hz"] == [28145000, 50260000]
+    assert m["scale_db"] == {"28145000": 31.5}
+
+
+def test_apply_rejects_bad_msqp_value(tmp_path: Path, capsys) -> None:
+    rv = _apply({"msqp": {"archive_max_days": -1}}, tmp_path,
+                existing=_FIXTURE_WITH_RADIOD)
+    assert rv == 2
 
 
 # ---------- serializer ------------------------------------------------------

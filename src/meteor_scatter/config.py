@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import warnings
 from pathlib import Path
@@ -12,6 +13,12 @@ try:
 except ModuleNotFoundError:
     import tomli as tomllib  # type: ignore[no-redef]
 
+
+log = logging.getLogger(__name__)
+
+# Zenodo's community id stays unknown until the operator's sandbox probe
+# answers (plan Task 0 Step 2); `msqp draft` refuses while it is empty.
+ZENODO_COMMUNITY_ID = ""
 
 DEFAULT_CONFIG_PATH = Path("/etc/meteor-scatter/meteor-scatter-config.toml")
 PER_INSTANCE_CONFIG_DIR = Path("/etc/meteor-scatter")
@@ -82,7 +89,6 @@ DEFAULTS: dict[str, Any] = {
         # (sigmond's from-source wsjtx-decoders build; see
         # core.decoder.resolve_jt9_binary).  Set paths.decoder_jt9 to override.
         "decoder": "",
-        "keep_wav": False,
     },
     "processing": {
         # radiod LIFETIME tag (ka9q-python ≥3.13.0, ka9q-radio ≥0f8b622).
@@ -97,6 +103,52 @@ DEFAULTS: dict[str, Any] = {
         "radiod_lifetime_frames": 6000,
     },
 }
+
+MSQP_DEFAULTS: dict[str, Any] = {
+    "archive_dir": "/var/lib/meteor-scatter/archive",
+    "archive_max_days": 90,
+    "archive_max_gb": 2.0,
+    "operator": "",
+    "contact_email": "",
+    "antenna": "",
+    "comments": "",
+    "zenodo_url": "https://zenodo.org",
+    "zenodo_community": ZENODO_COMMUNITY_ID,
+    "zenodo_token_path": "/etc/meteor-scatter/zenodo-token",
+}
+
+
+def get_msqp(config: dict) -> dict:
+    """Return the [msqp] block merged over MSQP_DEFAULTS, validated."""
+    raw = dict(MSQP_DEFAULTS)
+    raw.update(config.get("msqp", {}) or {})
+    days, gb = raw["archive_max_days"], raw["archive_max_gb"]
+    if isinstance(days, bool) or not isinstance(days, int) or days < 1:
+        raise ValueError(f"msqp.archive_max_days must be a positive int; got {days!r}")
+    if isinstance(gb, bool) or not isinstance(gb, (int, float)) or gb <= 0:
+        raise ValueError(f"msqp.archive_max_gb must be a positive number; got {gb!r}")
+    raw["archive_max_gb"] = float(gb)
+    tok = raw["zenodo_token_path"]
+    if not isinstance(tok, str) or not tok:
+        raise ValueError(f"msqp.zenodo_token_path must be a non-empty string; got {tok!r}")
+    return raw
+
+
+def _per_band(radiod_block: dict, key: str, freq_hz: int) -> Optional[float]:
+    table = (radiod_block.get("msk144", {}) or {}).get(key, {}) or {}
+    v = table.get(str(int(freq_hz)))
+    return float(v) if v is not None else None
+
+
+def get_scale_db(radiod_block: dict, freq_hz: int) -> Optional[float]:
+    """Calibrated dB scale for one band, or None when uncalibrated."""
+    return _per_band(radiod_block, "scale_db", freq_hz)
+
+
+def get_noise_cal_dbfs(radiod_block: dict, freq_hz: int) -> Optional[float]:
+    """Calibrated noise floor (dBFS) for one band, or None."""
+    return _per_band(radiod_block, "noise_cal_dbfs", freq_hz)
+
 
 # MSK144 T/R sequence length (seconds).  This MUST match the T/R period the
 # transmitting WSJT-X stations use, or the recorded slots won't frame their
@@ -127,6 +179,11 @@ def load_config(path: Path | None = None) -> dict:
         raw = tomllib.load(f)
 
     raw.setdefault("paths", {})
+    if "keep_wav" in raw["paths"]:
+        log.warning(
+            "paths.keep_wav retired: meteor-scatter now keeps decoded "
+            "recordings in msqp.archive_dir"
+        )
     for key, val in DEFAULTS["paths"].items():
         raw["paths"].setdefault(key, val)
 
@@ -140,6 +197,8 @@ def load_config(path: Path | None = None) -> dict:
             f"processing.radiod_lifetime_frames must be a non-negative int "
             f"(frames; ~50 Hz at default blocktime); got {lifetime!r}"
         )
+
+    get_msqp(raw)
 
     return raw
 

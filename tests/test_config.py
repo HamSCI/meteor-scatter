@@ -20,6 +20,7 @@ SRC_DIR = REPO_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
+from meteor_scatter.config import get_msqp, get_scale_db, get_noise_cal_dbfs
 from meteor_scatter.config import (
     DEFAULT_CONFIG_PATH,
     PER_INSTANCE_CONFIG_DIR,
@@ -205,6 +206,54 @@ class TestExtractReporterId(unittest.TestCase):
 
     def test_non_string(self):
         self.assertIsNone(extract_reporter_id({"instance": {"reporter_id": 42}}))
+
+
+class MsqpConfigTests(unittest.TestCase):
+    def test_defaults(self):
+        m = get_msqp({})
+        self.assertEqual((m["archive_max_days"], m["archive_max_gb"]), (90, 2.0))
+        self.assertEqual(m["operator"], "")
+        self.assertEqual(m["zenodo_url"], "https://zenodo.org")
+
+    def test_zenodo_token_path_default(self):
+        self.assertEqual(get_msqp({})["zenodo_token_path"],
+                         "/etc/meteor-scatter/zenodo-token")
+        with self.assertRaises(ValueError):
+            get_msqp({"msqp": {"zenodo_token_path": ""}})
+
+    def test_rejects_negative_cap(self):
+        with self.assertRaises(ValueError):
+            get_msqp({"msqp": {"archive_max_days": -1}})
+
+    def test_scale_lookup_by_frequency(self):
+        blk = {"msk144": {"freqs_hz": [28145000, 50260000],
+                          "scale_db": {"28145000": 31.5},
+                          "noise_cal_dbfs": {"28145000": -81.5}}}
+        self.assertEqual(get_scale_db(blk, 28145000), 31.5)
+        self.assertIsNone(get_scale_db(blk, 50260000))
+        self.assertEqual(get_noise_cal_dbfs(blk, 28145000), -81.5)
+
+
+class KeepWavRetirementTests(unittest.TestCase):
+    def _load(self, body):
+        import tempfile
+        from meteor_scatter.config import load_config
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "c.toml"
+            p.write_text(body)
+            return load_config(p)
+
+    def test_warns_once_and_keeps_key(self):
+        with self.assertLogs("meteor_scatter.config", level="WARNING") as cm:
+            cfg = self._load("[paths]\nkeep_wav = true\n")
+        self.assertEqual(len(cm.output), 1)
+        self.assertIn("paths.keep_wav retired", cm.output[0])
+        self.assertTrue(cfg["paths"]["keep_wav"])
+
+    def test_no_warning_without_key(self):
+        with self.assertNoLogs("meteor_scatter.config", level="WARNING"):
+            cfg = self._load("[paths]\n")
+        self.assertNotIn("keep_wav", cfg["paths"])
 
 
 if __name__ == "__main__":
