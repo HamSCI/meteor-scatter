@@ -1,6 +1,7 @@
 import json, tempfile, unittest
 from datetime import date
 from pathlib import Path
+from unittest.mock import patch
 
 from meteor_scatter.core.archive import Archive, band_label, slot_stem, slot_day
 
@@ -74,3 +75,90 @@ class KeepAndPruneTests(unittest.TestCase):
         self.assertEqual(u["oldest_day"], "20261213")
         self.assertEqual(u["kept_today"], 1)
         self.assertGreaterEqual(u["bytes"], 500)
+
+
+class KeepFailureRecoveryTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name) / "archive"
+        self.spool = Path(self.tmp.name) / "spool"
+        self.spool.mkdir()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _wav(self, name="x.wav", size=1000):
+        p = self.spool / name
+        p.write_bytes(b"\0" * size)
+        return p
+
+    def test_json_rename_fails_after_wav_moved_restores_wav(self):
+        """If os.replace(tmp, side) fails after wav is moved, wav must be restored to its original path."""
+        a = Archive(self.root, max_days=90, max_gb=2)
+        wav = self._wav()
+        dest_dir = self.root / "10m" / "20261213"
+        dest_wav = dest_dir / "261213_235930.wav"
+        dest_json = dest_dir / "261213_235930.json"
+        dest_tmp = dest_dir / "261213_235930.json.part"
+
+        # Make the second os.replace (tmp -> side) fail
+        call_count = [0]
+        original_replace = __import__('os').replace
+
+        def failing_replace(src, dst):
+            call_count[0] += 1
+            if call_count[0] == 2:  # Second call is tmp -> side
+                raise OSError("simulated failure")
+            return original_replace(src, dst)
+
+        with patch('os.replace', side_effect=failing_replace):
+            with self.assertRaises(OSError):
+                a.keep(wav, 28145000, T0, {"k": 1})
+
+        # Verify recovery: wav restored to spool, nothing in archive
+        self.assertTrue(wav.exists(), "WAV should be restored to original spool path")
+        self.assertFalse(dest_wav.exists(), "Archive WAV should not exist after failure")
+        self.assertFalse(dest_json.exists(), "Archive JSON should not exist after failure")
+        self.assertFalse(dest_tmp.exists(), "Temporary JSON should not exist after failure")
+
+    def test_preexisting_archive_survives_later_failure_before_wav_move(self):
+        """A pre-existing archived wav for the same slot should survive if a later keep() fails before the wav move."""
+        a = Archive(self.root, max_days=90, max_gb=2)
+        dest_dir = self.root / "10m" / "20261213"
+        dest_dir.mkdir(parents=True)
+        dest_wav = dest_dir / "261213_235930.wav"
+        dest_json = dest_dir / "261213_235930.json"
+
+        # Pre-populate with an archived recording
+        dest_wav.write_bytes(b"original_wav")
+        dest_json.write_text('{"original": true}')
+
+        # Now try to keep() another wav for the same slot, but fail during json write
+        wav2 = self._wav("y.wav")
+        with patch.object(Path, 'write_text', side_effect=OSError("simulated failure")):
+            with self.assertRaises(OSError):
+                a.keep(wav2, 28145000, T0, {"k": 2})
+
+        # Verify the original archive entry is untouched
+        self.assertEqual(dest_wav.read_bytes(), b"original_wav", "Original archive WAV should be preserved")
+        self.assertEqual(dest_json.read_text(), '{"original": true}', "Original archive JSON should be preserved")
+        # The new spool wav should still be in spool since move never happened
+        self.assertTrue(wav2.exists(), "New WAV should still be in spool since move was never attempted")
+
+    def test_wav_move_fails_leaves_nothing_in_archive(self):
+        """If the wav move itself fails, nothing should be left in the archive day dir."""
+        a = Archive(self.root, max_days=90, max_gb=2)
+        wav = self._wav()
+        dest_dir = self.root / "10m" / "20261213"
+        dest_wav = dest_dir / "261213_235930.wav"
+        dest_tmp = dest_dir / "261213_235930.json.part"
+
+        # Make os.replace fail for any file
+        with patch('os.replace', side_effect=OSError("simulated failure")):
+            with self.assertRaises(OSError):
+                a.keep(wav, 28145000, T0, {"k": 1})
+
+        # Verify: wav still in spool, nothing in archive dir
+        self.assertTrue(wav.exists(), "WAV should remain in spool after move failure")
+        self.assertFalse(dest_wav.exists(), "Archive WAV should not exist after failure")
+        self.assertFalse(dest_tmp.exists(), "Temporary JSON should not exist after failure")

@@ -2,7 +2,7 @@
 
 Layout: <root>/<band>/<YYYYMMDD>/<YYMMDD_HHMMSS>.wav plus a .json sidecar.  A slot belongs to the
 UTC day it starts on.  The spool and the archive share /var/lib/meteor-scatter, so keep() moves a
-recording with one rename.
+recording with a rename, with a copy fallback across filesystems.
 """
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ import math
 import os
 import shutil
 import time
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 BAND_NAMES = {28145000: "10m", 50260000: "6m"}
@@ -42,26 +42,39 @@ class Archive:
         self.max_bytes = int(float(max_gb) * 1e9)
 
     def keep(self, wav_path: Path, freq_hz: int, slot_start_utc: float, sidecar: dict) -> Path:
-        """Move one decoded recording in and write its sidecar.  Raises OSError; leaves neither
-        file half-written in the archive."""
+        """Move one decoded recording in and write its sidecar.  Raises OSError; restores the recording
+        and removes only files this call created."""
         day_dir = self.root / band_label(freq_hz) / slot_day(slot_start_utc).strftime("%Y%m%d")
         day_dir.mkdir(parents=True, exist_ok=True)
         dest = day_dir / f"{slot_stem(slot_start_utc)}.wav"
         side = dest.with_suffix(".json")
         tmp = side.with_suffix(".json.part")
+        wav_moved = False
         try:
             tmp.write_text(json.dumps(sidecar, indent=1, sort_keys=True))
             try:
                 os.replace(wav_path, dest)
+                wav_moved = True
             except OSError:
                 shutil.move(str(wav_path), str(dest))
+                wav_moved = True
             os.replace(tmp, side)
         except OSError:
-            for p in (tmp, dest):
+            # Recovery: restore the wav if we moved it, and clean up only files we created.
+            if wav_moved:
                 try:
-                    p.unlink()
+                    os.replace(dest, wav_path)
                 except OSError:
-                    pass
+                    # If os.replace fails, try shutil.move as fallback
+                    try:
+                        shutil.move(str(dest), str(wav_path))
+                    except OSError:
+                        pass  # If restore fails, leave dest as-is for manual recovery
+            # Clean up tmp only if we created it
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
             raise
         return dest
 
