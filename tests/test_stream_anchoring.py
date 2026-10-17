@@ -10,6 +10,7 @@ anchor-relative integer sample counts derived from the true RTP timestamp,
 so the audio always lines up with the grid point its WAV is labelled with.
 """
 
+import io
 import shutil
 import tempfile
 import unittest
@@ -323,3 +324,27 @@ class TestAnchorExposedForTheReport(unittest.TestCase):
             self.assertIsNone(sink.anchor)
         finally:
             _cleanup_sink(sink)
+
+
+class TestSinkTellsMsqpItsSsrc(unittest.TestCase):
+    """The band's sidecar matches radiod's channel report by SSRC, never frequency (N2)."""
+
+    def test_set_channel_info_and_restore_carry_the_ssrc(self):
+        from types import SimpleNamespace
+        tmp = Path(tempfile.mkdtemp())
+        msqp = SimpleNamespace(ssrc=None)
+        sink = ChannelSink(
+            mode="msk144", frequency_hz=50_260_000, sample_rate=SR,
+            preset="usb", encoding=0, spool_dir=tmp, log_fd=io.StringIO(),
+            decoder_path="/nonexistent", msqp=msqp)
+        try:
+            info = _FakeChannelInfo()
+            info.ssrc = 4242
+            sink.set_channel_info(info)
+            self.assertEqual(msqp.ssrc, 4242)
+            restored = _FakeChannelInfo()
+            restored.ssrc = 4343
+            sink.on_stream_restored(restored)
+            self.assertEqual(msqp.ssrc, 4343)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)

@@ -7,8 +7,9 @@ tells us the gain changed somewhere between two packets, not at which sample, so
 as a window of samples.  Times are the host receive time of each packet.
 
 The same packets carry each channel's own settings (preset, AGC, gain, encoding).  FrontendLog keeps
-the latest report per frequency, so each sidecar can record what radiod reported for its channel
-beside what the client asked for.
+the latest report per SSRC, so each sidecar can record what radiod reported for its own channel
+beside what the client asked for.  The key never uses frequency: another client (ka9q-web, say)
+may open a channel on the same frequency with different settings.
 """
 from __future__ import annotations
 
@@ -60,17 +61,23 @@ class FrontendLog:
 
     def add_channel(self, frequency_hz: float, *, ssrc, preset, agc_enable, gain_db, encoding,
                     t: float) -> None:
-        """Keep radiod's latest report of one channel's settings, keyed by its frequency."""
-        rep = {"ssrc": ssrc, "preset": preset,
+        """Keep radiod's latest report of one channel's settings, keyed by its SSRC.  A report
+        without an SSRC names no channel, so the log drops it."""
+        if ssrc is None:
+            return
+        rep = {"ssrc": ssrc, "frequency_hz": int(round(frequency_hz)), "preset": preset,
                "agc_enable": None if agc_enable is None else bool(agc_enable),
                "gain_db": gain_db, "encoding": encoding, "received_at": t}
         with self._lock:
-            self._channels[int(round(frequency_hz))] = rep
+            self._channels[ssrc] = rep
 
-    def channel_reported(self, frequency_hz) -> Optional[dict]:
-        """radiod's latest report for the channel on this frequency, or None when none arrived."""
+    def channel_reported(self, ssrc) -> Optional[dict]:
+        """radiod's latest report for the channel with this SSRC, or None when the SSRC is
+        unknown or no report has arrived."""
+        if ssrc is None:
+            return None
         with self._lock:
-            rep = self._channels.get(int(round(frequency_hz)))
+            rep = self._channels.get(ssrc)
             return dict(rep) if rep is not None else None
 
     def add(self, r: FrontendReading) -> None:
@@ -256,5 +263,6 @@ class FrontendListener:
         if rf_gain is None and ad_over is None:
             return
         self._log.add(FrontendReading(t=now, rf_gain=rf_gain, rf_atten=_finite(fe.rf_atten),
-                                      rf_agc=fe.rf_agc, if_power=_finite(fe.if_power),
+                                      rf_agc=None if fe.rf_agc is None else bool(fe.rf_agc),
+                                      if_power=_finite(fe.if_power),
                                       ad_over=ad_over))

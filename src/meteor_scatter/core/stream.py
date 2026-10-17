@@ -100,6 +100,7 @@ class ChannelSink:
         # high-water mark).  Written by on_samples, read by the SlotWorker.
         self._latest_rtp: Optional[int] = None
 
+        self._msqp = msqp
         self._slot_worker = SlotWorker(
             ring=self._ring,
             mode=mode,
@@ -223,6 +224,13 @@ class ChannelSink:
         old broken path) and logs a one-time warning per channel.
         """
         self._channel_info = channel_info
+        self._note_ssrc(channel_info)
+
+    def _note_ssrc(self, channel_info) -> None:
+        """Tell the MSQP band radiod's SSRC, so its sidecars match radiod's channel report by
+        SSRC, never by a frequency another client may share."""
+        if self._msqp is not None:
+            self._msqp.ssrc = getattr(channel_info, "ssrc", None)
 
     def on_samples(self, samples: np.ndarray, quality) -> None:
         """MultiStream callback — feed the RTP-referenced SlotClock + ring.
@@ -327,6 +335,7 @@ class ChannelSink:
         # until manual stop+start).  Re-anchoring is the intended
         # behavior.
         self._channel_info = channel_info
+        self._note_ssrc(channel_info)
         self._reset_timing()
         logger.info(
             "%s %d Hz: stream restored — re-anchoring on next batch",

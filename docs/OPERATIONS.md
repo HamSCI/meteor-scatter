@@ -304,8 +304,9 @@ id, made safe for a path, so two radiods on one host keep separate trees.  The s
 the band, the slot's start, the scale, the clipped-sample count and the noise floor.  It holds
 jt9's decode lines, both as jt9 printed them (`jt9_line`) and parsed.  It records the channel
 settings twice: `channel_requested` holds what the client asked radiod for, and
-`channel_reported` holds what radiod last reported for that frequency (`null` until a status
-packet arrives).  Last, it records the front-end gain radiod reported while the slot ran.
+`channel_reported` holds what radiod last reported for this client's own channel, matched by
+SSRC (`null` until a status packet arrives).  Another client's channel on the same frequency,
+ka9q-web's for one, never lands here.  Last, it records the front-end gain radiod reported while the slot ran.
 
 `noise_floor_dbfs` gives the floor in dB relative to radiod's float full scale, measured before
 the writer applies `wav_gain_db`.  Inside the WAV the floor sits at `noise_floor_dbfs +

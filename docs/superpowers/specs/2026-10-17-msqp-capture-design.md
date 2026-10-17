@@ -90,8 +90,8 @@ Each `.json` sidecar holds:
 - `noise_floor_dbfs`, the band's noise floor (§3.6), in dB relative to radiod's float full
   scale, measured before `wav_gain_db`
 - `channel_requested`, the channel settings the client asked for, with the configured preset
-- `channel_reported`, the channel's settings as radiod last reported them for that frequency
-  (preset, AGC, gain, encoding), gathered by the front-end listener of §4 from the same status
+- `channel_reported`, the channel's settings as radiod last reported them for this client's
+  channel, matched by SSRC and never by frequency (preset, AGC, gain, encoding, frequency), gathered by the front-end listener of §4 from the same status
   packets; `null` while none has arrived
 - jt9's decode lines for the slot, raw and parsed
 - the clipped-sample count

@@ -214,21 +214,39 @@ class ListenerSocketTests(unittest.TestCase):
 
 
 class ChannelStatusTests(unittest.TestCase):
-    def test_latest_report_per_frequency(self):
+    def test_latest_report_per_ssrc(self):
         log = FrontendLog()
         log.add_channel(50260000.0, ssrc=50260, preset="usb", agc_enable=False, gain_db=0.0,
                         encoding="F32LE", t=1000.0)
         log.add_channel(50260000.0, ssrc=50260, preset="usb", agc_enable=True, gain_db=3.0,
                         encoding="F32LE", t=1001.0)
-        rep = log.channel_reported(50260000)
-        self.assertEqual(rep, {"ssrc": 50260, "preset": "usb", "agc_enable": True,
-                               "gain_db": 3.0, "encoding": "F32LE", "received_at": 1001.0})
+        rep = log.channel_reported(50260)
+        self.assertEqual(rep, {"ssrc": 50260, "frequency_hz": 50260000, "preset": "usb",
+                               "agc_enable": True, "gain_db": 3.0, "encoding": "F32LE",
+                               "received_at": 1001.0})
+
+    def test_another_client_on_the_same_frequency_keeps_its_own_report(self):
+        # ka9q-web (or any client) may open its own channel on our frequency (N2)
+        log = FrontendLog()
+        log.add_channel(50260000.0, ssrc=9, preset="usb", agc_enable=False, gain_db=0.0,
+                        encoding="F32LE", t=1000.0)
+        log.add_channel(50260000.0, ssrc=10, preset="am", agc_enable=True, gain_db=20.0,
+                        encoding="S16LE", t=1001.0)
+        self.assertEqual(log.channel_reported(9)["agc_enable"], False)
+        self.assertEqual(log.channel_reported(10)["agc_enable"], True)
 
     def test_never_seen_is_none(self):
         log = FrontendLog()
         log.add_channel(28145000.0, ssrc=1, preset="usb", agc_enable=False, gain_db=0.0,
                         encoding="F32LE", t=1000.0)
-        self.assertIsNone(log.channel_reported(50260000))
+        self.assertIsNone(log.channel_reported(2))
+        self.assertIsNone(log.channel_reported(None))
+
+    def test_packet_without_ssrc_is_not_kept(self):
+        log = FrontendLog()
+        log.add_channel(28145000.0, ssrc=None, preset="usb", agc_enable=False, gain_db=0.0,
+                        encoding="F32LE", t=1000.0)
+        self.assertEqual(log._channels, {})
 
     def test_listener_records_the_channel_from_the_same_packet(self):
         from types import SimpleNamespace
@@ -240,7 +258,7 @@ class ChannelStatusTests(unittest.TestCase):
             frontend=SimpleNamespace(rf_gain=None, rf_atten=None, rf_agc=None,
                                      if_power=None, ad_over=None))
         lst._ingest(st, 1000.0)
-        self.assertEqual(log.channel_reported(50260000)["ssrc"], 77)
+        self.assertEqual(log.channel_reported(77)["frequency_hz"], 50260000)
         self.assertIsNone(log.latest())          # no front-end fields: no reading
 
 
@@ -271,7 +289,7 @@ class MalformedPacketTests(unittest.TestCase):
                             if_power=float("-inf")), 1000.0)
         self.assertIsNone(log.latest().rf_gain)
         self.assertIsNone(log.latest().if_power)
-        self.assertIsNone(log.channel_reported(50260000)["gain_db"])
+        self.assertIsNone(log.channel_reported(77)["gain_db"])
 
     def test_loop_survives_an_ingest_failure(self):
         import threading

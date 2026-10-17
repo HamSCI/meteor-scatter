@@ -36,7 +36,7 @@ def build_sidecar(*, reporter_id, freq_hz, slot_start_utc, sample_rate, stats: W
                   reported: Optional[dict] = None) -> dict:
     """One recording's sidecar.  noise_floor_dbfs is dB re radiod's f32 full scale (1.0),
     measured before wav_gain_db; the floor in the WAV is noise_floor_dbfs + wav_gain_db.
-    channel_reported holds radiod's latest status report for the channel's frequency, or None
+    channel_reported holds radiod's latest status report for the channel's SSRC, or None
     when none has arrived."""
     return {
         "reporter_id": reporter_id,
@@ -89,6 +89,9 @@ class MsqpChannel:
         self._noise_log = Path(noise_log) if noise_log else None
         self._noise_log_failing = False
         self.noise_log_failures = 0
+        # radiod's SSRC for this band's channel, set by ChannelSink once radiod answers;
+        # channel_reported matches on it, never on frequency
+        self.ssrc = None
 
     def on_slot(self, slot_start_utc: float, stats: WavStats) -> None:
         fe = self._frontend.latest()
@@ -138,7 +141,7 @@ class MsqpChannel:
                                  slot_start_utc=slot_start_utc, sample_rate=sample_rate,
                                  stats=stats, scale_db=self.scale_db, decodes=decodes,
                                  frontend=frontend, version=self._version, preset=self.preset,
-                                 reported=self._frontend.channel_reported(self.freq_hz))
+                                 reported=self._frontend.channel_reported(self.ssrc))
             self._archive.keep(wav_path, self.freq_hz, slot_start_utc, side)
         except Exception as e:  # noqa: BLE001 — archiving must never cost a decode
             self.archive_failures += 1

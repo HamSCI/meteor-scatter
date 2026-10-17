@@ -53,8 +53,12 @@ class MsqpChannelTests(unittest.TestCase):
         self.assertEqual(side["channel_requested"]["preset"], "iq")
 
     def test_channel_reported_from_the_listener(self):
+        self.ch.ssrc = 9
         self.fe.add_channel(50260000.0, ssrc=9, preset="usb", agc_enable=True, gain_db=6.0,
                             encoding="F32LE", t=T0)
+        # another client's channel on the same frequency must not replace ours (N2)
+        self.fe.add_channel(50260000.0, ssrc=10, preset="am", agc_enable=False, gain_db=0.0,
+                            encoding="S16LE", t=T0 + 1)
         self.ch.on_decoded(self.wav, T0, 12000, WavStats(0.0, 0, -80.0), [{"message": "x"}])
         side = json.loads((Path(self.tmp.name) / "a/6m/20261213/261213_235930.json").read_text())
         self.assertEqual(side["channel_reported"]["agc_enable"], True)
@@ -63,6 +67,9 @@ class MsqpChannelTests(unittest.TestCase):
         self.assertEqual(side["channel_reported"]["encoding"], "F32LE")
 
     def test_channel_reported_null_when_never_seen(self):
+        # a report on our frequency but an unknown SSRC is not ours
+        self.fe.add_channel(50260000.0, ssrc=10, preset="usb", agc_enable=True, gain_db=6.0,
+                            encoding="F32LE", t=T0)
         self.ch.on_decoded(self.wav, T0, 12000, WavStats(0.0, 0, -80.0), [{"message": "x"}])
         side = json.loads((Path(self.tmp.name) / "a/6m/20261213/261213_235930.json").read_text())
         self.assertIn("channel_reported", side)
