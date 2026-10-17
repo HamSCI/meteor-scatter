@@ -217,6 +217,22 @@ def test_apply_scale_db_preserves_freqs(tmp_path: Path) -> None:
     assert m["scale_db"] == {"28145000": 31.5}
 
 
+def test_apply_rejects_bad_msqp_without_radiod(tmp_path: Path, capsys) -> None:
+    existing = '[station]\ncallsign = "AC0G"\n'
+    rv = _apply({"msqp": {"archive_max_days": -1}}, tmp_path, existing=existing)
+    assert rv == 2
+    assert "archive_max_days" in capsys.readouterr().err
+    assert (tmp_path / "c.toml").read_text() == existing
+
+
+def test_show_defaults_includes_msqp(tmp_path: Path, capsys) -> None:
+    rv = configurator.cmd_config_show(
+        _ns(config=tmp_path / "nope.toml", defaults=True))
+    assert rv == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["msqp"]["archive_max_days"] == 90
+
+
 def test_apply_rejects_bad_msqp_value(tmp_path: Path, capsys) -> None:
     rv = _apply({"msqp": {"archive_max_days": -1}}, tmp_path,
                 existing=_FIXTURE_WITH_RADIOD)

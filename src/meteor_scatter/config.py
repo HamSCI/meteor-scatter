@@ -128,9 +128,13 @@ def get_msqp(config: dict) -> dict:
     if isinstance(gb, bool) or not isinstance(gb, (int, float)) or gb <= 0:
         raise ValueError(f"msqp.archive_max_gb must be a positive number; got {gb!r}")
     raw["archive_max_gb"] = float(gb)
-    tok = raw["zenodo_token_path"]
-    if not isinstance(tok, str) or not tok:
-        raise ValueError(f"msqp.zenodo_token_path must be a non-empty string; got {tok!r}")
+    for key in ("operator", "contact_email", "antenna", "comments",
+                "zenodo_url", "zenodo_community"):
+        if not isinstance(raw[key], str):
+            raise ValueError(f"msqp.{key} must be a string; got {raw[key]!r}")
+    for key in ("archive_dir", "zenodo_token_path"):
+        if not isinstance(raw[key], str) or not raw[key]:
+            raise ValueError(f"msqp.{key} must be a non-empty string; got {raw[key]!r}")
     return raw
 
 

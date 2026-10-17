@@ -62,7 +62,7 @@ except ModuleNotFoundError:
     import tomli as tomllib  # type: ignore[no-redef]
 
 from ._reporter_id import display, systemd_instance, to_storage, unescape_systemd_instance
-from .config import DEFAULT_CONFIG_PATH, DEFAULTS, load_config
+from .config import DEFAULT_CONFIG_PATH, DEFAULTS, get_msqp, load_config
 
 
 # ---------------------------------------------------------------------------
@@ -855,6 +855,7 @@ def cmd_config_show(args) -> int:
                 effective = copy.deepcopy(DEFAULTS)
         else:
             effective = copy.deepcopy(DEFAULTS)
+        effective["msqp"] = get_msqp(effective)
         out = effective
     else:
         if not config_path.is_file():
@@ -994,6 +995,14 @@ def cmd_config_apply(args) -> int:
     else:
         existing = {}
     merged = _deep_merge(existing, payload)
+
+    # [msqp] validates even without a [[radiod]] block, so apply refuses
+    # anything load_config would refuse later.
+    try:
+        get_msqp(merged)
+    except ValueError as exc:
+        print(f"config apply: rejected by load_config: {exc}", file=sys.stderr)
+        return 2
 
     # Run merged config through load_config's validators by writing to a
     # tempfile and round-tripping (since load_config takes a path).  Catches

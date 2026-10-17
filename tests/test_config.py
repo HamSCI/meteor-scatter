@@ -20,7 +20,6 @@ SRC_DIR = REPO_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from meteor_scatter.config import get_msqp, get_scale_db, get_noise_cal_dbfs
 from meteor_scatter.config import (
     DEFAULT_CONFIG_PATH,
     PER_INSTANCE_CONFIG_DIR,
@@ -29,6 +28,9 @@ from meteor_scatter.config import (
     ensure_sources,
     extract_reporter_id,
     get_mode_params,
+    get_msqp,
+    get_noise_cal_dbfs,
+    get_scale_db,
     resolve_config_path,
     resolve_radiod_status,
 )
@@ -220,6 +222,16 @@ class MsqpConfigTests(unittest.TestCase):
                          "/etc/meteor-scatter/zenodo-token")
         with self.assertRaises(ValueError):
             get_msqp({"msqp": {"zenodo_token_path": ""}})
+
+    def test_rejects_wrong_string_types(self):
+        for key in ("operator", "contact_email", "antenna", "comments",
+                    "zenodo_url", "zenodo_community", "zenodo_token_path"):
+            with self.assertRaises(ValueError, msg=key):
+                get_msqp({"msqp": {key: 5}})
+        with self.assertRaises(ValueError):
+            get_msqp({"msqp": {"archive_dir": ""}})
+        with self.assertRaises(ValueError):
+            get_msqp({"msqp": {"archive_dir": 3}})
 
     def test_rejects_negative_cap(self):
         with self.assertRaises(ValueError):
