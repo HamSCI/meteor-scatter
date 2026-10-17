@@ -377,7 +377,9 @@ Each operator uses a Zenodo account of their own.  The MSQP's own procedure
 (github.com/HamSCI/MSQP, `Zenodo.md`) covers the account: sign up at zenodo.org with ORCID (which
 it recommends), with GitHub, or with an institutional email address.
 
-That procedure never mentions a token, and `draft` needs one.
+That procedure never mentions a token, and `draft` needs one.  The scopes below follow the
+current plan; they stay provisional until the sandbox probe settles which Zenodo API `draft`
+calls.
 
 1. In Zenodo, open your account menu, then Applications, then Personal access tokens.
 2. Create a new token.  Tick the scopes `deposit:write` and `deposit:actions`.
@@ -389,7 +391,7 @@ sudo install -m 0600 /dev/null /etc/meteor-scatter/zenodo-token
 sudo tee /etc/meteor-scatter/zenodo-token >/dev/null    # paste the token, then Ctrl-D
 ```
 
-`draft` refuses a token file that has a mode other than 0600, that is a symlink, or that is
+`draft` refuses a token file that has any group or other permission bit (0600 and 0400 pass), that is a symlink, or that is
 empty.
 
 ### Build the package
@@ -410,8 +412,9 @@ holds:
 
 The command prints the recordings per band per day, the count, the zip's size, and the
 recordings that clipped or overloaded.  It writes only to local disk.  It runs as root and
-refuses an output directory that its invoking user does not own, or that group or other can write
-to.  `--out <dir>` replaces `/var/lib/meteor-scatter/msqp`.
+refuses an output root that root does not own, or that group or other can write to.  The
+installer does not create `/var/lib/meteor-scatter/msqp`, so that the daemon account never owns
+it; `package` creates it, mode 0755, on first run.  `--out <dir>` replaces it.
 
 Read `description.md` and `metadata.json` before you go on.
 

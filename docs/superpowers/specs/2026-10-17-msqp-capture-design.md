@@ -104,9 +104,8 @@ The client estimates each band's noise floor from the recordings it already writ
 quietest stretch of each slot so that pings do not raise it.  When a band's floor moves more
 than 10 dB from its calibrated level and stays there for an hour, the client warns: once in the
 journal on the change, once again on recovery, and in the `msqp` block of `inventory --json`
-while it stays open (§6).  The warning
-reports the front-end gain's change over the same hour, so an operator can tell a noisier band
-from a moved amplifier.  The client never adjusts the scale itself.  An operator re-runs
+while it stays open (§6).  The warning reports the front-end gain's change over the same hour,
+so an operator can tell a noisier band from a moved amplifier.  The client never adjusts the scale itself.  An operator re-runs
 `calibrate`, deliberately, between showers; a scale that shifted silently during a shower would
 leave its recordings incomparable.
 

@@ -21,6 +21,10 @@ from meteor_scatter.config import (
 from meteor_scatter.version import GIT_INFO
 from hamsci_dsp.timing import read_applied_state
 
+logger = logging.getLogger(__name__)
+
+CONTRACT_VERSION = "0.8"
+
 MSQP_STATE_MAX_AGE_S = 300.0
 
 
@@ -35,10 +39,6 @@ def _read_msqp_state(path: Path, now: float | None = None) -> dict | None:
     if not isinstance(state, dict) or age > MSQP_STATE_MAX_AGE_S:
         return None
     return state
-
-logger = logging.getLogger(__name__)
-
-CONTRACT_VERSION = "0.8"
 
 
 def build_inventory(config: dict, config_path: Path) -> dict:

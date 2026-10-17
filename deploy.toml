@@ -54,18 +54,15 @@ dst  = "/var/lib/meteor-scatter"
 owner = "meteorscat:meteorscat"
 mode  = "0755"
 
-# The MSQP archive (kept recordings) and the packages `msqp package` builds.
-# Declared beside the spool so sigmond's disk accounting sees them.  The
-# archive stays on the spool's filesystem, so keeping a recording is a rename.
+# The MSQP archive (kept recordings), declared beside the spool so sigmond's
+# disk accounting sees it.  The archive stays on the spool's filesystem, so
+# keeping a recording is a rename.  The package output root,
+# /var/lib/meteor-scatter/msqp, is deliberately NOT declared: it must belong to
+# root, never the daemon account, because `msqp package` and `msqp draft` rely
+# on that ownership.  `msqp package` creates it, mode 0755, on first use.
 [[install.steps]]
 kind = "mkdir"
 dst  = "/var/lib/meteor-scatter/archive"
-owner = "meteorscat:meteorscat"
-mode  = "0755"
-
-[[install.steps]]
-kind = "mkdir"
-dst  = "/var/lib/meteor-scatter/msqp"
 owner = "meteorscat:meteorscat"
 mode  = "0755"
 
