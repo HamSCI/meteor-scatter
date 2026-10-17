@@ -40,23 +40,26 @@ uses a Zenodo account of their own; our stations do too.
 ### 3.1 The channel
 
 For each band the client asks radiod for a channel with AGC off and 32-bit float samples
-(`ensure_channel(agc_enable=0, gain=0.0, encoding=F32, …)`).  Today the client passes neither
-argument and takes the `usb` preset's AGC.  Changing the parameters makes radiod create a new
-channel; the old one expires within about two minutes through its lifetime tag, and decoding
-continues across the change.
+(`ensure_channel(agc_enable=0, gain=0.0, encoding=F32, …)`).  The channel already streams 32-bit
+float, because `receiver_manager` forces f32.  ka9q-python's `create_channel` already sends
+`AGC_ENABLE=0` and `GAIN=0.0`.  The client will pass both explicitly, so the request stays
+visible in the code.  A passive status-packet read on B4's live channels, which will confirm that
+radiod reports AGC off, is pending.
 
 ### 3.2 From float to WAV
 
-The client multiplies each sample by the band's fixed scale (`scale_db`) and writes the 16-bit,
-12 kHz WAV that jt9 already reads.  The decoder and the archive therefore hold the same audio.
-A ping strong enough to clip at 16 bits still clips; the client counts the clipped samples and
-writes the count into the sidecar.
+The client writes the 16-bit, 12 kHz WAV that jt9 already reads.  The decoder and the archive
+hold the same audio.  A calibrated band uses its fixed scale (`scale_db`).  Until someone
+calibrates a band, the writer keeps today's per-slot peak-normalization to −1 dBFS, so decoding
+never suffers.  Every sidecar records `wav_gain_db`, the gain the writer applied to that
+recording: int16 = sample × 32767 × 10^(wav_gain_db/20).  Each recording therefore stays reducible
+to radiod's output level.  A ping strong enough to clip at 16 bits still clips; the client counts
+the clipped samples and writes the count into the sidecar.
 
 `meteor-scatter msqp calibrate` sets each band's scale.  It measures the band's noise over a few
 minutes and chooses the scale that puts the noise about 50 dB below full scale, which leaves
-room for strong pings.  Until someone calibrates a band, the client uses a default scale, and
-every sidecar from that band says `"scale": "uncalibrated"`.  Decoding never waits on
-calibration.
+room for strong pings.  Every sidecar from an uncalibrated band says `"scale": "uncalibrated"`.
+Decoding never waits on calibration.
 
 ### 3.3 What the client keeps
 
@@ -79,6 +82,8 @@ Each `.json` sidecar holds:
 - the reporter id, band and dial frequency
 - the slot's UTC start and sample rate
 - the band's scale, or `uncalibrated`
+- `wav_gain_db`, the gain the writer applied to the recording (§3.2)
+- `noise_floor_dbfs`, the band's noise floor (§3.6)
 - the channel's settings as radiod reported them (AGC, gain, encoding)
 - jt9's decode lines for the slot
 - the clipped-sample count
@@ -114,9 +119,12 @@ The front-end AGC belongs to every client on the receiver (T6, GRAPE, WSPR, FT8)
 from clipping, and changes only with a radiod restart.  meteor-scatter therefore leaves it
 alone and records it.
 
-One listener per instance reads the status packets radiod already multicasts.  It sends no poll
+One listener per instance reads the status packets radiod already multicasts.  ka9q's
+`StatusListener` passes only timing fields to its callbacks, so meteor-scatter runs its own passive
+listener and decodes each packet with `ka9q.status.decode_status_packet`.  It sends no poll
 and no control traffic, and so cannot disturb T6 or any other client.  From each packet it takes
-`rf_gain`, `rf_atten`, `rf_agc`, `if_power` and `ad_over`.  For each kept recording the sidecar
+`rf_gain`, `rf_atten`, `rf_agc`, `if_power` and `ad_over`.  The listener times each reading by the host's receive time of the status packet, and
+the sidecar names that basis.  For each kept recording the sidecar
 holds the reading in force at the slot's start, every change during the slot, and the last
 reading.
 
@@ -190,6 +198,9 @@ reads anything but `upload`, or when no token exists.
   step.  The exact token scopes follow from the same answer.
 - Calls against `sandbox.zenodo.org` with a test token settle all three before code lands.
 
+These questions stay open pending Michael's Zenodo setup.  `msqp draft` refuses while
+`msqp.zenodo_community` is empty.
+
 ## 6. Settings and sigmond
 
 The instance config gains:
@@ -198,6 +209,7 @@ The instance config gains:
 [msqp]
 archive_max_days = 90
 archive_max_gb   = 2
+zenodo_token_path = "/etc/meteor-scatter/zenodo-token"
 operator         = ""                     # names and calls
 contact_email    = ""
 antenna          = ""
@@ -206,13 +218,18 @@ comments         = ""                     # optional
 [radiod.msk144.scale_db]                  # keyed by each entry of freqs_hz; calibrate writes these
 "28145000" = 0.0
 "50260000" = 0.0
+
+[radiod.msk144.noise_cal_dbfs]            # same keys; the band's noise floor when calibrated
+"28145000" = 0.0
+"50260000" = 0.0
 ```
 
 `config show` and `config apply` cover the new keys as they cover the existing ones.
 
-`smd status` and the client's inventory report, per band: the archive's size and oldest day,
+The client's `inventory --json` reports MSQP state, per band: the archive's size and oldest day,
 decodes kept today, the noise floor against its calibrated level, the front-end status, and any
-open warning.  `deploy.toml` names the archive directory so sigmond's disk accounting sees it.
+open warning.  Rendering that state in `smd status` moves to a sigmond row on the v3.73 list.
+`deploy.toml` names the archive directory so sigmond's disk accounting sees it.
 
 ## 7. Failures
 
