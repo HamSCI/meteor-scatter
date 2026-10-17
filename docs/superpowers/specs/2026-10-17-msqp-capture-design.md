@@ -56,9 +56,10 @@ recording: int16 = sample × 32767 × 10^(wav_gain_db/20).  Each recording there
 to radiod's output level.  A ping strong enough to clip at 16 bits still clips; the client counts
 the clipped samples and writes the count into the sidecar.
 
-`meteor-scatter msqp calibrate` sets each band's scale.  It measures the band's noise over a few
-minutes and chooses the scale that puts the noise about 50 dB below full scale, which leaves
-room for strong pings.  Every sidecar from an uncalibrated band says `"scale": "uncalibrated"`.
+`meteor-scatter msqp calibrate` sets each band's scale.  It takes the band's noise from the slots
+the daemon measured in the last ten minutes, and needs at least ten of them.  Older slots would
+describe the receiver before a change.  It chooses the scale that puts the noise about 50 dB
+below full scale, which leaves room for strong pings, and prints the span it used.  Every sidecar from an uncalibrated band says `"scale": "uncalibrated"`.
 Decoding never waits on calibration.
 
 ### 3.3 What the client keeps
@@ -86,17 +87,21 @@ Each `.json` sidecar holds:
 - the slot's UTC start and sample rate
 - the band's scale, or `uncalibrated`
 - `wav_gain_db`, the gain the writer applied to the recording (§3.2)
-- `noise_floor_dbfs`, the band's noise floor (§3.6)
-- the channel's settings as radiod reported them (AGC, gain, encoding)
-- jt9's decode lines for the slot
+- `noise_floor_dbfs`, the band's noise floor (§3.6), in dB relative to radiod's float full
+  scale, measured before `wav_gain_db`
+- `channel_requested`, the channel settings the client asked for, with the configured preset
+- `channel_reported`, the channel's settings as radiod last reported them for that frequency
+  (preset, AGC, gain, encoding), gathered by the front-end listener of §4 from the same status
+  packets; `null` while none has arrived
+- jt9's decode lines for the slot, raw and parsed
 - the clipped-sample count
 - the software version
 - the front-end record of §4
 
 ### 3.5 The cap
 
-Once an hour the client deletes the oldest archive days beyond `archive_max_days` (default 90)
-or `archive_max_gb` (default 2), whichever binds first, and logs each deletion.
+Once an hour the client deletes the oldest archive days beyond `archive_max_days` (default 90,
+today included) or `archive_max_gb` (default 2), whichever binds first, and logs each deletion.
 
 ### 3.6 The noise-floor watch
 
@@ -135,7 +140,8 @@ The sidecar therefore gives each step as a window of samples, from the last pack
 value to the first with the new, and never invents a single position.  A rise in `ad_over`
 during the slot marks the recording as overloaded.  When no packet arrives for more than five
 seconds, the sidecar marks that stretch `"frontend_status": "missing"` and does not carry the
-last value forward.
+last value forward.  The start reading therefore reads `null` when no packet falls within five
+seconds of the slot's start, and the end reading likewise at the slot's end.
 
 ## 5. Packaging and the Zenodo draft
 
@@ -144,12 +150,12 @@ last value forward.
 The command builds `/var/lib/meteor-scatter/msqp/<title>/`, containing:
 
 - `<title>.zip`, the WAVs and sidecars for those UTC days, by band
-- `ALL.TXT`, built in WSJT-X's format from the station's own decode log for the same days (a
-  monitor makes no QSOs, so no ADIF)
+- `ALL.TXT`, built in WSJT-X's format from the sidecars of the recordings in the zip, so the
+  two agree (a monitor makes no QSOs, so no ADIF)
 - `description.md`, the MSQP description template filled in, for the record's description field
 - `metadata.json`, the record exactly as `draft` will send it
 
-It prints decodes per band per day, the file count, the zip's size, and the recordings that
+It prints recordings per band per day, the file count, the zip's size, and the recordings that
 clipped or overloaded.  The title takes the MSQP form, `<CALL> <GRID6> <YYYYMMDD-DD> Meteor
 Scatter QSO Party`.
 
@@ -187,8 +193,9 @@ token goes beyond that procedure, which never mentions one, so meteor-scatter's 
 adds the step: in Zenodo, Applications, Personal access tokens, create a token with the scope
 that writes deposits, and save it into `/etc/meteor-scatter/zenodo-token`.
 
-`draft` refuses, naming the reason and the fix, when the site's upload mode for meteor-scatter
-reads anything but `upload`, or when no token exists.
+`draft` refuses, naming the reason and the fix, when the site-wide upload mode reads anything
+but `upload`, or when no token exists.  A per-client switch for meteor-scatter replaces the
+site-wide one once sigmond ships it.
 
 ### 5.3 To settle before code lands
 

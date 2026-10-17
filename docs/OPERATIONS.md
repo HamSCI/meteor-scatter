@@ -299,15 +299,27 @@ writes a JSON sidecar beside it.  A slot with no decode goes away as before.  Th
                                            <YYMMDD_HHMMSS>.json
 ```
 
-`archive_dir` defaults to `/var/lib/meteor-scatter/archive`.  `<instance>` is the reporter id,
-made safe for a path, so two radiods on one host keep separate trees.  The sidecar records the
-band, the slot's start, the scale, the clipped-sample count, jt9's decode lines, and the
-front-end gain radiod reported while the slot ran.
+`archive_dir` defaults to `/var/lib/meteor-scatter/archive`.  `<instance>` holds the reporter
+id, made safe for a path, so two radiods on one host keep separate trees.  The sidecar records
+the band, the slot's start, the scale, the clipped-sample count and the noise floor.  It holds
+jt9's decode lines, both as jt9 printed them (`jt9_line`) and parsed.  It records the channel
+settings twice: `channel_requested` holds what the client asked radiod for, and
+`channel_reported` holds what radiod last reported for that frequency (`null` until a status
+packet arrives).  Last, it records the front-end gain radiod reported while the slot ran.
+
+`noise_floor_dbfs` gives the floor in dB relative to radiod's float full scale, measured before
+the writer applies `wav_gain_db`.  Inside the WAV the floor sits at `noise_floor_dbfs +
+wav_gain_db`.
+
+The front-end record never carries an old reading forward.  When the last status packet before
+the slot came more than 5 s before it, `start` reads `null`.  When no packet came in the last
+5 s of the slot, `end` reads `null`.
 
 ### The cap
 
 Once an hour the daemon deletes the oldest archive days.  It stops when the archive holds no
-day older than `archive_max_days` (default 90) and fits in `archive_max_gb` (default 2).  Each
+more than `archive_max_days` days, today included (default 90: today and the 89 days before),
+and fits in `archive_max_gb` (default 2).  Each
 deletion appears in the journal.  Raise either cap in `[msqp]` before a long shower if you want
 the whole shower to survive.
 
@@ -322,10 +334,13 @@ sudo meteor-scatter msqp calibrate --instance <reporter-id>
 ```
 
 The command reads the noise floors the daemon logged in
-`<spool>/<radiod_id>/noise-<freq>.txt`.  It needs ten slots of measurements per band, so let the
-daemon run five minutes first.  It takes the median floor and chooses the scale that puts the
-noise at -50 dBFS.  It prints one line per band and writes `scale_db` and `noise_cal_dbfs` into
-the config.  `--dry-run` prints the values and writes nothing.
+`<spool>/<radiod_id>/noise-<freq>.txt`.  That log keeps an hour and survives a restart, so the
+command uses only the slots from the last ten minutes.  It needs ten of them per band, so let the
+daemon run five minutes first, after any change.  A log from a stopped daemon holds no recent
+slot, and the command refuses that band.  It takes the median floor and chooses the scale that
+puts the noise at -50 dBFS.  It prints one line per band, with the number of slots and the UTC
+span it used, and writes `scale_db` and `noise_cal_dbfs` into the config.  `--dry-run` prints
+the values and writes nothing.
 
 The command writes through `config apply`, and `config apply` drops every comment in the config
 file.  Copy the file first if its comments matter to you.
@@ -346,8 +361,9 @@ how far the front-end gain moved over the same hour.  A second line appears when
 returns.  The daemon never changes the scale itself.
 
 `meteor-scatter inventory --json` shows the same state in each instance's `msqp` block: the
-archive's size, its oldest day, the recordings kept today, each band's noise against calibration,
-and the age of the last front-end packet.  The block reads `null` when the daemon has not
+archive's size, its oldest day and the recordings kept today, in total and per band; each band's
+noise against calibration; and the age of the last front-end packet.  The instance's
+`data_sinks` list the archive too, with `archive_max_days` as its retention.  The block reads `null` when the daemon has not
 refreshed it in five minutes.
 
 When the warning appears, read the front-end gain figure in it.
@@ -406,9 +422,16 @@ The two dates give the first and last UTC start day, inclusive.  The command bui
 holds:
 
 - `<title>.zip`: the recordings and sidecars for those days, by band
-- `ALL.TXT`: built from the station's own decode log for the same days
+- `ALL.TXT`: one WSJT-X line per decode, built from the sidecars of the recordings in the zip,
+  so the two always agree
 - `description.md`: the MSQP description template, filled in
 - `metadata.json`: the record exactly as `draft` will send it
+
+`package` finds the archive by the reporter id the daemon uses: `[instance] reporter_id` in the
+config, else `STATION_REPORTER_ID`.  sudo drops that variable, so `package` then reads it from
+the files the unit loads, `/etc/sigmond/coordination.env` and then
+`/etc/meteor-scatter/env/<instance>.env`.  It refuses when `--instance` names a different
+reporter id than those files give.
 
 The command prints the recordings per band per day, the count, the zip's size, and the
 recordings that clipped or overloaded.  It writes only to local disk.  It runs as root and
@@ -431,8 +454,9 @@ command again and it resumes the same draft.  It prints the draft's URL.
 
 `draft` refuses in these cases, and each message names the fix:
 
-- The site's upload mode for meteor-scatter reads anything but `upload`.  The draft leaves the
-  station, so it waits for the mode `upload`.
+- The site-wide upload mode (`[uploads]` in `/etc/sigmond/coordination.toml`) reads anything
+  but `upload`.  The draft leaves the station, so it waits for the mode `upload`.  A
+  per-client switch for meteor-scatter will replace this once sigmond ships one.
 - No token exists, or the token file is unsafe (see above).
 - `[msqp] zenodo_community` is empty.  Zenodo's identifier for the MSQP community is not yet
   known.  The operator settles it with a probe against sandbox.zenodo.org, then sets the key.  Until then

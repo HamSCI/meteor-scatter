@@ -52,10 +52,14 @@ Settings for the MSQP capture: the archive of decoded recordings and the Zenodo 
 The daemon reads the archive keys.  `msqp package` and `msqp draft` read the operator and
 Zenodo keys.  See the MSQP section of OPERATIONS.md.
 
+A bad value in this block costs the archive, never the decodes.  The daemon logs the error and
+runs on without an archive.  `validate` warns about it, and `config apply` refuses the change.
+`msqp package` and `msqp draft` refuse to run until you fix it.
+
 | Key | Default | Meaning |
 |---|---|---|
-| `archive_dir` | `/var/lib/meteor-scatter/archive` | Archive root. Each instance writes under `<archive_dir>/<instance>/<band>/<YYYYMMDD>/`, where `<instance>` is the reporter id made safe for a path. Keep it on the spool's filesystem so keeping a recording is a rename. |
-| `archive_max_days` | `90` | Delete archive days older than this. A positive integer. |
+| `archive_dir` | `/var/lib/meteor-scatter/archive` | Archive root. Each instance writes under `<archive_dir>/<instance>/<band>/<YYYYMMDD>/`, where `<instance>` is the reporter id made safe for a path. Keep it on the spool's filesystem so keeping a recording is a rename. The unit's `ProtectSystem=strict` lets the daemon write only under its `ReadWritePaths`, which include `/var/lib/meteor-scatter`. Put the archive anywhere else and the daemon cannot write there: archiving stops with one warning. A systemd drop-in that adds the directory to `ReadWritePaths` lifts that. |
+| `archive_max_days` | `90` | How many days the archive keeps, today included. With 90 it keeps today and the 89 days before it; the hourly prune deletes older days. A positive integer. |
 | `archive_max_gb` | `2.0` | Delete the oldest days until the instance's archive fits. A positive number. The age cap and the size cap both apply. |
 | `operator` | `""` | Operator names and calls for the Zenodo record. `msqp package` refuses while empty. |
 | `contact_email` | `""` | Contact address for the record. `msqp package` refuses while empty. |
@@ -83,7 +87,7 @@ Not present in the template; defaulted by `config.load_config()`.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `reporter_id` | *(none)* | The per-instance reporter identity written onto every spot row (contract §19). Resolution order: `[instance].reporter_id` → `STATION_REPORTER_ID` from coordination.env → the radiod hostname, with a loud warning, because that fallback misattributes uploads all the way to PSKReporter. |
+| `reporter_id` | *(none)* | The per-instance reporter identity written onto every spot row (contract §19). Resolution order: `[instance].reporter_id` → `STATION_REPORTER_ID` from coordination.env → the radiod hostname, with a loud warning, because that fallback misattributes uploads all the way to PSKReporter. The unit hands the daemon `STATION_REPORTER_ID` from `/etc/sigmond/coordination.env` and then `/etc/meteor-scatter/env/<instance>.env`; the later file wins. sudo drops the variable, so a command run under sudo (`msqp package`) reads it from those same files. |
 
 ## `[[radiod]]` (one or more)
 
@@ -114,7 +118,7 @@ frequency in Hz written as a string, one key for each entry of `freqs_hz`.
 | Table | Meaning |
 |---|---|
 | `[radiod.msk144.scale_db]` | The fixed gain in dB the WAV writer applies to that band. A band with no entry keeps the old per-slot peak normalisation, and its sidecars read `"scale": "uncalibrated"`. |
-| `[radiod.msk144.noise_cal_dbfs]` | The band's noise floor in dBFS at calibration. The noise watch compares the running floor against it. A band with no entry has no watch. |
+| `[radiod.msk144.noise_cal_dbfs]` | The band's noise floor at calibration, in dB relative to radiod's float full scale (1.0). The daemon measures it on the float samples, before the writer applies `scale_db`, so the floor inside the WAV sits at this value plus `scale_db`. The noise watch compares the running floor against it. A band with no entry has no watch. |
 
 ```toml
 [radiod.msk144.scale_db]
