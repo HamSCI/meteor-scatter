@@ -63,7 +63,7 @@ class FrontendLog:
 
         start may predate t0 when the first in-window packet arrives late; the leading gap shows
         in missing_sample_windows.  The log keeps one unchanged reading per second, so end.t can
-        lag the last packet by up to 1 s, and can widen a step's sample_window by up to 1 s.  A falling ad_over counter means radiod restarted:
+        lag the last packet by up to 1 s.  A falling ad_over counter means radiod restarted:
         ad_over_delta and overloaded are then None and ad_over_reset is True (always a bool).
         Dedup can also widen a step's sample_window by up to 1 s.
         """
