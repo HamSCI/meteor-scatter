@@ -118,6 +118,13 @@ MSQP_DEFAULTS: dict[str, Any] = {
 }
 
 
+def resolve_msqp_instance_id(config: dict, reporter_id: Optional[str], radiod_id: str) -> str:
+    """Who one source's MSQP recordings belong to: the reporter id the daemon was given,
+    else the config's [instance] reporter id, else the radiod id.  Names the sidecar's
+    reporter_id and the archive root; the daemon and `msqp package` both call it."""
+    return reporter_id or extract_reporter_id(config) or radiod_id
+
+
 def get_msqp(config: dict) -> dict:
     """Return the [msqp] block merged over MSQP_DEFAULTS, validated."""
     raw = dict(MSQP_DEFAULTS)

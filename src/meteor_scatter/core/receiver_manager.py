@@ -30,7 +30,7 @@ from typing import TYPE_CHECKING, Optional
 
 from meteor_scatter.config import (
     derive_source_key,
-    extract_reporter_id,
+    resolve_msqp_instance_id,
     get_freqs,
     get_mode_params,
     get_noise_cal_dbfs,
@@ -167,8 +167,7 @@ class ReceiverManager:
     def msqp_instance_id(self) -> str:
         """Who this source's MSQP recordings belong to: the reporter id, else
         the radiod id.  Names the sidecar's reporter_id and the archive root."""
-        return (self._reporter_id or extract_reporter_id(self._config)
-                or self._radiod_id)
+        return resolve_msqp_instance_id(self._config, self._reporter_id, self._radiod_id)
 
     # --- provisioning --------------------------------------------------
 
