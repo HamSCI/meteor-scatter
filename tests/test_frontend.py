@@ -242,3 +242,66 @@ class ChannelStatusTests(unittest.TestCase):
         lst._ingest(st, 1000.0)
         self.assertEqual(log.channel_reported(50260000)["ssrc"], 77)
         self.assertIsNone(log.latest())          # no front-end fields: no reading
+
+
+def _status(frequency=50260000.0, rf_gain=10.0, ssrc=77, gain=0.0, if_power=-23.5):
+    from types import SimpleNamespace
+    return SimpleNamespace(
+        ssrc=ssrc, frequency=frequency, preset="usb", agc_enable=False, gain=gain,
+        encoding_name="F32LE",
+        frontend=SimpleNamespace(rf_gain=rf_gain, rf_atten=0.0, rf_agc=True,
+                                 if_power=if_power, ad_over=0))
+
+
+class MalformedPacketTests(unittest.TestCase):
+    """One bad status packet must never stop the listener or poison a sidecar (N1)."""
+
+    def test_nan_frequency_skips_the_channel_report_keeps_the_front_end(self):
+        log = FrontendLog()
+        lst = FrontendListener("x.local", log)
+        for bad in (float("nan"), float("inf"), float("-inf")):
+            lst._ingest(_status(frequency=bad), 1000.0)
+        self.assertEqual(log._channels, {})
+        self.assertEqual(log.latest().rf_gain, 10.0)
+
+    def test_non_finite_values_become_none(self):
+        log = FrontendLog()
+        lst = FrontendListener("x.local", log)
+        lst._ingest(_status(rf_gain=float("nan"), gain=float("inf"),
+                            if_power=float("-inf")), 1000.0)
+        self.assertIsNone(log.latest().rf_gain)
+        self.assertIsNone(log.latest().if_power)
+        self.assertIsNone(log.channel_reported(50260000)["gain_db"])
+
+    def test_loop_survives_an_ingest_failure(self):
+        import threading
+        log = FrontendLog()
+        lst = FrontendListener("x.local", log)
+        packets = [b"bad", b"good"]
+
+        class Sock:
+            def recvfrom(self, n):
+                if not packets:
+                    lst._running = False
+                    raise socket.timeout
+                return packets.pop(0), None
+
+        seen = []
+
+        def ingest(st, now):
+            seen.append(st)
+            if st == "bad":
+                raise ValueError("cannot convert float NaN to integer")
+
+        lst._sock = Sock()
+        lst._ingest = ingest
+        lst._running = True
+        fake = mock.MagicMock()
+        fake.decode_status_packet = lambda buf: buf.decode()
+        with mock.patch.dict(sys.modules, {"ka9q.status": fake}), \
+                self.assertLogs("meteor_scatter.core.frontend", "WARNING") as cm:
+            t = threading.Thread(target=lst._loop)
+            t.start(); t.join(5.0)
+        self.assertFalse(t.is_alive())
+        self.assertEqual(seen, ["bad", "good"])
+        self.assertIn("NaN", cm.output[0])

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import bisect
 import logging
+import math
 import socket
 import struct
 import sys
@@ -25,6 +26,15 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 BASIS = "host receive time of radiod status packets"
+
+
+def _finite(x):
+    """x when it holds a finite number, else None.  A NaN or infinity in one status packet
+    would crash int() and write invalid JSON into a sidecar."""
+    try:
+        return x if x is not None and math.isfinite(x) else None
+    except TypeError:
+        return None
 
 
 @dataclass(frozen=True)
@@ -229,17 +239,22 @@ class FrontendListener:
                 continue
             if st is None:
                 continue
-            self._ingest(st, time.time())
+            try:
+                self._ingest(st, time.time())
+            except Exception as e:  # noqa: BLE001 — one bad packet must not stop the listener
+                self._warn(e, time.monotonic())
 
     def _ingest(self, st, now: float) -> None:
         """One decoded status packet: the channel's own settings, then the front end."""
-        if st.frequency is not None:
-            self._log.add_channel(st.frequency, ssrc=st.ssrc, preset=st.preset,
-                                  agc_enable=st.agc_enable, gain_db=st.gain,
+        freq = _finite(st.frequency)
+        if freq is not None:
+            self._log.add_channel(freq, ssrc=st.ssrc, preset=st.preset,
+                                  agc_enable=st.agc_enable, gain_db=_finite(st.gain),
                                   encoding=st.encoding_name, t=now)
         fe = st.frontend
-        if fe.rf_gain is None and fe.ad_over is None:
+        rf_gain, ad_over = _finite(fe.rf_gain), _finite(fe.ad_over)
+        if rf_gain is None and ad_over is None:
             return
-        self._log.add(FrontendReading(t=now, rf_gain=fe.rf_gain, rf_atten=fe.rf_atten,
-                                      rf_agc=fe.rf_agc, if_power=fe.if_power,
-                                      ad_over=fe.ad_over))
+        self._log.add(FrontendReading(t=now, rf_gain=rf_gain, rf_atten=_finite(fe.rf_atten),
+                                      rf_agc=fe.rf_agc, if_power=_finite(fe.if_power),
+                                      ad_over=ad_over))
