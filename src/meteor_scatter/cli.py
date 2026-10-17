@@ -172,6 +172,11 @@ def main():
     # with the upload transport (Phase 3).
     _cfg.add_env_subparsers(subparsers, common=_add_common)
 
+    # Meteor Scatter QSO Party archive: calibrate (package and draft follow).
+    from meteor_scatter import msqp_cli
+    sub_msqp = subparsers.add_parser("msqp", help="Meteor Scatter QSO Party archive")
+    msqp_cli.add_subparsers(sub_msqp, common=_add_common)
+
     args = parser.parse_args()
 
     if args.log_level and not _contract_quiet:
@@ -193,6 +198,8 @@ def main():
         _handle_config(args)
     elif args.command == "env":
         _handle_env(args)
+    elif args.command == "msqp":
+        sys.exit(msqp_cli.dispatch(args))
     else:
         parser.print_help()
         sys.exit(1)

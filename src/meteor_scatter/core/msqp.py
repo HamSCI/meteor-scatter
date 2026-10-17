@@ -23,6 +23,8 @@ from meteor_scatter.core.wav import WavStats
 logger = logging.getLogger(__name__)
 
 # What ReceiverManager asks radiod for on every channel (ensure_channel / add_channel).
+NOISE_LOG_LINES = 120            # an hour of 30 s slots, for `msqp calibrate`
+
 CHANNEL_REQUESTED = {"agc_enable": 0, "gain_db": 0.0, "encoding": "f32", "preset": "usb"}
 
 
@@ -48,7 +50,7 @@ def build_sidecar(*, reporter_id, freq_hz, slot_start_utc, sample_rate, stats: W
 class MsqpChannel:
     def __init__(self, archive: Archive, frontend: FrontendLog, freq_hz: int, reporter_id: str,
                  scale_db: Optional[float], noise: NoiseWatch, version: str,
-                 cadence_sec: float = 30.0):
+                 cadence_sec: float = 30.0, noise_log: Optional[Path] = None):
         self._archive = archive
         self._frontend = frontend
         self.freq_hz = freq_hz
@@ -60,12 +62,40 @@ class MsqpChannel:
         self.archived = 0
         self.archive_failures = 0
         self._failing = False
+        self._noise_log = Path(noise_log) if noise_log else None
+        self._noise_log_failing = False
 
     def on_slot(self, slot_start_utc: float, stats: WavStats) -> None:
         fe = self._frontend.latest()
         msg = self._noise.observe(slot_start_utc, stats.noise_dbfs, fe.rf_gain if fe else None)
         if msg:
             logger.warning("%s: %s", band_label(self.freq_hz), msg)
+        self._log_noise(slot_start_utc, stats.noise_dbfs)
+
+    def _log_noise(self, slot_start_utc: float, noise_dbfs: Optional[float]) -> None:
+        """Append "<slot_utc> <noise_dbfs>" for `msqp calibrate`; keep the last
+        NOISE_LOG_LINES.  Best effort: an OSError costs the log, never the decode."""
+        if self._noise_log is None or noise_dbfs is None:
+            return
+        try:
+            try:
+                lines = self._noise_log.read_text().splitlines()
+            except FileNotFoundError:
+                lines = []
+            lines.append(f"{int(slot_start_utc)} {noise_dbfs:.1f}")
+            self._noise_log.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._noise_log.with_suffix(".txt.part")
+            tmp.write_text("\n".join(lines[-NOISE_LOG_LINES:]) + "\n")
+            os.replace(tmp, self._noise_log)
+        except OSError as e:
+            if not self._noise_log_failing:
+                self._noise_log_failing = True
+                logger.warning("%s: noise log stopped (%s); decoding continues",
+                               band_label(self.freq_hz), e)
+            return
+        if self._noise_log_failing:
+            self._noise_log_failing = False
+            logger.info("%s: noise log resumed", band_label(self.freq_hz))
 
     def on_decoded(self, wav_path: Path, slot_start_utc: float, sample_rate: int,
                    stats: WavStats, decodes: list) -> bool:
@@ -104,8 +134,10 @@ class MsqpRuntime:
     Each instance archives under its own root, <archive_dir>/<instance_dirname(instance_id)>,
     so two sources never write the same <band>/<day>/<stem>.wav."""
 
-    def __init__(self, msqp_cfg: dict, version: str, instance_id: str):
+    def __init__(self, msqp_cfg: dict, version: str, instance_id: str,
+                 spool_root: Optional[Path] = None):
         self.instance_id = instance_id
+        self._spool_root = Path(spool_root) if spool_root else None
         self.archive = Archive(Path(msqp_cfg["archive_dir"]) / instance_dirname(instance_id),
                                msqp_cfg["archive_max_days"], msqp_cfg["archive_max_gb"])
         self.frontend = FrontendLog()
@@ -140,7 +172,9 @@ class MsqpRuntime:
             if ch.freq_hz == freq_hz:
                 return ch
         ch = MsqpChannel(self.archive, self.frontend, freq_hz, reporter_id, scale_db,
-                         NoiseWatch(noise_cal_dbfs), self._version, cadence_sec=cadence_sec)
+                         NoiseWatch(noise_cal_dbfs), self._version, cadence_sec=cadence_sec,
+                         noise_log=(self._spool_root / f"noise-{int(freq_hz)}.txt"
+                                    if self._spool_root else None))
         self.channels.append(ch)
         return ch
 

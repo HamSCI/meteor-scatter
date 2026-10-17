@@ -432,8 +432,8 @@ class MeteorScatterRecorder:
             version = _software_version()
             for rx in self._receivers:
                 if rx not in self._msqp_runtimes:
-                    self._msqp_runtimes[rx] = MsqpRuntime(cfg, version,
-                                                          rx.msqp_instance_id)
+                    self._msqp_runtimes[rx] = MsqpRuntime(cfg, version, rx.msqp_instance_id,
+                                                          spool_root=rx.spool_dir)
         except Exception as exc:  # noqa: BLE001
             logger.error("MSQP archive disabled: %s", exc)
             self._msqp_runtimes = {}

@@ -84,6 +84,46 @@ class MsqpChannelTests(unittest.TestCase):
         self.assertTrue(any("6m: noise floor drifted" in m for m in logs.output))
 
 
+class NoiseLogTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.log = self.root / "noise-50260000.txt"
+        self.ch = MsqpChannel(archive=Archive(self.root / "a", 90, 2), frontend=FrontendLog(),
+                              freq_hz=50260000, reporter_id="AC0G/B4", scale_db=None,
+                              noise=NoiseWatch(None), version="test", noise_log=self.log)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_appends_slot_and_floor_and_skips_none(self):
+        self.ch.on_slot(T0, WavStats(0.0, 0, -81.25))
+        self.ch.on_slot(T0 + 30, WavStats(0.0, 0, None))
+        self.assertEqual(self.log.read_text().splitlines(), [f"{int(T0)} -81.2"])
+
+    def test_keeps_the_last_120_lines(self):
+        for i in range(130):
+            self.ch.on_slot(T0 + 30 * i, WavStats(0.0, 0, -80.0 - i * 0.1))
+        lines = self.log.read_text().splitlines()
+        self.assertEqual(len(lines), 120)
+        self.assertEqual(lines[0].split()[0], str(int(T0 + 30 * 10)))
+        self.assertEqual(lines[-1].split()[0], str(int(T0 + 30 * 129)))
+
+    def test_oserror_never_escapes_and_warns_once(self):
+        self.ch._noise_log = self.root / "no-such-dir" / "deeper" / "n.txt"
+        with unittest.mock.patch("pathlib.Path.mkdir", side_effect=OSError(30, "read-only")), \
+                self.assertLogs("meteor_scatter.core.msqp", level="WARNING") as logs:
+            self.ch.on_slot(T0, WavStats(0.0, 0, -80.0))
+            self.ch.on_slot(T0 + 30, WavStats(0.0, 0, -80.0))
+        self.assertEqual(sum("noise log" in m for m in logs.output), 1)
+
+    def test_runtime_names_the_log_per_band_under_spool_root(self):
+        rt = MsqpRuntime({"archive_dir": str(self.root / "arc"), "archive_max_days": 90,
+                          "archive_max_gb": 2.0}, "t", "AC0G-B4", spool_root=self.root / "sp")
+        ch = rt.channel(50260000, reporter_id="x", scale_db=None, noise_cal_dbfs=None)
+        self.assertEqual(ch._noise_log, self.root / "sp" / "noise-50260000.txt")
+
+
 class MsqpRuntimeTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

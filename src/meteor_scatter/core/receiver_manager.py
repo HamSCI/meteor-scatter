@@ -155,6 +155,11 @@ class ReceiverManager:
         return self._lifetime_entries
 
     @property
+    def spool_dir(self) -> Path:
+        """This radiod's spool directory, <paths.spool_dir>/<radiod_id>."""
+        return self._spool_root
+
+    @property
     def log_dir(self) -> Path:
         return self._log_dir
 

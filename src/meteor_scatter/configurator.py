@@ -916,6 +916,14 @@ def cmd_config_apply(args) -> int:
               file=sys.stderr)
         return 2
 
+    return apply_payload(config_path, payload)
+
+
+def apply_payload(config_path: Path, payload: dict) -> int:
+    """Validate ``payload`` (a dict of config sections), merge it into the file at
+    ``config_path`` and write it atomically.  The one validated write path:
+    ``config apply`` reads its payload from stdin, other commands (msqp calibrate)
+    build theirs.  Prints its refusals to stderr and returns 2; returns 0 once written."""
     unknown = set(payload.keys()) - _APPLY_ALLOWED_SECTIONS
     if unknown:
         print(f"config apply: section(s) not writable via apply: {sorted(unknown)} "
