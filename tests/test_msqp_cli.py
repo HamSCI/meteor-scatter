@@ -178,6 +178,78 @@ class PackageTests(unittest.TestCase):
             self.assertEqual(len(z.namelist()), 4)
 
 
+class PackageHardeningTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.a = Archive(self.root / "archive", 90, 2)
+        _fill(self.a, self.root)
+        self.day13 = self.root / "archive" / "6m" / "20261213"
+        self.out = self.root / "msqp"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _build(self, first=date(2026, 12, 13), last=date(2026, 12, 14)):
+        return build_package(self.a, CFG, "AC0G", "EM38ww", first, last, self.out, "v1")
+
+    def test_corrupt_sidecar_skipped_and_reported(self):
+        (self.day13 / "261213_235930.json").write_text("{not json")
+        r = self._build()
+        self.assertEqual(r.files, 1)
+        self.assertEqual(len(r.skipped), 1)
+        self.assertIn("261213_235930.wav", r.skipped[0])
+
+    def test_sidecar_missing_a_key_skipped(self):
+        side = self.day13 / "261213_235930.json"
+        d = json.loads(side.read_text()); del d["decodes"]; side.write_text(json.dumps(d))
+        r = self._build()
+        self.assertEqual(r.files, 1)
+        self.assertIn("decodes", r.skipped[0])
+
+    def test_missing_sidecar_skipped(self):
+        (self.day13 / "261213_235930.json").unlink()
+        r = self._build()
+        self.assertEqual(r.files, 1)
+        self.assertIn("missing", r.skipped[0])
+
+    def test_symlinked_wav_outside_archive_skipped_and_never_zipped(self):
+        secret = self.root / "secret.bin"
+        secret.write_bytes(b"TOPSECRET" * 10)
+        wav = self.day13 / "261213_235930.wav"
+        wav.unlink(); wav.symlink_to(secret)
+        r = self._build()
+        self.assertEqual(r.files, 1)
+        self.assertIn("symlink", r.skipped[0])
+        with zipfile.ZipFile(r.zip_path) as z:
+            self.assertTrue(all(b"TOPSECRET" not in z.read(n) for n in z.namelist()))
+
+    def test_all_invalid_refuses_and_writes_nothing(self):
+        for j in self.root.glob("archive/6m/*/*.json"):
+            j.write_text("[]")
+        with self.assertRaises(PackageRefused):
+            self._build()
+        self.assertFalse(self.out.exists())
+
+    def test_good_zip_survives_a_failed_rerun(self):
+        r = self._build()
+        good = r.zip_path.read_bytes()
+        from unittest import mock
+        with mock.patch.object(zipfile.ZipFile, "write", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                self._build()
+        self.assertEqual(r.zip_path.read_bytes(), good)
+        self.assertEqual([p.name for p in r.dir.iterdir() if p.name.startswith(".")], [])
+
+    def test_symlinked_package_dir_refused(self):
+        self.out.mkdir()
+        target = self.root / "elsewhere"; target.mkdir()
+        (self.out / "AC0G EM38WW 20261213-14 Meteor Scatter QSO Party").symlink_to(target)
+        with self.assertRaisesRegex(PackageRefused, "symlink"):
+            self._build()
+        self.assertEqual(list(target.iterdir()), [])
+
+
 PKG_CONFIG = """\
 [station]
 callsign = "AC0G"
@@ -242,3 +314,13 @@ class CmdPackageTests(unittest.TestCase):
         self.assertEqual(rc, 2)
         self.assertIn("no recordings", err)
         self.assertFalse((self.root / "out").exists())
+
+    def test_several_radiod_blocks_without_reporter_id_need_a_matching_instance(self):
+        text = PKG_CONFIG.format(archive=self.archive_dir).replace(
+            '[instance]\nreporter_id = "AC0G/B4"\n\n', "")
+        text += '\n[[radiod]]\nstatus = "other.local"\n'
+        self.cfg.write_text(text)
+        rc, out, err = self._run()                  # instance "AC0G-B4" names neither block
+        self.assertEqual(rc, 2)
+        self.assertIn("several [[radiod]] blocks", err)
+        self.assertIn("rx.local", err)

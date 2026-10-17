@@ -9,6 +9,7 @@ import argparse
 import copy
 import json
 import os
+import stat
 import sys
 import tomllib
 import zipfile
@@ -65,12 +66,67 @@ class PackageResult:
     files: int
     per_band_day: dict = field(default_factory=dict)
     flagged: list = field(default_factory=list)
+    skipped: list = field(default_factory=list)
+
+
+SIDECAR_KEYS = ("slot_start_utc", "dial_freq_hz", "decodes")
+
+
+def _check_recording(root: Path, wav: Path, side_path: Path):
+    """(sidecar dict, ALL.TXT lines) for one recording, or raise ValueError(reason).  The
+    archive belongs to the daemon's account and this may run as root, so a link or a path
+    outside the archive is never read."""
+    for p in (wav, side_path):
+        try:
+            st = p.lstat()
+        except OSError:
+            raise ValueError(f"{p.name} is missing")
+        if stat.S_ISLNK(st.st_mode):
+            raise ValueError(f"{p.name} is a symlink")
+        if not stat.S_ISREG(st.st_mode):
+            raise ValueError(f"{p.name} is not a regular file")
+        if not p.resolve().is_relative_to(root):
+            raise ValueError(f"{p.name} resolves outside the archive")
+    try:
+        side = json.loads(side_path.read_text())
+    except (OSError, ValueError) as e:       # UnicodeDecodeError is a ValueError
+        raise ValueError(f"sidecar is not valid JSON ({e.__class__.__name__})")
+    if not isinstance(side, dict):
+        raise ValueError("sidecar is not a JSON object")
+    missing = [k for k in SIDECAR_KEYS if k not in side]
+    if missing:
+        raise ValueError("sidecar lacks " + ", ".join(missing))
+    if not isinstance(side["decodes"], list):
+        raise ValueError("sidecar decodes is not a list")
+    try:
+        lines = [P.all_txt_line(side, d) for d in side["decodes"]]
+    except (KeyError, TypeError, ValueError, AttributeError) as e:
+        raise ValueError(f"sidecar will not render to ALL.TXT ({e.__class__.__name__}: {e})")
+    return side, lines
+
+
+def _write_atomic(out: Path, name: str, writer):
+    """writer(fileobj) fills a fresh temp file beside the target; os.replace puts it in place.
+    A failure removes the temp file and leaves any earlier target as it was."""
+    tmp = out / f".{name}.tmp{os.getpid()}"
+    fd = os.open(tmp, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o644)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            writer(f)
+        os.replace(tmp, out / name)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def build_package(archive, cfg, callsign, grid, first, last, out_root, version):
     """Zip a date range of one instance's archive with ALL.TXT, description and draft metadata.
-    Every refusal comes before the first mkdir.  A rerun replaces the earlier files in the
-    directory and leaves draft.json (the Zenodo draft's state) alone."""
+    Every refusal comes before the first mkdir.  Unsafe or unreadable recordings are skipped
+    and reported.  Each output lands by temp file + os.replace, so a failure leaves any
+    earlier package whole.  A rerun leaves draft.json (the Zenodo draft's state) alone."""
     if first > last:
         raise PackageRefused(f"--from {first} falls after --to {last}")
     missing = [k for k in REQUIRED_OPERATOR_FIELDS if not str(cfg.get(k, "")).strip()]
@@ -80,34 +136,49 @@ def build_package(archive, cfg, callsign, grid, first, last, out_root, version):
     recs = archive.recordings(first, last)
     if not recs:
         raise PackageRefused(f"no recordings in the archive between {first} and {last}")
+    root = Path(archive.root).resolve()
+    valid, lines, per, flagged, bands, skipped = [], [], {}, [], [], []
+    for band, wav, side_path in recs:
+        rel = wav.relative_to(archive.root)
+        try:
+            side, side_lines = _check_recording(root, wav, side_path)
+        except ValueError as e:
+            skipped.append(f"{rel}: {e}")
+            continue
+        valid.append((wav, side_path, rel))
+        lines.extend(side_lines)
+        day = rel.parts[1]
+        per.setdefault(band, {}).setdefault(day, 0)
+        per[band][day] += 1
+        if side.get("clipped_samples") or (side.get("frontend") or {}).get("overloaded"):
+            flagged.append(str(rel))
+        if band not in bands:
+            bands.append(band)
+    if not valid:
+        raise PackageRefused("no usable recordings between " f"{first} and {last}; skipped: "
+                             + "; ".join(skipped))
     title_text = P.title(callsign, grid, first, last)
     out = Path(out_root) / title_text.replace("/", "-")
+    if out.is_symlink():
+        raise PackageRefused(f"{out} is a symlink; refusing to write through it")
     out.mkdir(parents=True, exist_ok=True)
     zip_path = out / f"{out.name}.zip"
-    lines, per, flagged, bands = [], {}, [], []
-    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_STORED) as z:
-        for band, wav, side_path in recs:
-            rel = wav.relative_to(archive.root)
-            z.write(wav, str(rel))
-            z.write(side_path, str(rel.with_suffix(".json")))
-            side = json.loads(side_path.read_text())
-            for d in side.get("decodes", []):
-                lines.append(P.all_txt_line(side, d))
-            day = rel.parts[1]
-            per.setdefault(band, {}).setdefault(day, 0)
-            per[band][day] += 1
-            if side.get("clipped_samples") or (side.get("frontend") or {}).get("overloaded"):
-                flagged.append(str(rel))
-            if band not in bands:
-                bands.append(band)
-    (out / "ALL.TXT").write_text("".join(lines))
+
+    def write_zip(f):
+        with zipfile.ZipFile(f, "w", compression=zipfile.ZIP_STORED) as z:
+            for wav, side_path, rel in valid:
+                z.write(wav, str(rel))
+                z.write(side_path, str(rel.with_suffix(".json")))
+
     fields = P.description_fields(cfg, callsign, grid, bands, version)
-    (out / "description.md").write_text(P.description_text(fields))
     md = P.record_metadata(title_text, P.description_html(fields), cfg["operator"],
                            datetime.now(timezone.utc).date())
-    (out / "metadata.json").write_text(json.dumps(md, indent=1))
-    return PackageResult(dir=out, zip_path=zip_path, files=len(recs), per_band_day=per,
-                         flagged=flagged)
+    _write_atomic(out, zip_path.name, write_zip)
+    _write_atomic(out, "ALL.TXT", lambda f: f.write("".join(lines).encode()))
+    _write_atomic(out, "description.md", lambda f: f.write(P.description_text(fields).encode()))
+    _write_atomic(out, "metadata.json", lambda f: f.write(json.dumps(md, indent=1).encode()))
+    return PackageResult(dir=out, zip_path=zip_path, files=len(valid), per_band_day=per,
+                         flagged=flagged, skipped=skipped)
 
 
 def _parse_day(text, flag):
@@ -135,9 +206,19 @@ def cmd_package(args) -> int:
         blocks = config.get("radiod", [])
         if isinstance(blocks, dict):
             blocks = [blocks]
-        radiod_id = resolve_radiod_status(blocks[0]) if blocks else ""
         reporter = (extract_reporter_id(config)
                     or (os.environ.get("STATION_REPORTER_ID") or "").strip() or None)
+        radiod_id = ""
+        if len(blocks) == 1 or (blocks and reporter):
+            radiod_id = resolve_radiod_status(blocks[0])
+        elif blocks:
+            names = [resolve_radiod_status(b) for b in blocks]
+            if instance in names:
+                radiod_id = instance
+            else:
+                raise PackageRefused(
+                    "the config has several [[radiod]] blocks and no reporter id; pass "
+                    f"--instance set to one of: {', '.join(names)}")
         instance_id = resolve_msqp_instance_id(config, reporter, radiod_id)
         station = config.get("station", {}) or {}
         callsign = reporter or station.get("callsign", "") or instance_id
@@ -156,6 +237,8 @@ def cmd_package(args) -> int:
         for day in sorted(r.per_band_day[band]):
             print(f"{band} {day}: {r.per_band_day[band][day]} recordings")
     print(f"{r.files} recordings; {r.zip_path.stat().st_size / 1e6:.1f} MB zip")
+    for note in r.skipped:
+        print(f"skipped: {note}")
     for rel in r.flagged:
         print(f"flagged (clipped or overloaded): {rel}")
     print(f"package: {r.dir}")
