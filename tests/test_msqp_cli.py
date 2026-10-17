@@ -220,7 +220,7 @@ class PackageHardeningTests(unittest.TestCase):
         wav.unlink(); wav.symlink_to(secret)
         r = self._build()
         self.assertEqual(r.files, 1)
-        self.assertIn("symlink", r.skipped[0])
+        self.assertRegex(r.skipped[0], "symlink|outside")
         with zipfile.ZipFile(r.zip_path) as z:
             self.assertTrue(all(b"TOPSECRET" not in z.read(n) for n in z.namelist()))
 
@@ -235,14 +235,84 @@ class PackageHardeningTests(unittest.TestCase):
         r = self._build()
         good = r.zip_path.read_bytes()
         from unittest import mock
-        with mock.patch.object(zipfile.ZipFile, "write", side_effect=OSError("disk full")):
+        with mock.patch.object(zipfile.ZipFile, "open", side_effect=OSError("disk full")):
             with self.assertRaises(OSError):
                 self._build()
         self.assertEqual(r.zip_path.read_bytes(), good)
         self.assertEqual([p.name for p in r.dir.iterdir() if p.name.startswith(".")], [])
 
+    def test_swap_between_passes_never_zips_the_outside_file(self):
+        from unittest import mock
+        from meteor_scatter import msqp_cli
+        secret = self.root / "secret.bin"
+        secret.write_bytes(b"TOPSECRET" * 10)
+        wav = self.day13 / "261213_235930.wav"
+        real, seen = msqp_cli._open_regular, []
+
+        def swapping(path):
+            if Path(path) == wav:
+                seen.append(1)
+                if len(seen) == 2:                  # the zip pass
+                    wav.unlink(); wav.symlink_to(secret)
+            return real(path)
+        with mock.patch.object(msqp_cli, "_open_regular", swapping):
+            with self.assertRaises(PackageRefused):
+                self._build()
+        for z in self.out.rglob("*.zip"):
+            self.fail("a zip was left behind")
+        self.assertEqual([p for p in self.out.rglob("*") if p.is_file()], [])
+
+    def test_hardlinked_wav_skipped(self):
+        import os
+        os.link(self.day13 / "261213_235930.wav", self.root / "other.wav")
+        r = self._build()
+        self.assertEqual(r.files, 1)
+        self.assertIn("hard links", r.skipped[0])
+
+    def test_decode_message_with_line_break_skipped(self):
+        side = self.day13 / "261213_235930.json"
+        d = json.loads(side.read_text()); d["decodes"][0]["message"] = "CQ X\n20261213 forged"
+        side.write_text(json.dumps(d))
+        r = self._build()
+        self.assertEqual(r.files, 1)
+        self.assertIn("line break", r.skipped[0])
+        self.assertNotIn("forged", (r.dir / "ALL.TXT").read_text())
+
+    def test_output_root_group_writable_or_foreign_refused(self):
+        import os
+        from unittest import mock
+        self.out.mkdir(); os.chmod(self.out, 0o775)
+        with self.assertRaisesRegex(PackageRefused, "writable"):
+            self._build()
+        os.chmod(self.out, 0o755)
+        with mock.patch("os.geteuid", return_value=os.geteuid() + 1):
+            with self.assertRaisesRegex(PackageRefused, "owned"):
+                self._build()
+        self.assertEqual(list(self.out.iterdir()), [])
+
+    def test_package_dir_swapped_after_open_does_not_redirect_writes(self):
+        import os
+        from unittest import mock
+        from meteor_scatter import msqp_cli
+        target = self.root / "elsewhere"; target.mkdir()
+        name = "AC0G EM38WW 20261213-14 Meteor Scatter QSO Party"
+        real, calls = msqp_cli._open_dir, []
+
+        def swapping(path, what, dir_fd=None):
+            fd = real(path, what, dir_fd)
+            calls.append(path)
+            if path == name:
+                os.rename(self.out / name, self.out / "moved")
+                (self.out / name).symlink_to(target)
+            return fd
+        with mock.patch.object(msqp_cli, "_open_dir", swapping):
+            self._build()
+        self.assertEqual(list(target.iterdir()), [])
+        self.assertTrue((self.out / "moved" / "ALL.TXT").exists())
+        self.assertTrue((self.out / "moved" / f"{name}.zip").exists())
+
     def test_symlinked_package_dir_refused(self):
-        self.out.mkdir()
+        self.out.mkdir(); self.out.chmod(0o755)
         target = self.root / "elsewhere"; target.mkdir()
         (self.out / "AC0G EM38WW 20261213-14 Meteor Scatter QSO Party").symlink_to(target)
         with self.assertRaisesRegex(PackageRefused, "symlink"):

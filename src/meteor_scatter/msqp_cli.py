@@ -7,6 +7,9 @@ from __future__ import annotations
 
 import argparse
 import copy
+import errno
+import shutil
+import time
 import json
 import os
 import stat
@@ -72,24 +75,44 @@ class PackageResult:
 SIDECAR_KEYS = ("slot_start_utc", "dial_freq_hz", "decodes")
 
 
+def _open_regular(path: Path):
+    """(fd, fstat) for a regular, singly-linked file opened without following a link, or
+    ValueError(reason).  The caller owns the fd."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError as e:
+        if e.errno == errno.ENOENT:
+            raise ValueError(f"{path.name} is missing")
+        if e.errno == errno.ELOOP:
+            raise ValueError(f"{path.name} is a symlink")
+        raise ValueError(f"{path.name} cannot be opened ({e.strerror})")
+    st = os.fstat(fd)
+    if not stat.S_ISREG(st.st_mode):
+        os.close(fd)
+        raise ValueError(f"{path.name} is not a regular file")
+    if st.st_nlink != 1:
+        os.close(fd)
+        raise ValueError(f"{path.name} has {st.st_nlink} hard links")
+    return fd, st
+
+
 def _check_recording(root: Path, wav: Path, side_path: Path):
-    """(sidecar dict, ALL.TXT lines) for one recording, or raise ValueError(reason).  The
-    archive belongs to the daemon's account and this may run as root, so a link or a path
-    outside the archive is never read."""
+    """(sidecar dict, ALL.TXT lines, sidecar bytes, wav identity) for one recording, or
+    raise ValueError(reason).  The archive belongs to the daemon's account and this may run
+    as root, so a link, a hard link or a path outside the archive is never read.  Both files
+    open by fd without following links; the sidecar is parsed from the bytes read there, and
+    the wav's (st_dev, st_ino) lets the zip pass confirm it reopens the same file."""
     for p in (wav, side_path):
-        try:
-            st = p.lstat()
-        except OSError:
-            raise ValueError(f"{p.name} is missing")
-        if stat.S_ISLNK(st.st_mode):
-            raise ValueError(f"{p.name} is a symlink")
-        if not stat.S_ISREG(st.st_mode):
-            raise ValueError(f"{p.name} is not a regular file")
         if not p.resolve().is_relative_to(root):
             raise ValueError(f"{p.name} resolves outside the archive")
+    fd, wst = _open_regular(wav)
+    os.close(fd)
+    fd, _ = _open_regular(side_path)
+    with os.fdopen(fd, "rb") as f:
+        raw = f.read()
     try:
-        side = json.loads(side_path.read_text())
-    except (OSError, ValueError) as e:       # UnicodeDecodeError is a ValueError
+        side = json.loads(raw.decode())
+    except ValueError as e:                  # UnicodeDecodeError is a ValueError
         raise ValueError(f"sidecar is not valid JSON ({e.__class__.__name__})")
     if not isinstance(side, dict):
         raise ValueError("sidecar is not a JSON object")
@@ -98,25 +121,49 @@ def _check_recording(root: Path, wav: Path, side_path: Path):
         raise ValueError("sidecar lacks " + ", ".join(missing))
     if not isinstance(side["decodes"], list):
         raise ValueError("sidecar decodes is not a list")
+    for d in side["decodes"]:
+        msg = d.get("message") if isinstance(d, dict) else None
+        if isinstance(msg, str) and ("\n" in msg or "\r" in msg):
+            raise ValueError("a decode message holds a line break")
     try:
         lines = [P.all_txt_line(side, d) for d in side["decodes"]]
     except (KeyError, TypeError, ValueError, AttributeError) as e:
         raise ValueError(f"sidecar will not render to ALL.TXT ({e.__class__.__name__}: {e})")
-    return side, lines
+    return side, lines, raw, (wst.st_dev, wst.st_ino)
 
 
-def _write_atomic(out: Path, name: str, writer):
-    """writer(fileobj) fills a fresh temp file beside the target; os.replace puts it in place.
-    A failure removes the temp file and leaves any earlier target as it was."""
-    tmp = out / f".{name}.tmp{os.getpid()}"
-    fd = os.open(tmp, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o644)
+def _open_dir(path, what: str, dir_fd=None) -> int:
+    """fd of a directory opened without following a link, which this process's user owns and
+    neither group nor others can write (the daemon's account must not be able to swap what
+    root writes into).  ValueError names the reason."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dir_fd)
+    except OSError as e:
+        if e.errno == errno.ELOOP or e.errno == errno.ENOTDIR:
+            raise ValueError(f"{what} is a symlink or not a directory; refusing to write there")
+        raise ValueError(f"{what} cannot be opened ({e.strerror})")
+    st = os.fstat(fd)
+    if st.st_uid != os.geteuid() or st.st_mode & 0o022:
+        os.close(fd)
+        raise ValueError(f"{what} must be owned by the current user and not group- or "
+                         "other-writable")
+    return fd
+
+
+def _write_atomic(dir_fd: int, name: str, writer):
+    """writer(fileobj) fills a fresh temp file beside the target (by dir fd, never by path);
+    os.replace puts it in place.  A failure removes the temp file and leaves any earlier
+    target as it was."""
+    tmp = f".{name}.tmp{os.getpid()}"
+    fd = os.open(tmp, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o644,
+                 dir_fd=dir_fd)
     try:
         with os.fdopen(fd, "wb") as f:
             writer(f)
-        os.replace(tmp, out / name)
+        os.replace(tmp, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
     except BaseException:
         try:
-            os.unlink(tmp)
+            os.unlink(tmp, dir_fd=dir_fd)
         except OSError:
             pass
         raise
@@ -141,11 +188,11 @@ def build_package(archive, cfg, callsign, grid, first, last, out_root, version):
     for band, wav, side_path in recs:
         rel = wav.relative_to(archive.root)
         try:
-            side, side_lines = _check_recording(root, wav, side_path)
+            side, side_lines, raw, ident = _check_recording(root, wav, side_path)
         except ValueError as e:
             skipped.append(f"{rel}: {e}")
             continue
-        valid.append((wav, side_path, rel))
+        valid.append((wav, raw, ident, rel))
         lines.extend(side_lines)
         day = rel.parts[1]
         per.setdefault(band, {}).setdefault(day, 0)
@@ -158,25 +205,60 @@ def build_package(archive, cfg, callsign, grid, first, last, out_root, version):
         raise PackageRefused("no usable recordings between " f"{first} and {last}; skipped: "
                              + "; ".join(skipped))
     title_text = P.title(callsign, grid, first, last)
-    out = Path(out_root) / title_text.replace("/", "-")
-    if out.is_symlink():
-        raise PackageRefused(f"{out} is a symlink; refusing to write through it")
-    out.mkdir(parents=True, exist_ok=True)
-    zip_path = out / f"{out.name}.zip"
+    name = title_text.replace("/", "-")
+    out = Path(out_root) / name                  # for reporting; never used for I/O
+    zip_path = out / f"{name}.zip"
+    old_umask = os.umask(0o022)          # new directories come out 0755 whatever the login umask
+    try:
+        os.makedirs(out_root, mode=0o755, exist_ok=True)
+    finally:
+        os.umask(old_umask)
+    try:
+        root_fd = _open_dir(out_root, f"output root {out_root}")
+        try:
+            old_umask = os.umask(0o022)
+            try:
+                os.mkdir(name, 0o755, dir_fd=root_fd)
+            except FileExistsError:
+                pass
+            finally:
+                os.umask(old_umask)
+            pkg_fd = _open_dir(name, f"package directory {out}", dir_fd=root_fd)
+        finally:
+            os.close(root_fd)
+    except ValueError as e:
+        raise PackageRefused(str(e))
 
     def write_zip(f):
         with zipfile.ZipFile(f, "w", compression=zipfile.ZIP_STORED) as z:
-            for wav, side_path, rel in valid:
-                z.write(wav, str(rel))
-                z.write(side_path, str(rel.with_suffix(".json")))
+            for wav, raw, ident, rel in valid:
+                try:
+                    fd, st = _open_regular(wav)
+                except ValueError as e:
+                    raise PackageRefused(f"{rel} changed during packaging: {e}")
+                with os.fdopen(fd, "rb") as src:
+                    if (st.st_dev, st.st_ino) != ident:
+                        raise PackageRefused(f"{rel} changed during packaging")
+                    info = zipfile.ZipInfo(str(rel), time.localtime(st.st_mtime)[:6])
+                    info.compress_type = zipfile.ZIP_STORED
+                    info.external_attr = 0o644 << 16
+                    with z.open(info, "w", force_zip64=True) as dst:
+                        shutil.copyfileobj(src, dst)
+                z.writestr(str(rel.with_suffix(".json")), raw,
+                           compress_type=zipfile.ZIP_STORED)
 
     fields = P.description_fields(cfg, callsign, grid, bands, version)
     md = P.record_metadata(title_text, P.description_html(fields), cfg["operator"],
                            datetime.now(timezone.utc).date())
-    _write_atomic(out, zip_path.name, write_zip)
-    _write_atomic(out, "ALL.TXT", lambda f: f.write("".join(lines).encode()))
-    _write_atomic(out, "description.md", lambda f: f.write(P.description_text(fields).encode()))
-    _write_atomic(out, "metadata.json", lambda f: f.write(json.dumps(md, indent=1).encode()))
+    try:
+        _write_atomic(pkg_fd, zip_path.name, write_zip)
+        _write_atomic(pkg_fd, "ALL.TXT", lambda f: f.write("".join(lines).encode()))
+        _write_atomic(pkg_fd, "description.md",
+                      lambda f: f.write(P.description_text(fields).encode()))
+        _write_atomic(pkg_fd, "metadata.json",
+                      lambda f: f.write(json.dumps(md, indent=1).encode()))
+    finally:
+        os.close(pkg_fd)
     return PackageResult(dir=out, zip_path=zip_path, files=len(valid), per_band_day=per,
                          flagged=flagged, skipped=skipped)
 
