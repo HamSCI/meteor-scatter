@@ -15,7 +15,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
-from meteor_scatter.core.archive import Archive, band_label
+from meteor_scatter.core.archive import Archive, band_label, instance_dirname
 from meteor_scatter.core.frontend import FrontendLog
 from meteor_scatter.core.noise_watch import NoiseWatch
 from meteor_scatter.core.wav import WavStats
@@ -99,11 +99,15 @@ class MsqpChannel:
 
 
 class MsqpRuntime:
-    """One radiod's MSQP state: the archive, the front-end log and its listener, the bands."""
+    """One radiod's MSQP state: the archive, the front-end log and its listener, the bands.
 
-    def __init__(self, msqp_cfg: dict, version: str):
-        self.archive = Archive(Path(msqp_cfg["archive_dir"]), msqp_cfg["archive_max_days"],
-                               msqp_cfg["archive_max_gb"])
+    Each instance archives under its own root, <archive_dir>/<instance_dirname(instance_id)>,
+    so two sources never write the same <band>/<day>/<stem>.wav."""
+
+    def __init__(self, msqp_cfg: dict, version: str, instance_id: str):
+        self.instance_id = instance_id
+        self.archive = Archive(Path(msqp_cfg["archive_dir"]) / instance_dirname(instance_id),
+                               msqp_cfg["archive_max_days"], msqp_cfg["archive_max_gb"])
         self.frontend = FrontendLog()
         self._listener = None
         self._version = version

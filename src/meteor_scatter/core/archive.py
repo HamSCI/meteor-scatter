@@ -9,12 +9,25 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import shutil
 import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
 BAND_NAMES = {28145000: "10m", 50260000: "6m"}
+
+
+_UNSAFE = re.compile(r"[^A-Za-z0-9._-]")
+
+
+def instance_dirname(name: str) -> str:
+    """One instance's directory under msqp.archive_dir: the reporter id (or radiod id) made
+    path-safe.  "/" and every character outside [A-Za-z0-9._-] become "-"; "AC0G/B4" -> "AC0G-B4".
+    A name that would resolve to the archive_dir itself or its parent ("", ".", "..") becomes
+    "unknown"."""
+    safe = _UNSAFE.sub("-", str(name))
+    return "unknown" if safe.strip(".") == "" else safe
 
 
 def band_label(freq_hz: int) -> str:

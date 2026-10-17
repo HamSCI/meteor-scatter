@@ -423,16 +423,17 @@ class MeteorScatterRecorder:
             self._lifetime_entries.extend(rx.lifetime_entries)
 
     def _build_msqp_runtimes(self) -> None:
-        """One MSQP runtime per source: its own front-end log and listener,
-        all sharing the configured archive.  A bad [msqp] block costs the
-        archive, never the decodes."""
+        """One MSQP runtime per source: its own front-end log, listener and
+        archive root (<archive_dir>/<instance>).  A bad [msqp] block costs
+        the archive, never the decodes."""
         try:
             from meteor_scatter.core.msqp import MsqpRuntime
             cfg = get_msqp(self._config)
             version = _software_version()
             for rx in self._receivers:
                 if rx not in self._msqp_runtimes:
-                    self._msqp_runtimes[rx] = MsqpRuntime(cfg, version)
+                    self._msqp_runtimes[rx] = MsqpRuntime(cfg, version,
+                                                          rx.msqp_instance_id)
         except Exception as exc:  # noqa: BLE001
             logger.error("MSQP archive disabled: %s", exc)
             self._msqp_runtimes = {}
@@ -449,7 +450,7 @@ class MeteorScatterRecorder:
         pruned_roots: set = set()
         for rx, runtime in list(self._msqp_runtimes.items()):
             if prune_due and runtime.archive.root not in pruned_roots:
-                # Sources share one archive root; prune it once.
+                # Sources sharing an instance id share a root; prune it once.
                 pruned_roots.add(runtime.archive.root)
                 try:
                     from datetime import datetime, timezone

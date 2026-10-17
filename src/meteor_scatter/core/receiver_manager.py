@@ -158,6 +158,13 @@ class ReceiverManager:
     def log_dir(self) -> Path:
         return self._log_dir
 
+    @property
+    def msqp_instance_id(self) -> str:
+        """Who this source's MSQP recordings belong to: the reporter id, else
+        the radiod id.  Names the sidecar's reporter_id and the archive root."""
+        return (self._reporter_id or extract_reporter_id(self._config)
+                or self._radiod_id)
+
     # --- provisioning --------------------------------------------------
 
     def provision_channels(
@@ -225,8 +232,7 @@ class ReceiverManager:
             except Exception as e:  # noqa: BLE001
                 logger.warning("ReceiverManager %s: MSQP front-end listener unavailable: %s",
                                self._radiod_id, e)
-        msqp_reporter = (self._reporter_id or extract_reporter_id(self._config)
-                         or self._radiod_id)
+        msqp_reporter = self.msqp_instance_id
 
         # Surface the Fusion governor identity at startup so the journal
         # record makes multi-radiod attribution clear.

@@ -89,7 +89,7 @@ class MsqpRuntimeTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
         self.rt = MsqpRuntime({"archive_dir": str(self.root / "a"), "archive_max_days": 90,
-                               "archive_max_gb": 2.0}, version="v-test")
+                               "archive_max_gb": 2.0}, version="v-test", instance_id="AC0G/B4")
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -117,7 +117,8 @@ class MsqpRuntimeTests(unittest.TestCase):
         self.assertFalse(path.with_suffix(".json.part").exists())
 
     def test_prune_delegates_to_the_archive(self):
-        old = self.root / "a" / "6m" / "20200101"
+        self.assertEqual(self.rt.archive.root, self.root / "a" / "AC0G-B4")
+        old = self.rt.archive.root / "6m" / "20200101"
         old.mkdir(parents=True)
         (old / "200101_000000.wav").write_bytes(b"\0")
         removed = self.rt.prune(date(2026, 10, 17))
@@ -138,6 +139,30 @@ class MsqpRuntimeTests(unittest.TestCase):
             fl.return_value.start.assert_called_once_with()
             self.rt.stop_listener()
             fl.return_value.stop.assert_called_once_with()
+
+
+class InstanceArchiveRootTests(unittest.TestCase):
+    def test_sources_with_different_reporter_ids_get_different_roots(self):
+        from meteor_scatter.core.receiver_manager import ReceiverManager
+        with tempfile.TemporaryDirectory() as td:
+            cfg = {"paths": {}, "station": {}, "processing": {},
+                   "msqp": {"archive_dir": f"{td}/msqp"}}
+            rxs = [ReceiverManager(config=cfg, radiod_block={"status": "same.local"},
+                                   spool_root=Path(td), log_dir=Path(td),
+                                   radiod_lifetime_frames=0, reporter_id=rid)
+                   for rid in ("AC0G/B4", "AC0G/ND")]
+            roots = [MsqpRuntime({"archive_dir": f"{td}/msqp", "archive_max_days": 90,
+                                  "archive_max_gb": 2.0}, "v", rx.msqp_instance_id).archive.root
+                     for rx in rxs]
+            self.assertEqual(roots, [Path(td) / "msqp" / "AC0G-B4", Path(td) / "msqp" / "AC0G-ND"])
+
+    def test_instance_id_falls_back_to_config_then_radiod(self):
+        from meteor_scatter.core.receiver_manager import ReceiverManager
+        mk = lambda cfg: ReceiverManager(config=cfg, radiod_block={"status": "rx.local"},
+                                         spool_root=Path("/tmp/x"), log_dir=Path("/tmp/x"),
+                                         radiod_lifetime_frames=0)
+        self.assertEqual(mk({"instance": {"reporter_id": "AC0G/B4"}}).msqp_instance_id, "AC0G/B4")
+        self.assertEqual(mk({}).msqp_instance_id, "rx.local")
 
 
 if __name__ == "__main__":
@@ -187,5 +212,7 @@ class RecorderHousekeepingTests(unittest.TestCase):
         got = [rx.provision_channels.call_args.kwargs["msqp_runtime"] for rx in rec.receivers]
         self.assertIsInstance(got[0], MsqpRuntime)
         self.assertIsNot(got[0], got[1])
-        self.assertEqual(got[0].archive.root, self.spool / "msqp")
+        # No reporter id anywhere: each source archives under its radiod id.
+        self.assertEqual([g.archive.root for g in got],
+                         [self.spool / "msqp" / "a.local", self.spool / "msqp" / "b.local"])
         self.assertNotIn("keep_wav", rec.receivers[0].provision_channels.call_args.kwargs)

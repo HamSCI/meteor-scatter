@@ -3,7 +3,7 @@ from datetime import date
 from pathlib import Path
 from unittest.mock import patch
 
-from meteor_scatter.core.archive import Archive, band_label, slot_stem, slot_day
+from meteor_scatter.core.archive import Archive, band_label, instance_dirname, slot_stem, slot_day
 
 T0 = 1797206370.0          # 2026-12-13 23:59:30 UTC
 
@@ -19,6 +19,19 @@ class NamingTests(unittest.TestCase):
 
     def test_slot_near_midnight_belongs_to_its_start_day(self):
         self.assertEqual(slot_day(T0), date(2026, 12, 13))
+
+
+class InstanceDirnameTests(unittest.TestCase):
+    def test_reporter_id_becomes_one_path_component(self):
+        self.assertEqual(instance_dirname("AC0G/B4"), "AC0G-B4")
+        self.assertEqual(instance_dirname("bee1-status.local"), "bee1-status.local")
+        self.assertEqual(instance_dirname("K3LR DASI_018"), "K3LR-DASI_018")
+        self.assertEqual(instance_dirname("a/../b"), "a-..-b")
+        self.assertEqual(instance_dirname("Zürich"), "Z-rich")
+
+    def test_names_that_escape_the_archive_dir_are_refused(self):
+        for name in ("", ".", ".."):
+            self.assertEqual(instance_dirname(name), "unknown")
 
 
 class KeepAndPruneTests(unittest.TestCase):
