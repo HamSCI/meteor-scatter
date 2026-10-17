@@ -15,7 +15,8 @@ recording shows how each ping decays.
 
 Today the client deletes every recording once jt9 has read it.  This design keeps the decoded
 ones, records the receiver gain beside them, and carries them as far as an unpublished Zenodo
-draft.  A person publishes, because Zenodo forbids any change to a record after publication.
+draft.  The operator submits it for review and a community administrator publishes it.  People
+make those last two moves because Zenodo forbids any change to a record after publication.
 
 The first version serves AC0G-B4 and the DASI2 stations.  Nothing in it depends on our hardware
 or our accounts, so a volunteer's install can use it later without a redesign.  Each operator
@@ -30,7 +31,7 @@ uses a Zenodo account of their own; our stations do too.
 | Channel gain | Channel AGC off, 32-bit float stream, one fixed scale per band |
 | Front-end gain | Leave radiod's front-end AGC alone; record its gain beside each recording |
 | Noise floor | Watch it per band and warn on drift; never change the scale automatically |
-| Zenodo | The station builds a draft through the API with the operator's token; a person publishes |
+| Zenodo | The station builds a draft through the API with the operator's token; the operator submits it for review; a community administrator publishes |
 | Zenodo account | Each operator's own |
 | Where the code lives | Inside meteor-scatter: archive in the daemon, two new commands |
 
@@ -135,7 +136,7 @@ The command builds `/var/lib/meteor-scatter/msqp/<title>/`, containing:
 - `<title>.zip`, the WAVs and sidecars for those UTC days, by band
 - `ALL.TXT`, built in WSJT-X's format from the station's own decode log for the same days (a
   monitor makes no QSOs, so no ADIF)
-- `description.md`, the MSQP description template filled in
+- `description.md`, the MSQP description template filled in, for the record's description field
 - `metadata.json`, the record exactly as `draft` will send it
 
 It prints decodes per band per day, the file count, the zip's size, and the recordings that
@@ -144,7 +145,8 @@ Scatter QSO Party`.
 
 The description fields come from three places.  The station supplies the callsign (its reporter
 id), the six-character grid (the first six characters of `[station] grid_square`), "Receive Only", the bands the archive holds, the
-equipment (RX888 and radiod), and "N/A" for transmitter power.  The client writes a comment
+equipment (RX888 and radiod), and "NA" for transmitter power, as the MSQP template asks of a
+receive-only station.  The client writes a comment
 explaining the AGC setting, the front-end record in the sidecars, and the software version.  The
 operator supplies, once, in the instance config's `[msqp]` block: operator names and calls, a
 contact email, and the antenna.  `package` refuses while any of those three is missing and names
@@ -154,13 +156,26 @@ the missing one.
 
 ### 5.2 `meteor-scatter msqp draft <package-dir>`
 
-The command reads the operator's token from `/etc/meteor-scatter/zenodo-token` (mode 0600; scope
-`deposit:write`).  Through Zenodo's deposit API it creates a draft, uploads the zip, `ALL.TXT` and
-`description.md`, and sets the metadata: resource type dataset, licence CC-BY-4.0, the community,
-and creators taken from the operator fields.  It never calls publish.  It writes the draft's id
-into the package directory, so a second run resumes that draft rather than creating another.  It
-prints the draft's URL; the operator reviews the draft on Zenodo and publishes it, which hands it
-to the community's curators.
+The MSQP's procedure (github.com/HamSCI/MSQP, `Zenodo.md`) has the operator do everything in
+Zenodo's web form: choose the community, upload the zip, `wsjtx_log.adi` and `ALL.TXT`, ask Zenodo
+to generate a DOI, fill in the fields, and finally press "Submit for review".  A community
+administrator then reviews the submission and either publishes it with its DOI or asks for more
+information.  `draft` carries every step up to that last button, and stops there.
+
+The command reads the operator's token from `/etc/meteor-scatter/zenodo-token` (mode 0600).  It
+creates a draft and uploads the zip and `ALL.TXT`.  It sets the metadata the MSQP form asks for:
+resource type dataset, access public, the MSQP title, the filled description, licence CC-BY-4.0,
+and creators from the operator fields.  It reserves a DOI, which the web form calls "generate
+DOI".  It attaches the draft to the community.  It never submits the draft for review and never
+publishes it.  It writes the draft's id into the package directory, so a second run resumes that
+draft rather than creating another.  It prints the draft's URL.  The operator opens the draft,
+checks it, and presses "Submit for review"; the community administrator publishes.
+
+The operator needs a Zenodo account and a personal access token.  The MSQP's procedure covers the
+account: sign up with ORCID (which it recommends), GitHub, or an institutional email address.  The
+token goes beyond that procedure, which never mentions one, so meteor-scatter's OPERATIONS.md
+adds the step: in Zenodo, Applications, Personal access tokens, create a token with the scope
+that writes deposits, and save it into `/etc/meteor-scatter/zenodo-token`.
 
 `draft` refuses, naming the reason and the fix, when the site's upload mode for meteor-scatter
 reads anything but `upload`, or when no token exists.
@@ -168,9 +183,12 @@ reads anything but `upload`, or when no token exists.
 ### 5.3 To settle before code lands
 
 - Zenodo's identifier for the community.  The MSQP documents give only its display name.
-- Whether Zenodo, now on InvenioRDM, still accepts a community in draft metadata, or instead
-  takes it as a review request at publish time.  One read-only call against
-  `sandbox.zenodo.org` with a test token answers both.
+- Which API carries the steps above.  The MSQP's "Submit for review" shows that Zenodo now runs
+  InvenioRDM, where a community joins a record through a review request rather than a metadata
+  field.  The plan expects InvenioRDM's records API (a draft, its files, a reserved DOI, and a
+  review request created but not submitted); the legacy deposit API may lack the community
+  step.  The exact token scopes follow from the same answer.
+- Calls against `sandbox.zenodo.org` with a test token settle all three before code lands.
 
 ## 6. Settings and sigmond
 
@@ -221,7 +239,8 @@ Unit tests:
 - `draft` against mocked HTTP: create, resume without a second draft, and each refusal
 
 Zenodo sandbox: `draft` runs end to end against `sandbox.zenodo.org` with a test token and must
-leave an unpublished draft in the community.  No test touches production Zenodo.
+leave a draft that carries its files, metadata and reserved DOI, joined to the community, and
+not yet submitted for review.  No test touches production Zenodo.
 
 On B4, after an announcement on the claude-bus: deploy, run `calibrate`, and prove with an
 MSK144 test transmission on an antenna close enough to hear it (as on 2026-07-24) that a decode
