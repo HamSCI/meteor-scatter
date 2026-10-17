@@ -59,3 +59,16 @@ class WindowTests(unittest.TestCase):
         w = log.window(1000.0, 1030.0, SR)
         self.assertEqual(w["frontend_status"], "missing")
         self.assertEqual(w["missing_sample_windows"], [[0, 30 * SR]])
+
+    def test_ad_over_counter_reset_is_unknown_not_false(self):
+        log = FrontendLog()
+        log.add(r(999.0, over=500)); log.add(r(1005.0, over=500)); log.add(r(1010.0, over=3))
+        w = log.window(1000.0, 1015.0, SR)
+        self.assertIsNone(w["ad_over_delta"])
+        self.assertIsNone(w["overloaded"])
+        self.assertTrue(w["ad_over_reset"])
+
+    def test_ad_over_reset_false_when_counter_rises(self):
+        log = FrontendLog()
+        log.add(r(999.0, over=7)); log.add(r(1010.0, over=9))
+        self.assertFalse(log.window(1000.0, 1015.0, SR)["ad_over_reset"])

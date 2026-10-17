@@ -58,6 +58,13 @@ class FrontendLog:
             return self._readings[-1] if self._readings else None
 
     def window(self, t0: float, t1: float, sample_rate: int) -> dict:
+        """Summarise the front end over [t0, t1] (UTC seconds) as sample windows.
+
+        start may predate t0 when the first in-window packet arrives late; the leading gap shows
+        in missing_sample_windows.  The log keeps one unchanged reading per second, so end.t can
+        lag the last packet by up to 1 s.  A falling ad_over counter means radiod restarted:
+        ad_over_delta and overloaded are then None and ad_over_reset is True (always a bool).
+        """
         with self._lock:
             rs = list(self._readings)
         n = int(round((t1 - t0) * sample_rate))
@@ -69,7 +76,8 @@ class FrontendLog:
         if not span or (i0 < 0 and (i1 == 0)):
             return {"basis": BASIS, "frontend_status": "missing", "start": None, "end": None,
                     "steps": [], "missing_sample_windows": [[0, n]],
-                    "ad_over_delta": None, "overloaded": None}
+                    "ad_over_delta": None, "overloaded": None,
+                    "ad_over_reset": False}
         before = rs[i0] if i0 >= 0 else None
         inside = [x for x in span if t0 < x.t <= t1]
         steps = []
@@ -87,6 +95,9 @@ class FrontendLog:
         end = inside[-1] if inside else before
         overs = [x.ad_over for x in ([before] if before else []) + inside if x.ad_over is not None]
         delta = (overs[-1] - overs[0]) if len(overs) >= 2 else None
+        reset = delta is not None and delta < 0     # counter fell: radiod restarted
+        if reset:
+            delta = None                            # overload unknown, never False
         if not missing:
             status = "ok"
         elif missing == [[0, n]]:
@@ -96,7 +107,8 @@ class FrontendLog:
         return {"basis": BASIS, "frontend_status": status,
                 "start": asdict(start) if start else None, "end": asdict(end) if end else None,
                 "steps": steps, "missing_sample_windows": missing,
-                "ad_over_delta": delta, "overloaded": (delta > 0) if delta is not None else None}
+                "ad_over_delta": delta, "overloaded": (delta > 0) if delta is not None else None,
+                "ad_over_reset": reset}
 
 
 class FrontendListener:
