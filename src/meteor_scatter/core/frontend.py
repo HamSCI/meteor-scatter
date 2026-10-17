@@ -12,6 +12,7 @@ import bisect
 import logging
 import socket
 import struct
+import sys
 import threading
 import time
 from dataclasses import dataclass, asdict
@@ -62,8 +63,9 @@ class FrontendLog:
 
         start may predate t0 when the first in-window packet arrives late; the leading gap shows
         in missing_sample_windows.  The log keeps one unchanged reading per second, so end.t can
-        lag the last packet by up to 1 s.  A falling ad_over counter means radiod restarted:
+        lag the last packet by up to 1 s, and can widen a step's sample_window by up to 1 s.  A falling ad_over counter means radiod restarted:
         ad_over_delta and overloaded are then None and ad_over_reset is True (always a bool).
+        Dedup can also widen a step's sample_window by up to 1 s.
         """
         with self._lock:
             rs = list(self._readings)
@@ -111,6 +113,35 @@ class FrontendLog:
                 "ad_over_reset": reset}
 
 
+IP_MULTICAST_ALL_LINUX = 49
+
+
+def configure_status_socket(s, group: str, port: int) -> None:
+    """Bind to the group address (not the wildcard) and join it; receive only, never send.
+
+    Binding to 0.0.0.0 would deliver status packets from every group any socket on the host
+    joined on this port, mixing another radiod's front-end gain into this log.  Binding to the
+    group filters by destination; IP_MULTICAST_ALL=0 stops Linux delivering other groups'
+    packets to a socket that joined only this one.
+    """
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    if hasattr(socket, "SO_REUSEPORT"):
+        try:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+        except OSError:
+            pass
+    if sys.platform.startswith("linux"):
+        try:
+            s.setsockopt(socket.IPPROTO_IP,
+                         getattr(socket, "IP_MULTICAST_ALL", IP_MULTICAST_ALL_LINUX), 0)
+        except OSError:
+            pass
+    s.bind((group, port))
+    s.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP,
+                 struct.pack("=4s4s", socket.inet_aton(group), socket.inet_aton("0.0.0.0")))
+    s.settimeout(0.5)
+
+
 class FrontendListener:
     """Passive: joins the status group, decodes, never sends."""
 
@@ -120,25 +151,23 @@ class FrontendListener:
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self._sock: Optional[socket.socket] = None
+        self._last_warn: Optional[float] = None
 
     def _open(self) -> socket.socket:
         from ka9q.status_listener import DEFAULT_STATUS_PORT
         from ka9q.utils import resolve_multicast_address
         group = resolve_multicast_address(self._address, timeout=5.0)
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        if hasattr(socket, "SO_REUSEPORT"):
-            try:
-                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-            except OSError:
-                pass
-        s.bind(("0.0.0.0", DEFAULT_STATUS_PORT))
-        s.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP,
-                     struct.pack("=4s4s", socket.inet_aton(group), socket.inet_aton("0.0.0.0")))
-        s.settimeout(0.5)
+        try:
+            configure_status_socket(s, group, DEFAULT_STATUS_PORT)
+        except Exception:
+            s.close()
+            raise
         return s
 
     def start(self) -> None:
+        if self._running:
+            return
         self._sock = self._open()
         self._running = True
         self._thread = threading.Thread(target=self._loop, daemon=True, name="frontend-listener")
@@ -151,6 +180,12 @@ class FrontendListener:
         if self._sock:
             self._sock.close()
 
+    def _warn(self, e: Exception, now: float) -> None:
+        # a persistent fault logs once, then at most once a minute
+        if self._last_warn is None or now - self._last_warn >= 60.0:
+            self._last_warn = now
+            logger.warning("frontend listener: %s", e)
+
     def _loop(self) -> None:
         from ka9q.status import decode_status_packet
         while self._running:
@@ -159,7 +194,7 @@ class FrontendListener:
             except socket.timeout:
                 continue
             except OSError as e:
-                logger.warning("frontend listener: %s", e)
+                self._warn(e, time.monotonic())
                 time.sleep(1.0)
                 continue
             try:
