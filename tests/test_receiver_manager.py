@@ -132,9 +132,10 @@ class MsqpChannelBuildTests(unittest.TestCase):
                        "msk144": {"scale_db": {"50260000": 12.5},
                                   "noise_cal_dbfs": {"50260000": -95.0}}})
         runtime = mock.MagicMock()
-        rx._msqp_channel(runtime, 50260000, "AC0G/B4", 15.0)
+        rx._msqp_channel(runtime, 50260000, "AC0G/B4", 15.0, "usb")
         runtime.channel.assert_called_once_with(50260000, reporter_id="AC0G/B4", scale_db=12.5,
-                                                noise_cal_dbfs=-95.0, cadence_sec=15.0)
+                                                noise_cal_dbfs=-95.0, cadence_sec=15.0,
+                                                preset="usb")
         self.assertIsNone(rx._msqp_channel(None, 50260000, "AC0G/B4", 15.0))
 
 

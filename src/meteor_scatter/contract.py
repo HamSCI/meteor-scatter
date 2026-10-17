@@ -14,8 +14,11 @@ from typing import Any
 from meteor_scatter.config import (
     get_freqs,
     get_mode_params,
+    get_msqp,
     load_config,
+    resolve_msqp_instance_id,
     resolve_radiod_status,
+    resolve_reporter_id,
     is_placeholder_status,
 )
 from meteor_scatter.version import GIT_INFO
@@ -41,6 +44,21 @@ def _read_msqp_state(path: Path, now: float | None = None) -> dict | None:
     return state
 
 
+def _msqp_archive_root(config: dict, msqp_cfg: dict, radiod_id: str, state_path: Path) -> str:
+    """Where this source's MSQP archive lives: the root the daemon last reported in
+    msqp-state.json (at any age), else the root the daemon's rule gives from here."""
+    from meteor_scatter.core.archive import instance_dirname
+    try:
+        root = json.loads(state_path.read_text()).get("archive_root")
+        if isinstance(root, str) and root:
+            return root
+    except (OSError, ValueError, AttributeError):
+        pass
+    reporter, _ = resolve_reporter_id(config)
+    iid = resolve_msqp_instance_id(config, reporter, radiod_id)
+    return str(Path(msqp_cfg["archive_dir"]) / instance_dirname(iid))
+
+
 def build_inventory(config: dict, config_path: Path) -> dict:
     """Build the inventory --json payload per contract v0.8."""
     station = config.get("station", {})
@@ -55,6 +73,10 @@ def build_inventory(config: dict, config_path: Path) -> dict:
     radiod_blocks = config.get("radiod", [])
     if isinstance(radiod_blocks, dict):
         radiod_blocks = [radiod_blocks]
+    try:
+        msqp_cfg = get_msqp(config)
+    except ValueError:
+        msqp_cfg = None           # validate reports it; the daemon runs without an archive
 
     instances = []
     all_log_paths: dict[str, Any] = {}
@@ -103,6 +125,18 @@ def build_inventory(config: dict, config_path: Path) -> dict:
                 "mb_per_day":     5,
             },
         ]
+        if msqp_cfg is not None:
+            # The MSQP archive: decoded recordings with their sidecars, under an age cap
+            # (archive_max_days) and a size cap (archive_max_gb).
+            data_sinks.append({
+                "kind":           "file",
+                "target":         _msqp_archive_root(
+                    config, msqp_cfg, radiod_id, Path(spool_path) / "msqp-state.json"),
+                "schema_ref":     None,
+                "retention_days": msqp_cfg["archive_max_days"],
+                "mb_per_day":     round(msqp_cfg["archive_max_gb"] * 1000.0
+                                        / msqp_cfg["archive_max_days"], 1),
+            })
 
         instance = {
             "instance": radiod_id,
@@ -225,6 +259,16 @@ def _collect_issues(config: dict, paths: dict) -> list[dict]:
             "severity": "warn",
             "instance": "all",
             "message": f"decoder override not found: {decoder}",
+        })
+
+    try:
+        get_msqp(config)
+    except ValueError as exc:
+        issues.append({
+            "severity": "warn",
+            "instance": "all",
+            "message": f"[msqp] rejected, so the daemon keeps no MSQP archive "
+                       f"(decoding continues): {exc}",
         })
 
     radiod_blocks = config.get("radiod", [])

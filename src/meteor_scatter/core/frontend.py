@@ -5,6 +5,10 @@ not touch it; we record it.  FrontendListener joins radiod's status multicast gr
 decodes each packet with ka9q.status.decode_status_packet and feeds FrontendLog.  A status packet
 tells us the gain changed somewhere between two packets, not at which sample, so a step is reported
 as a window of samples.  Times are the host receive time of each packet.
+
+The same packets carry each channel's own settings (preset, AGC, gain, encoding).  FrontendLog keeps
+the latest report per frequency, so each sidecar can record what radiod reported for its channel
+beside what the client asked for.
 """
 from __future__ import annotations
 
@@ -41,7 +45,23 @@ class FrontendLog:
         self._keep = keep_sec
         self._gap = gap_sec
         self._readings: list[FrontendReading] = []
+        self._channels: dict[int, dict] = {}
         self._lock = threading.Lock()
+
+    def add_channel(self, frequency_hz: float, *, ssrc, preset, agc_enable, gain_db, encoding,
+                    t: float) -> None:
+        """Keep radiod's latest report of one channel's settings, keyed by its frequency."""
+        rep = {"ssrc": ssrc, "preset": preset,
+               "agc_enable": None if agc_enable is None else bool(agc_enable),
+               "gain_db": gain_db, "encoding": encoding, "received_at": t}
+        with self._lock:
+            self._channels[int(round(frequency_hz))] = rep
+
+    def channel_reported(self, frequency_hz) -> Optional[dict]:
+        """radiod's latest report for the channel on this frequency, or None when none arrived."""
+        with self._lock:
+            rep = self._channels.get(int(round(frequency_hz)))
+            return dict(rep) if rep is not None else None
 
     def add(self, r: FrontendReading) -> None:
         with self._lock:
@@ -61,9 +81,11 @@ class FrontendLog:
     def window(self, t0: float, t1: float, sample_rate: int) -> dict:
         """Summarise the front end over [t0, t1] (UTC seconds) as sample windows.
 
-        start may predate t0 when the first in-window packet arrives late; the leading gap shows
-        in missing_sample_windows.  The log keeps one unchanged reading per second, so end.t can
-        lag the last packet by up to 1 s.  A falling ad_over counter means radiod restarted:
+        start holds the reading in force at t0: the last one at or before t0 when it is at most
+        gap_sec old, else the first one inside the slot when it arrives within gap_sec of t0, else
+        None.  end holds the last reading at or before t1 when it is at most gap_sec old, else
+        None.  Neither ever carries an older reading forward (spec §4).  The log keeps one
+        unchanged reading per second, so end.t can lag the last packet by up to 1 s.  A falling ad_over counter means radiod restarted:
         ad_over_delta and overloaded are then None and ad_over_reset is True (always a bool).
         Dedup can also widen a step's sample_window by up to 1 s.
         """
@@ -93,8 +115,12 @@ class FrontendLog:
         for a, b in zip(edges, edges[1:]):
             if b - a > self._gap:
                 missing.append([to_s(a), to_s(b)])
-        start = before or (inside[0] if inside else None)
-        end = inside[-1] if inside else before
+        if before is not None:
+            start = before if t0 - before.t <= self._gap else None
+        else:
+            start = inside[0] if inside and inside[0].t - t0 <= self._gap else None
+        last = inside[-1] if inside else before
+        end = last if last is not None and t1 - last.t <= self._gap else None
         overs = [x.ad_over for x in ([before] if before else []) + inside if x.ad_over is not None]
         delta = (overs[-1] - overs[0]) if len(overs) >= 2 else None
         reset = delta is not None and delta < 0     # counter fell: radiod restarted
@@ -203,9 +229,17 @@ class FrontendListener:
                 continue
             if st is None:
                 continue
-            fe = st.frontend
-            if fe.rf_gain is None and fe.ad_over is None:
-                continue
-            self._log.add(FrontendReading(t=time.time(), rf_gain=fe.rf_gain,
-                                          rf_atten=fe.rf_atten, rf_agc=fe.rf_agc,
-                                          if_power=fe.if_power, ad_over=fe.ad_over))
+            self._ingest(st, time.time())
+
+    def _ingest(self, st, now: float) -> None:
+        """One decoded status packet: the channel's own settings, then the front end."""
+        if st.frequency is not None:
+            self._log.add_channel(st.frequency, ssrc=st.ssrc, preset=st.preset,
+                                  agc_enable=st.agc_enable, gain_db=st.gain,
+                                  encoding=st.encoding_name, t=now)
+        fe = st.frontend
+        if fe.rf_gain is None and fe.ad_over is None:
+            return
+        self._log.add(FrontendReading(t=now, rf_gain=fe.rf_gain, rf_atten=fe.rf_atten,
+                                      rf_agc=fe.rf_agc, if_power=fe.if_power,
+                                      ad_over=fe.ad_over))

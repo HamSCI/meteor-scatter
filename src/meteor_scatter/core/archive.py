@@ -55,8 +55,9 @@ class Archive:
         self.max_bytes = int(float(max_gb) * 1e9)
 
     def keep(self, wav_path: Path, freq_hz: int, slot_start_utc: float, sidecar: dict) -> Path:
-        """Move one decoded recording in and write its sidecar.  Raises OSError; restores the recording
-        and removes only files this call created."""
+        """Move one decoded recording in and write its sidecar.  Raises what failed (OSError, or
+        TypeError for a sidecar that will not serialise); restores the recording and removes only
+        files this call created."""
         day_dir = self.root / band_label(freq_hz) / slot_day(slot_start_utc).strftime("%Y%m%d")
         day_dir.mkdir(parents=True, exist_ok=True)
         dest = day_dir / f"{slot_stem(slot_start_utc)}.wav"
@@ -72,7 +73,7 @@ class Archive:
                 shutil.move(str(wav_path), str(dest))
                 wav_moved = True
             os.replace(tmp, side)
-        except OSError:
+        except Exception:
             # Recovery: restore the wav if we moved it, and clean up only files we created.
             if wav_moved:
                 try:
@@ -111,12 +112,17 @@ class Archive:
     def _size(path: Path) -> int:
         return sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
 
+    def age_cutoff(self, today: date) -> date:
+        """The newest day the age cap deletes.  max_days counts today, so with the default 90
+        the archive keeps today and the 89 days before it."""
+        return today - timedelta(days=self.max_days)
+
     def prune(self, today: date) -> list[str]:
         removed = []
         days = self._days()
-        cutoff = today - timedelta(days=self.max_days)
+        cutoff = self.age_cutoff(today)
         for day, label, path in list(days):
-            if day < cutoff:
+            if day <= cutoff:
                 shutil.rmtree(path, ignore_errors=True)
                 removed.append(label)
                 days.remove((day, label, path))
@@ -131,12 +137,21 @@ class Archive:
         return removed
 
     def usage(self, today: date) -> dict:
-        days = self._days()
+        """Size, oldest day and recordings kept today: in total, and per band under "bands"."""
         tag = today.strftime("%Y%m%d")
+        bands: dict[str, dict] = {}
+        for _, label, path in self._days():             # oldest first
+            band, day = label.split("/")
+            b = bands.setdefault(band, {"bytes": 0, "oldest_day": day, "kept_today": 0})
+            b["bytes"] += self._size(path)
+            if day == tag:
+                b["kept_today"] += len(list(path.glob("*.wav")))
+        days = [b["oldest_day"] for b in bands.values()]
         return {
-            "bytes": sum(self._size(p) for _, _, p in days),
-            "oldest_day": days[0][1].split("/")[1] if days else None,
-            "kept_today": sum(len(list(p.glob("*.wav"))) for _, l, p in days if l.endswith(tag)),
+            "bytes": sum(b["bytes"] for b in bands.values()),
+            "oldest_day": min(days) if days else None,
+            "kept_today": sum(b["kept_today"] for b in bands.values()),
+            "bands": bands,
         }
 
     def recordings(self, first: date, last: date) -> list[tuple[str, Path, Path]]:

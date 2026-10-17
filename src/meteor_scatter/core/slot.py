@@ -133,6 +133,10 @@ class SlotWorker:
         self._decoder_kind = decoder_kind
         # MsqpChannel (core/msqp.py) or None: None deletes every recording after decode.
         self._msqp = msqp
+        # MSQP faults that escaped MsqpChannel's own guards: counted, and logged once on the
+        # change and once on recovery, so a persistent fault never writes a line per slot.
+        self.msqp_errors = 0
+        self._msqp_faulty: dict[str, bool] = {}
         # What write_wav did to each spool WAV still awaiting its decode.
         self._slot_stats: dict[Path, WavStats] = {}
         self._spool_spots = spool_spots
@@ -281,21 +285,39 @@ class SlotWorker:
         if self._msqp is not None:
             try:
                 self._msqp.on_slot(slot_start_utc, stats)
-            except Exception:  # noqa: BLE001 — the noise watch must never cost a decode
-                logger.exception("%s %d Hz: MSQP noise watch failed",
-                                 self._mode.upper(), self._frequency_hz)
+            except Exception as e:  # noqa: BLE001 — the noise watch must never cost a decode
+                self._msqp_fault("noise watch", e)
+            else:
+                self._msqp_ok("noise watch")
         return wav_path
+
+    def _msqp_fault(self, what: str, e: Exception) -> None:
+        self.msqp_errors += 1
+        if not self._msqp_faulty.get(what):
+            self._msqp_faulty[what] = True
+            logger.warning("%s %d Hz: MSQP %s failed (%s: %s); decoding continues; "
+                           "logged once until it recovers",
+                           self._mode.upper(), self._frequency_hz, what,
+                           e.__class__.__name__, e, exc_info=True)
+
+    def _msqp_ok(self, what: str) -> None:
+        if self._msqp_faulty.get(what):
+            self._msqp_faulty[what] = False
+            logger.info("%s %d Hz: MSQP %s resumed", self._mode.upper(), self._frequency_hz,
+                        what)
 
     def _finish_slot(self, wav_path: Path, slot_start: float, decodes: list) -> None:
         """Archive a decoded recording, or delete it.  Never leaves a spool WAV behind."""
         stats = self._slot_stats.pop(wav_path, None)
         if self._msqp is not None and decodes and stats is not None:
             try:
-                if self._msqp.on_decoded(wav_path, slot_start, self._sr, stats, decodes):
+                kept = self._msqp.on_decoded(wav_path, slot_start, self._sr, stats, decodes)
+            except Exception as e:  # noqa: BLE001 — archiving must never cost a decode
+                self._msqp_fault("archive", e)
+            else:
+                self._msqp_ok("archive")
+                if kept:
                     return                       # moved into the archive
-            except Exception:  # noqa: BLE001 — archiving must never cost a decode
-                logger.exception("%s %d Hz: MSQP archive failed for %s",
-                                 self._mode.upper(), self._frequency_hz, wav_path.name)
         wav_path.unlink(missing_ok=True)
 
     def _fork_decoder(self, wav_path: Path, slot_start: float) -> None:
@@ -461,8 +483,9 @@ class SlotWorker:
         the hs-uploader file-fallback path.  The ``<DecodeFinished>``
         sentinel and blank lines are dropped by the parser.
 
-        Returns the parsed decodes (``parse_decoded_txt_line`` dicts), ``[]``
-        when none parsed: an empty list means the slot is not archived.
+        Returns the parsed decodes (``parse_decoded_txt_line`` dicts, each with
+        jt9's raw stdout line under ``jt9_line``), ``[]`` when none parsed: an
+        empty list means the slot is not archived.
         """
         raw = [ln for ln in stdout_text.splitlines() if ln.strip()]
         if not raw:
@@ -475,12 +498,13 @@ class SlotWorker:
             decode = _decoder.parse_decoded_txt_line(line)
             if decode is None:
                 continue
-            decodes.append(decode)
             out_lines.append(
                 _decoder.normalize_log_line(
                     decode, slot_struct, self._frequency_hz,
                 )
             )
+            # jt9's own line rides beside the parsed fields into the MSQP sidecar.
+            decodes.append({**decode, "jt9_line": line})
         if not out_lines:
             return []
 

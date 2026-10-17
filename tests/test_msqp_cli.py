@@ -5,8 +5,28 @@ import tomllib
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 from meteor_scatter.msqp_cli import calibrate_scale, cmd_calibrate
+import contextlib, os, signal
+
+
+class _Hung(BaseException):
+    """Not an OSError, so no `except OSError` in the code under test can swallow it."""
+
+
+@contextlib.contextmanager
+def _no_hang(seconds=5):
+    """Fail the test, instead of hanging the suite, if the body blocks (e.g. opening a FIFO)."""
+    def boom(*_):
+        raise _Hung("blocked: an open waited on a FIFO")
+    old = signal.signal(signal.SIGALRM, boom)
+    signal.alarm(seconds)
+    try:
+        yield
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old)
 
 
 class CalibrateTests(unittest.TestCase):
@@ -48,17 +68,59 @@ class CmdCalibrateTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def _noise(self, freq, floors):
-        lines = [f"{1797206370 + 30 * i} {f}" for i, f in enumerate(floors)]
+    NOW = 1797206370.0 + 30 * 20         # just after the last slot _noise writes by default
+
+    def _noise(self, freq, floors, end=None):
+        """One line per floor, 30 s apart, the last one 30 s before `end` (default NOW)."""
+        end = self.NOW if end is None else end
+        n = len(floors)
+        lines = [f"{int(end - 30 * (n - i))} {f}" for i, f in enumerate(floors)]
         (self.spool / "rx.local" / f"noise-{freq}.txt").write_text("\n".join(lines) + "\n")
 
     def _run(self, dry_run=False):
         args = argparse.Namespace(instance="AC0G-B4", config=self.cfg, dry_run=dry_run,
                                   log_level=None)
         out, err = io.StringIO(), io.StringIO()
-        with redirect_stdout(out), redirect_stderr(err):
+        with redirect_stdout(out), redirect_stderr(err), \
+                mock.patch("meteor_scatter.msqp_cli._now", return_value=self.NOW):
             rc = cmd_calibrate(args)
         return rc, out.getvalue(), err.getvalue()
+
+    def test_uses_only_the_last_ten_minutes(self):
+        # 100 old slots at -60 dBFS, then a receiver change: 12 recent slots at -81
+        lines = [f"{int(self.NOW - 3600 + 30 * i)} -60.0" for i in range(100)]
+        lines += [f"{int(self.NOW - 30 * (12 - i))} -81.0" for i in range(12)]
+        (self.spool / "rx.local" / "noise-28145000.txt").write_text("\n".join(lines) + "\n")
+        rc, out, err = self._run(dry_run=True)
+        self.assertEqual(rc, 0, err)
+        self.assertIn("10m: noise -81.0 dBFS → scale_db 31.0", out)
+        self.assertIn("12 slots", out)
+        self.assertIn("UTC", out)
+
+    def test_stale_log_from_a_stopped_daemon_refuses(self):
+        self._noise(28145000, [-81.0] * 40, end=self.NOW - 3600)
+        rc, out, err = self._run(dry_run=True)
+        self.assertEqual(rc, 2)
+        self.assertIn("last 10 minutes", out)
+        self.assertIn("have 0", out)
+
+    def test_future_lines_are_ignored(self):
+        self._noise(28145000, [-81.0] * 12, end=self.NOW + 7200)
+        rc, out, _ = self._run(dry_run=True)
+        self.assertEqual(rc, 2)
+
+    def test_fifo_noise_log_does_not_hang(self):
+        os.mkfifo(self.spool / "rx.local" / "noise-28145000.txt")
+        with _no_hang():
+            rc, out, _ = self._run(dry_run=True)
+        self.assertEqual(rc, 2)
+
+    def test_damaged_bytes_in_the_log_do_not_crash(self):
+        self._noise(28145000, [-81.0] * 12)
+        p = self.spool / "rx.local" / "noise-28145000.txt"
+        p.write_bytes(b"\xff\xfe junk\n" + p.read_bytes())
+        rc, out, err = self._run(dry_run=True)
+        self.assertEqual(rc, 0, err)
 
     def test_writes_both_tables_and_skips_a_thin_band(self):
         self._noise(28145000, [-81.0] * 12)
@@ -192,6 +254,23 @@ class PackageHardeningTests(unittest.TestCase):
 
     def _build(self, first=date(2026, 12, 13), last=date(2026, 12, 14)):
         return build_package(self.a, CFG, "AC0G", "EM38ww", first, last, self.out, "v1")
+
+    def test_fifo_in_place_of_a_wav_is_skipped_without_hanging(self):
+        wav = self.day13 / "261213_235930.wav"
+        wav.unlink(); os.mkfifo(wav)
+        with _no_hang():
+            r = self._build()
+        self.assertEqual(r.files, 1)
+        self.assertTrue(any("261213_235930.wav" in n and "not a regular file" in n
+                            for n in r.skipped))
+
+    def test_fifo_in_place_of_a_sidecar_is_skipped_without_hanging(self):
+        side = self.day13 / "261213_235930.json"
+        side.unlink(); os.mkfifo(side)
+        with _no_hang():
+            r = self._build()
+        self.assertEqual(r.files, 1)
+        self.assertEqual(len(r.skipped), 1)
 
     def test_corrupt_sidecar_skipped_and_reported(self):
         (self.day13 / "261213_235930.json").write_text("{not json")
@@ -405,12 +484,62 @@ class CmdPackageTests(unittest.TestCase):
         # per-instance root, as the daemon lays it out
         self.a = Archive(self.archive_dir / instance_dirname("AC0G/B4"), 90, 2)
         _fill(self.a, self.root)
+        # the unit's EnvironmentFile list, redirected into the test's tree; no reporter id in
+        # this process's environment, as under sudo
+        self.coord = self.root / "coordination.env"
+        self.envdir = self.root / "env"
+        self.envdir.mkdir()
+        self.patches = [mock.patch("meteor_scatter.config.COORDINATION_ENV", self.coord),
+                        mock.patch("meteor_scatter.config.INSTANCE_ENV_DIR", self.envdir),
+                        mock.patch.dict(os.environ, {}, clear=False)]
+        for p in self.patches:
+            p.start()
+        os.environ.pop("STATION_REPORTER_ID", None)
 
     def tearDown(self):
+        for p in reversed(self.patches):
+            p.stop()
         self.tmp.cleanup()
 
-    def _run(self, first="2026-12-13", last="2026-12-14"):
-        args = argparse.Namespace(instance="AC0G-B4", config=self.cfg, date_from=first,
+    def _no_instance_block(self):
+        self.cfg.write_text(PKG_CONFIG.format(archive=self.archive_dir).replace(
+            '[instance]\nreporter_id = "AC0G/B4"\n\n', ""))
+
+    def test_sudo_reporter_id_only_in_coordination_env(self):
+        self._no_instance_block()
+        self.coord.write_text('# sigmond\nSTATION_REPORTER_ID="AC0G/B4"\n')
+        rc, out, err = self._run(instance="AC0G\\x3dB4")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("2 recordings", out)
+        d = self.root / "out" / "AC0G-B4 EM38WW 20261213-14 Meteor Scatter QSO Party"
+        md = json.loads((d / "metadata.json").read_text())["metadata"]
+        self.assertTrue(md["title"].startswith("AC0G/B4 EM38WW"))
+
+    def test_without_the_files_the_radiod_archive_is_empty(self):
+        # control for the test above: the same run with no env file misses the archive
+        self._no_instance_block()
+        rc, out, err = self._run(instance="AC0G\\x3dB4")
+        self.assertEqual(rc, 2)
+        self.assertIn("no recordings", err)
+
+    def test_per_instance_env_file_overrides_coordination_env(self):
+        self._no_instance_block()
+        self.coord.write_text("STATION_REPORTER_ID=AC0G/XX\n")
+        (self.envdir / "AC0G=B4.env").write_text("STATION_REPORTER_ID='AC0G/B4'\n")
+        rc, out, err = self._run(instance="AC0G=B4")
+        self.assertEqual(rc, 0, err)
+
+    def test_instance_disagreeing_with_the_files_refused(self):
+        self._no_instance_block()
+        self.coord.write_text("STATION_REPORTER_ID=AC0G/B4\n")
+        rc, out, err = self._run(instance="AC0G=ND")
+        self.assertEqual(rc, 2)
+        self.assertIn("AC0G=ND", err)
+        self.assertIn("AC0G/B4", err)
+        self.assertFalse((self.root / "out").exists())
+
+    def _run(self, first="2026-12-13", last="2026-12-14", instance="AC0G-B4"):
+        args = argparse.Namespace(instance=instance, config=self.cfg, date_from=first,
                                   date_to=last, out=str(self.root / "out"), log_level=None)
         out, err = io.StringIO(), io.StringIO()
         with redirect_stdout(out), redirect_stderr(err):
@@ -504,6 +633,18 @@ class DraftTests(unittest.TestCase):
 
     def tearDown(self):
         self.tmp.cleanup()
+
+    def test_fifo_input_refused_without_hanging(self):
+        (self.pkg / "ALL.TXT").unlink(); os.mkfifo(self.pkg / "ALL.TXT")
+        z = FakeZenodo()
+        with _no_hang(), self.assertRaisesRegex(DraftRefused, "not a regular file"):
+            run_draft(self.pkg, z, "c", "upload")
+        self.assertEqual(z.calls, [])
+
+    def test_fifo_state_file_refused_without_hanging(self):
+        os.mkfifo(self.pkg / "draft.json")
+        with _no_hang(), self.assertRaisesRegex(DraftRefused, "not a regular file"):
+            run_draft(self.pkg, FakeZenodo(), "c", "upload")
 
     def test_full_run_order_and_no_publish(self):
         z = FakeZenodo()

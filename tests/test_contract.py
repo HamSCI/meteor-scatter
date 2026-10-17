@@ -357,3 +357,49 @@ class MsqpInventoryFromRuntimeState(unittest.TestCase):
 
     def test_absent_state_reports_null(self):
         self.assertIsNone(self._inventory()["msqp"])
+
+
+class MsqpSinkAndValidateTests(unittest.TestCase):
+    """The archive appears as a data sink; a bad [msqp] block warns in validate and costs
+    only the archive (load_config no longer refuses it)."""
+
+    def _cfg(self, msqp=None):
+        cfg = {"station": {"callsign": "AC0G", "grid_square": "EM38ww"},
+               "paths": {"spool_dir": "/tmp/meteor-scatter-test/spool",
+                         "log_dir": "/tmp/meteor-scatter-test/log"},
+               "instance": {"reporter_id": "AC0G/B4"},
+               "radiod": [{"status": "test-status.local", "msk144": {"freqs_hz": [50260000]}}]}
+        if msqp is not None:
+            cfg["msqp"] = msqp
+        return cfg
+
+    def test_archive_is_a_file_sink_with_the_age_cap(self):
+        from meteor_scatter.contract import build_inventory
+        inv = build_inventory(self._cfg({"archive_dir": "/srv/arc", "archive_max_days": 30}),
+                              Path("/x.toml"))
+        sinks = inv["instances"][0]["data_sinks"]
+        arc = [s for s in sinks if s["target"] == "/srv/arc/AC0G-B4"]
+        self.assertEqual(len(arc), 1)
+        self.assertEqual(arc[0]["kind"], "file")
+        self.assertEqual(arc[0]["retention_days"], 30)
+
+    def test_bad_msqp_block_does_not_stop_load_config(self):
+        import tempfile
+        from meteor_scatter.config import load_config
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "c.toml"
+            p.write_text('[msqp]\narchive_max_gb = "2"\n')
+            load_config(p)                     # must not raise
+
+    def test_validate_warns_on_a_bad_msqp_block(self):
+        from meteor_scatter.contract import build_validate
+        out = build_validate(self._cfg({"archive_max_gb": "2"}))
+        msgs = [i for i in out["issues"] if "msqp" in i["message"]]
+        self.assertEqual(len(msgs), 1)
+        self.assertEqual(msgs[0]["severity"], "warn")
+        self.assertIn("archive_max_gb", msgs[0]["message"])
+
+    def test_inventory_survives_a_bad_msqp_block(self):
+        from meteor_scatter.contract import build_inventory
+        inv = build_inventory(self._cfg({"archive_max_gb": "2"}), Path("/x.toml"))
+        self.assertEqual(len(inv["instances"]), 1)

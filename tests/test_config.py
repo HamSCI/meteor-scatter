@@ -270,3 +270,83 @@ class KeepWavRetirementTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class UnitEnvironmentTests(unittest.TestCase):
+    """STATION_REPORTER_ID from the files the systemd unit loads, when the variable is absent
+    (sudo's env_reset drops it).  The daemon and `msqp package` share this rule."""
+
+    def setUp(self):
+        import tempfile
+        from unittest import mock
+        self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name)
+        self.coord = root / "coordination.env"
+        self.envdir = root / "env"
+        self.envdir.mkdir()
+        self.patches = [mock.patch("meteor_scatter.config.COORDINATION_ENV", self.coord),
+                        mock.patch("meteor_scatter.config.INSTANCE_ENV_DIR", self.envdir),
+                        mock.patch.dict(os.environ, {}, clear=False)]
+        for p in self.patches:
+            p.start()
+        os.environ.pop("STATION_REPORTER_ID", None)
+
+    def tearDown(self):
+        for p in reversed(self.patches):
+            p.stop()
+        self.tmp.cleanup()
+
+    def test_parse_like_systemd(self):
+        from meteor_scatter.config import parse_env_file
+        self.coord.write_text('# comment\n; also a comment\n\nSTATION_REPORTER_ID="AC0G/B4"\n'
+                              "OTHER='x y'\nnot a pair\n  SPACED = v \n")
+        self.assertEqual(parse_env_file(self.coord),
+                         {"STATION_REPORTER_ID": "AC0G/B4", "OTHER": "x y", "SPACED": "v"})
+
+    def test_unit_files_in_unit_order(self):
+        from meteor_scatter.config import unit_environment_files
+        self.assertEqual(unit_environment_files("AC0G\\x3dB4"),
+                         [self.coord, self.envdir / "AC0G\\x3dB4.env",
+                          self.envdir / "AC0G=B4.env"])
+        self.assertEqual(unit_environment_files("AC0G/B4"),
+                         unit_environment_files("AC0G=B4"))
+        # %I turns a dash into a slash, as systemd does
+        self.assertEqual(unit_environment_files("bee1-rx888")[1:],
+                         [self.envdir / "bee1-rx888.env", self.envdir / "bee1" / "rx888.env"])
+
+    def test_variable_absent_files_present(self):
+        from meteor_scatter.config import resolve_reporter_id
+        self.coord.write_text('STATION_REPORTER_ID="AC0G/B4"\n')
+        self.assertEqual(resolve_reporter_id({}, instance="AC0G=B4"),
+                         ("AC0G/B4", str(self.coord)))
+
+    def test_later_file_overrides(self):
+        from meteor_scatter.config import resolve_reporter_id
+        self.coord.write_text("STATION_REPORTER_ID=AC0G/B4\n")
+        (self.envdir / "AC0G=ND.env").write_text("STATION_REPORTER_ID=AC0G/ND\n")
+        rid, src = resolve_reporter_id({}, instance="AC0G=ND")
+        self.assertEqual(rid, "AC0G/ND")
+        self.assertTrue(src.endswith("AC0G=ND.env"))
+
+    def test_variable_in_the_environment_wins_and_files_are_not_read(self):
+        from meteor_scatter.config import resolve_reporter_id
+        self.coord.write_text("STATION_REPORTER_ID=AC0G/B4\n")
+        os.environ["STATION_REPORTER_ID"] = "AC0G/XX"
+        self.assertEqual(resolve_reporter_id({}, instance="AC0G=B4"),
+                         ("AC0G/XX", "environment"))
+
+    def test_empty_variable_in_the_environment_reads_as_none(self):
+        from meteor_scatter.config import resolve_reporter_id
+        self.coord.write_text("STATION_REPORTER_ID=AC0G/B4\n")
+        os.environ["STATION_REPORTER_ID"] = ""
+        self.assertEqual(resolve_reporter_id({}, instance="AC0G=B4"), (None, None))
+
+    def test_config_instance_block_wins(self):
+        from meteor_scatter.config import resolve_reporter_id
+        self.coord.write_text("STATION_REPORTER_ID=AC0G/B4\n")
+        self.assertEqual(resolve_reporter_id({"instance": {"reporter_id": "AC0G/Q"}},
+                                             instance="AC0G=B4"), ("AC0G/Q", "config"))
+
+    def test_nothing_anywhere(self):
+        from meteor_scatter.config import resolve_reporter_id
+        self.assertEqual(resolve_reporter_id({}, instance="AC0G=B4"), (None, None))

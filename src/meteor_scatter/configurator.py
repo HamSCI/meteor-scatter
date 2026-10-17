@@ -851,6 +851,7 @@ def cmd_config_show(args) -> int:
         if config_path.is_file():
             try:
                 effective = load_config(config_path)
+                get_msqp(effective)
             except (FileNotFoundError, ValueError):
                 effective = copy.deepcopy(DEFAULTS)
         else:
@@ -1004,8 +1005,9 @@ def apply_payload(config_path: Path, payload: dict) -> int:
         existing = {}
     merged = _deep_merge(existing, payload)
 
-    # [msqp] validates even without a [[radiod]] block, so apply refuses
-    # anything load_config would refuse later.
+    # [msqp] validates here, even without a [[radiod]] block.  load_config
+    # leaves [msqp] alone so a bad block never stops the daemon; apply is
+    # where the operator hears about it.
     try:
         get_msqp(merged)
     except ValueError as exc:

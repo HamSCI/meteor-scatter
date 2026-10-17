@@ -353,6 +353,56 @@ class ArchiveDecisionTests(unittest.TestCase):
             self.assertEqual(m.slots, [900_000_000.0])
             self.assertIsInstance(w._slot_stats[wav], WavStats)
 
+    def test_decode_keeps_jt9_raw_line(self):
+        m = _FakeMsqp()
+        self._reap_with(self.LINE, m)
+        self.assertEqual(m.calls[0][1][0]["jt9_line"], "000000  -5  0.2 1500 & CQ AC0G EM38")
+
+    def test_raising_archive_logs_once_and_once_on_recovery(self):
+        class Raising(_FakeMsqp):
+            broken = True
+
+            def on_decoded(self, *a):
+                if self.broken:
+                    raise RuntimeError("bug")
+                return super().on_decoded(*a)
+        m = Raising()
+        with tempfile.TemporaryDirectory() as td:
+            w, *_ = _make_worker(td, msqp=m)
+
+            def reap():
+                wav = Path(td) / "msk144" / "x.wav"
+                wav.parent.mkdir(parents=True, exist_ok=True)
+                wav.write_bytes(b"\0" * 64)
+                w._slot_stats[wav] = WavStats(30.0, 0, -80.0)
+                proc = mock.MagicMock()
+                proc.poll.return_value = 0
+                proc.stdout.read.return_value = self.LINE.encode()
+                proc.stderr.read.return_value = b""
+                w._pending_procs = [(proc, wav, 1797206370.0, 0.0)]
+                w._reap_finished()
+                return wav.exists()
+            with self.assertLogs("meteor_scatter.core.slot", "WARNING") as cm:
+                for _ in range(3):
+                    self.assertFalse(reap())
+            self.assertEqual(len([r for r in cm.records if "MSQP archive" in r.getMessage()]), 1)
+            self.assertEqual(w.msqp_errors, 3)
+            m.broken = False
+            with self.assertLogs("meteor_scatter.core.slot", "INFO") as cm:
+                reap(); reap()
+            self.assertEqual(len([r for r in cm.records if "resumed" in r.getMessage()]), 1)
+
+    def test_raising_noise_watch_logs_once(self):
+        class Raising(_FakeMsqp):
+            def on_slot(self, *a):
+                raise ValueError("bad")
+        with tempfile.TemporaryDirectory() as td:
+            w, *_ = _make_worker(td, msqp=Raising())
+            with self.assertLogs("meteor_scatter.core.slot", "WARNING") as cm:
+                for i in range(3):
+                    w._write_spool_wav(np.full(SR, 0.01, dtype=np.float32), 900_000_000.0 + 30 * i)
+            self.assertEqual(len(cm.records), 1)
+
     def test_mutant_keep_everything_would_fail(self):
         # Guards the keep decision: a worker that archived every slot would call on_decoded here.
         m = _FakeMsqp()

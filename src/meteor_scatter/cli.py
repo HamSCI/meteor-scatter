@@ -347,10 +347,10 @@ def _handle_daemon(args):
     from meteor_scatter.config import (
         DEFAULT_CONFIG_PATH,
         ensure_sources,
-        extract_reporter_id,
         load_config,
         resolve_config_path,
         resolve_radiod_block,
+        resolve_reporter_id,
         RADIOD_STATUS_PLACEHOLDER,
         is_placeholder_status,
     )
@@ -386,11 +386,10 @@ def _handle_daemon(args):
     # One id for every upload path; [instance] stays the per-instance
     # override.  Without either, warn loudly: the radiod-hostname
     # fallback misattributes spots all the way to PSKReporter.
-    reporter_id = (
-        extract_reporter_id(config)
-        or (os.environ.get("STATION_REPORTER_ID") or "").strip()
-        or None
-    )
+    # One rule for the daemon and `msqp package` (config.resolve_reporter_id).
+    # Under systemd the variable arrives through the unit's EnvironmentFile=
+    # list; run by hand without it, the same files supply it.
+    reporter_id, _ = resolve_reporter_id(config, instance=args.instance)
     if reporter_id is None:
         logging.getLogger(__name__).warning(
             "no reporter_id configured ([instance] reporter_id or "

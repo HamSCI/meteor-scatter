@@ -66,6 +66,30 @@ class KeepAndPruneTests(unittest.TestCase):
         self.assertEqual(removed, ["6m/20260901"])
         self.assertTrue((self.root / "6m" / "20261213").exists())
 
+    def test_age_cap_keeps_exactly_max_days(self):
+        a = Archive(self.root, max_days=3, max_gb=2)
+        for d in ("20261210", "20261211", "20261212", "20261213"):
+            (self.root / "6m" / d).mkdir(parents=True)
+            (self.root / "6m" / d / "a.wav").write_bytes(b"\0")
+        removed = a.prune(date(2026, 12, 13))
+        # today and the two days before it: three days, not four
+        self.assertEqual(removed, ["6m/20261210"])
+        self.assertEqual(sorted(p.name for p in (self.root / "6m").iterdir()),
+                         ["20261211", "20261212", "20261213"])
+
+    def test_usage_breaks_down_by_band(self):
+        a = Archive(self.root, max_days=90, max_gb=2)
+        a.keep(self._wav("a.wav", size=500), 28145000, T0, {})
+        a.keep(self._wav("b.wav", size=300), 50260000, T0 - 86400, {})
+        u = a.usage(date(2026, 12, 13))
+        self.assertEqual(set(u["bands"]), {"10m", "6m"})
+        self.assertEqual(u["bands"]["6m"]["oldest_day"], "20261212")
+        self.assertEqual(u["bands"]["6m"]["kept_today"], 0)
+        self.assertEqual(u["bands"]["10m"]["kept_today"], 1)
+        self.assertGreaterEqual(u["bands"]["10m"]["bytes"], 500)
+        self.assertEqual(u["bytes"], u["bands"]["10m"]["bytes"] + u["bands"]["6m"]["bytes"])
+        self.assertEqual(u["oldest_day"], "20261212")
+
     def test_prune_by_size_removes_oldest_day_first(self):
         a = Archive(self.root, max_days=90, max_gb=0.000002)   # 2000 bytes
         for d in ("20261211", "20261212", "20261213"):

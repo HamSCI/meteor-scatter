@@ -24,35 +24,66 @@ from meteor_scatter import msqp_package as P
 from meteor_scatter.zenodo import Zenodo, ZenodoError
 
 MIN_SLOTS = 10          # five minutes at 30 s
+CALIBRATE_WINDOW_SEC = 600.0     # calibrate reads only the last ten minutes of the noise log
+FUTURE_SLACK_SEC = 60.0          # a line stamped further ahead than this comes from a clock step
+
+
+def _now() -> float:
+    return time.time()
 
 
 def calibrate_scale(floors, target_dbfs=-50.0):
     """(scale_db, noise_cal_dbfs) from a band's per-slot noise floors, by the median."""
     vals = sorted(f for f in floors if f is not None)
     if len(vals) < MIN_SLOTS:
-        raise ValueError(f"need {MIN_SLOTS} slots of noise measurements; have {len(vals)} — "
+        raise ValueError(f"need {MIN_SLOTS} slots of noise measurements from the last "
+                         f"{CALIBRATE_WINDOW_SEC / 60:.0f} minutes; have {len(vals)} — "
                          f"let the daemon run five minutes and try again")
     mid = len(vals) // 2
     cal = vals[mid] if len(vals) % 2 else (vals[mid - 1] + vals[mid]) / 2
     return round(target_dbfs - cal, 1), round(cal, 1)
 
 
-def read_noise_log(path: Path) -> list[float]:
-    """The floors in one noise-<freq>.txt; missing file or malformed lines yield nothing."""
+def read_noise_log(path: Path) -> list[tuple[float, float]]:
+    """(slot_utc, floor) pairs from one noise-<freq>.txt; a missing file or a malformed line
+    yields nothing.  The spool belongs to the daemon's account and this may run as root, so a
+    link or anything but a regular file (a FIFO would hang a plain open) also yields nothing."""
     try:
-        text = Path(path).read_text()
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
     except OSError:
         return []
-    floors = []
+    with os.fdopen(fd, "rb") as f:
+        try:
+            if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
+                return []
+            text = f.read().decode(errors="replace")
+        except OSError:
+            return []
+    samples = []
     for line in text.splitlines():
         parts = line.split()
         if len(parts) != 2:
             continue
         try:
-            floors.append(float(parts[1]))
+            samples.append((float(parts[0]), float(parts[1])))
         except ValueError:
             continue
-    return floors
+    return samples
+
+
+def recent_floors(samples, now: float, window_sec: float = CALIBRATE_WINDOW_SEC):
+    """The floors whose slot lies within the last window_sec before `now`, with the first and
+    last slot used (None, None when none qualify).  The log keeps an hour and survives
+    restarts, so older lines would describe the receiver before a change."""
+    kept = sorted((t, f) for t, f in samples
+                  if now - window_sec <= t <= now + FUTURE_SLACK_SEC)
+    if not kept:
+        return [], None, None
+    return [f for _, f in kept], kept[0][0], kept[-1][0]
+
+
+def _utc_hms(t: float) -> str:
+    return datetime.fromtimestamp(t, timezone.utc).strftime("%H:%M:%S")
 
 
 REQUIRED_OPERATOR_FIELDS = ("operator", "contact_email", "antenna")
@@ -94,9 +125,12 @@ class _Missing(ValueError):
 
 def _open_regular(name: str, dir_fd):
     """(fd, fstat) for a regular, singly-linked file `name` inside the directory dir_fd,
-    opened without following a link, or ValueError(reason).  The caller owns the fd."""
+    opened without following a link, or ValueError(reason).  The caller owns the fd.
+    O_NONBLOCK keeps a FIFO in the file's place from hanging the open; the S_ISREG check then
+    refuses it.  On a regular file the flag changes nothing."""
     try:
-        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=dir_fd)
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+                     dir_fd=dir_fd)
     except OSError as e:
         if e.errno == errno.ENOENT:
             raise _Missing(f"{name} is missing")
@@ -319,10 +353,31 @@ def _parse_day(text, flag):
         raise PackageRefused(f"{flag} wants YYYY-MM-DD; got {text!r}")
 
 
+def _check_instance_matches(instance, reporter, source, *, per_instance: bool) -> None:
+    """Refuse when --instance names a reporter id other than the one the environment gives.
+    An instance names a reporter id when it holds "=" or "/", or when it selected a
+    per-instance config; a legacy instance named after its radiod names none."""
+    from meteor_scatter._reporter_id import to_storage
+    if not instance or not reporter or not (per_instance or "=" in instance or "/" in instance):
+        return
+
+    def norm(x):
+        try:
+            return to_storage(x)
+        except ValueError:
+            return x
+    if norm(instance) != norm(reporter):
+        raise PackageRefused(
+            f"--instance {instance} names a different reporter id than STATION_REPORTER_ID "
+            f"{reporter} (from {source}); the daemon for that instance archives under the "
+            f"latter.  Pass the matching --instance, or set [instance] reporter_id in the "
+            f"instance config")
+
+
 def cmd_package(args) -> int:
-    from meteor_scatter.config import (extract_reporter_id, get_msqp, load_config,
+    from meteor_scatter.config import (PER_INSTANCE_CONFIG_DIR, get_msqp, load_config,
                                        resolve_config_path, resolve_msqp_instance_id,
-                                       resolve_radiod_status)
+                                       resolve_radiod_status, resolve_reporter_id)
     from meteor_scatter._reporter_id import unescape_systemd_instance
     from meteor_scatter.core.archive import Archive, instance_dirname
     from meteor_scatter.core.recorder import _software_version
@@ -337,8 +392,13 @@ def cmd_package(args) -> int:
         blocks = config.get("radiod", [])
         if isinstance(blocks, dict):
             blocks = [blocks]
-        reporter = (extract_reporter_id(config)
-                    or (os.environ.get("STATION_REPORTER_ID") or "").strip() or None)
+        # The daemon's rule (config.resolve_reporter_id).  Under sudo the variable is gone,
+        # so the files the unit loads for this instance supply it.
+        reporter, source = resolve_reporter_id(config, instance=args.instance)
+        if source not in (None, "config"):
+            _check_instance_matches(instance, reporter, source,
+                                    per_instance=(config_path == PER_INSTANCE_CONFIG_DIR
+                                                  / f"{instance}.toml"))
         radiod_id = ""
         if len(blocks) == 1 or (blocks and reporter):
             radiod_id = resolve_radiod_status(blocks[0])
@@ -450,9 +510,11 @@ def run_draft(pkg_dir: Path, zenodo, community_id: str, upload_mode: str) -> str
     the draft's URL.  Progress lives in <pkg_dir>/draft.json, so a re-run after any failure
     resumes without a second draft or a duplicate upload.
 
-    The package directory belongs to root and its parent to the daemon's account, so the
-    directory is opened once (no link, owner and mode checked) and every file inside is reached
-    through that fd without following a link: never by pathname after the open."""
+    Root owns the package directory and the msqp/ root above it.  The daemon's account owns
+    /var/lib/meteor-scatter above both, so it can rename msqp/ aside and put something else in
+    its place.  The directory is therefore opened once (no link, owner and mode checked), and
+    every file inside is reached through that fd without following a link: never by pathname
+    after the open."""
     _require_upload_mode(upload_mode)
     if not community_id:
         raise DraftRefused(COMMUNITY_UNKNOWN)
@@ -624,6 +686,7 @@ def cmd_calibrate(args) -> int:
         raw_blocks = [raw_blocks]
     many = len(raw_blocks) > 1
     done = 0
+    now = _now()
     for block in raw_blocks:
         msk = block.get("msk144", {}) or {}
         freqs = list(msk.get("freqs_hz", []))
@@ -636,13 +699,15 @@ def cmd_calibrate(args) -> int:
             label = band_label(freq)
             if many:
                 label = f"{radiod_id} {label}"
-            floors = read_noise_log(spool / radiod_id / f"noise-{int(freq)}.txt")
+            floors, first_t, last_t = recent_floors(
+                read_noise_log(spool / radiod_id / f"noise-{int(freq)}.txt"), now)
             try:
                 scale, cal = calibrate_scale(floors)
             except ValueError as e:
                 print(f"{label}: {e}")
                 continue
-            print(f"{label}: noise {cal:.1f} dBFS → scale_db {scale:.1f}")
+            print(f"{label}: noise {cal:.1f} dBFS → scale_db {scale:.1f} "
+                  f"({len(floors)} slots, {_utc_hms(first_t)}–{_utc_hms(last_t)} UTC)")
             scales[str(int(freq))] = scale
             cals[str(int(freq))] = cal
             done += 1

@@ -121,8 +121,81 @@ MSQP_DEFAULTS: dict[str, Any] = {
 def resolve_msqp_instance_id(config: dict, reporter_id: Optional[str], radiod_id: str) -> str:
     """Who one source's MSQP recordings belong to: the reporter id the daemon was given,
     else the config's [instance] reporter id, else the radiod id.  Names the sidecar's
-    reporter_id and the archive root; the daemon and `msqp package` both call it."""
+    reporter_id and the archive root; the daemon and `msqp package` both call it, each with
+    the reporter id from resolve_reporter_id."""
     return reporter_id or extract_reporter_id(config) or radiod_id
+
+
+# The files systemd/meteor-scatter@.service loads, in its order (EnvironmentFile=, each
+# optional).  A later file overrides an earlier one.
+COORDINATION_ENV = Path("/etc/sigmond/coordination.env")
+INSTANCE_ENV_DIR = Path("/etc/meteor-scatter/env")
+REPORTER_ID_VAR = "STATION_REPORTER_ID"
+
+
+def parse_env_file(path: Path) -> dict[str, str]:
+    """KEY=VALUE lines read the way systemd's EnvironmentFile= reads them: blank lines and
+    lines starting with # or ; skipped, whitespace around key and value trimmed, one pair of
+    surrounding quotes stripped.  A missing or unreadable file gives {}."""
+    out: dict[str, str] = {}
+    try:
+        text = Path(path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return out
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line[0] in "#;" or "=" not in line:
+            continue
+        key, _, val = line.partition("=")
+        val = val.strip()
+        if len(val) >= 2 and val[0] == val[-1] and val[0] in "\"'":
+            val = val[1:-1]
+        out[key.strip()] = val
+    return out
+
+
+def unit_environment_files(instance: str) -> list[Path]:
+    """The env files meteor-scatter@<instance>.service loads, in order: coordination.env, then
+    env/%i.env (the instance as the unit name spells it), then env/%I.env (systemd's
+    unescaping, which also turns "-" into "/").  Any spelling of a reporter id names the same
+    unit: AC0G/B4, AC0G=B4 and AC0G\\x3dB4 all give the unit AC0G\\x3dB4."""
+    from meteor_scatter._reporter_id import (systemd_instance, to_storage,
+                                             unescape_systemd_instance)
+    name = unescape_systemd_instance(instance.strip())
+    if "/" in name:
+        try:
+            name = to_storage(name)
+        except ValueError:
+            pass
+    percent_i = systemd_instance(name)
+    percent_I = unescape_systemd_instance(percent_i.replace("-", "/"))
+    return [COORDINATION_ENV, INSTANCE_ENV_DIR / f"{percent_i}.env",
+            INSTANCE_ENV_DIR / f"{percent_I}.env"]
+
+
+def resolve_reporter_id(config: dict, instance: Optional[str] = None,
+                        environ=None) -> tuple[Optional[str], Optional[str]]:
+    """(reporter id, where it came from) by the daemon's rule: the config's [instance]
+    reporter_id, else STATION_REPORTER_ID.  When the variable is absent from this process's
+    environment (sudo resets it) and an instance is named, read it from the files the unit
+    would load for that instance, so a root-run command finds what the daemon was given.
+    An empty value means no reporter id.  The source reads "config", "environment", the
+    file's path, or None."""
+    rid = extract_reporter_id(config)
+    if rid:
+        return rid, "config"
+    env = os.environ if environ is None else environ
+    if REPORTER_ID_VAR in env:
+        val = (env.get(REPORTER_ID_VAR) or "").strip()
+        return (val, "environment") if val else (None, None)
+    if not instance:
+        return None, None
+    val, src = None, None
+    for path in unit_environment_files(instance):
+        got = parse_env_file(path)
+        if REPORTER_ID_VAR in got:
+            val, src = got[REPORTER_ID_VAR].strip(), str(path)
+    return (val, src) if val else (None, None)
 
 
 def get_msqp(config: dict) -> dict:
@@ -209,8 +282,9 @@ def load_config(path: Path | None = None) -> dict:
             f"(frames; ~50 Hz at default blocktime); got {lifetime!r}"
         )
 
-    get_msqp(raw)
-
+    # [msqp] is validated where it is used, not here: the daemon logs a bad block and runs
+    # without an archive (recorder._build_msqp_runtimes), `validate` warns, `config apply`
+    # refuses, and `msqp package` / `draft` refuse.  A typo there must never stop decoding.
     return raw
 
 

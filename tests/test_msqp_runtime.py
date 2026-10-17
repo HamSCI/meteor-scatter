@@ -44,6 +44,46 @@ class MsqpChannelTests(unittest.TestCase):
         self.assertIn("frontend_status", side["frontend"])
         self.assertEqual(side["software_version"], "test")
 
+    def test_channel_requested_preset_comes_from_the_config(self):
+        ch = MsqpChannel(archive=self.ch._archive, frontend=self.fe, freq_hz=50260000,
+                         reporter_id="AC0G/B4", scale_db=None, noise=NoiseWatch(None),
+                         version="test", preset="iq")
+        ch.on_decoded(self.wav, T0, 12000, WavStats(0.0, 0, -80.0), [{"message": "x"}])
+        side = json.loads((Path(self.tmp.name) / "a/6m/20261213/261213_235930.json").read_text())
+        self.assertEqual(side["channel_requested"]["preset"], "iq")
+
+    def test_channel_reported_from_the_listener(self):
+        self.fe.add_channel(50260000.0, ssrc=9, preset="usb", agc_enable=True, gain_db=6.0,
+                            encoding="F32LE", t=T0)
+        self.ch.on_decoded(self.wav, T0, 12000, WavStats(0.0, 0, -80.0), [{"message": "x"}])
+        side = json.loads((Path(self.tmp.name) / "a/6m/20261213/261213_235930.json").read_text())
+        self.assertEqual(side["channel_reported"]["agc_enable"], True)
+        self.assertEqual(side["channel_reported"]["gain_db"], 6.0)
+        self.assertEqual(side["channel_reported"]["preset"], "usb")
+        self.assertEqual(side["channel_reported"]["encoding"], "F32LE")
+
+    def test_channel_reported_null_when_never_seen(self):
+        self.ch.on_decoded(self.wav, T0, 12000, WavStats(0.0, 0, -80.0), [{"message": "x"}])
+        side = json.loads((Path(self.tmp.name) / "a/6m/20261213/261213_235930.json").read_text())
+        self.assertIn("channel_reported", side)
+        self.assertIsNone(side["channel_reported"])
+
+    def test_non_oserror_warns_once_counts_and_recovers(self):
+        st = WavStats(0.0, 0, -80.0)
+        with self.assertLogs("meteor_scatter.core.msqp", level="WARNING") as logs:
+            with unittest.mock.patch.object(self.ch._archive, "keep",
+                                            side_effect=TypeError("not serialisable")):
+                for i in range(3):
+                    self.assertFalse(self.ch.on_decoded(self.wav, T0 + 30 * i, 12000, st,
+                                                        [{"message": "x"}]))
+        self.assertEqual(sum("archiving stopped" in m for m in logs.output), 1)
+        self.assertFalse(any("Traceback" in m for m in logs.output[1:]))
+        self.assertEqual(self.ch.state()["archive_failures"], 3)
+        self.assertFalse(self.ch.state()["archiving"])
+        with self.assertLogs("meteor_scatter.core.msqp", level="INFO") as logs:
+            self.assertTrue(self.ch.on_decoded(self.wav, T0 + 120, 12000, st, [{"message": "x"}]))
+        self.assertEqual(sum("archiving resumed" in m for m in logs.output), 1)
+
     def test_disk_full_counts_warns_once_and_recovers(self):
         st = WavStats(0.0, 0, -80.0)
         with self.assertLogs("meteor_scatter.core.msqp", level="WARNING") as logs:
@@ -117,6 +157,23 @@ class NoiseLogTests(unittest.TestCase):
             self.ch.on_slot(T0 + 30, WavStats(0.0, 0, -80.0))
         self.assertEqual(sum("noise log" in m for m in logs.output), 1)
 
+    def test_damaged_log_heals_and_never_raises(self):
+        self.log.write_bytes(b"\xff\xfe garbage\n" + f"{int(T0) - 30} -80.0\n".encode())
+        self.ch.on_slot(T0, WavStats(0.0, 0, -81.0))
+        self.assertEqual(self.log.read_text().splitlines(),
+                         [f"{int(T0) - 30} -80.0", f"{int(T0)} -81.0"])
+
+    def test_non_oserror_warns_once_counts_and_recovers(self):
+        with unittest.mock.patch("os.replace", side_effect=RuntimeError("odd")), \
+                self.assertLogs("meteor_scatter.core.msqp", level="WARNING") as logs:
+            for i in range(3):
+                self.ch.on_slot(T0 + 30 * i, WavStats(0.0, 0, -80.0))
+        self.assertEqual(sum("noise log stopped" in m for m in logs.output), 1)
+        self.assertEqual(self.ch.state()["noise_log_failures"], 3)
+        with self.assertLogs("meteor_scatter.core.msqp", level="INFO") as logs:
+            self.ch.on_slot(T0 + 120, WavStats(0.0, 0, -80.0))
+        self.assertEqual(sum("noise log resumed" in m for m in logs.output), 1)
+
     def test_runtime_names_the_log_per_band_under_spool_root(self):
         rt = MsqpRuntime({"archive_dir": str(self.root / "arc"), "archive_max_days": 90,
                           "archive_max_gb": 2.0}, "t", "AC0G-B4", spool_root=self.root / "sp")
@@ -137,6 +194,17 @@ class MsqpRuntimeTests(unittest.TestCase):
     def _channel(self, freq=50260000):
         return self.rt.channel(freq, reporter_id="AC0G/B4", scale_db=None,
                                noise_cal_dbfs=-90.0, cadence_sec=30.0)
+
+    def test_channel_takes_the_configured_preset(self):
+        ch = self.rt.channel(50260000, reporter_id="AC0G/B4", scale_db=None,
+                             noise_cal_dbfs=None, preset="usb")
+        self.assertEqual(ch.preset, "usb")
+
+    def test_state_names_the_archive_root(self):
+        path = self.root / "msqp-state.json"
+        self.rt.write_state(path)
+        state = json.loads(path.read_text())
+        self.assertEqual(state["archive_root"], str(self.root / "a" / "AC0G-B4"))
 
     def test_rebuild_reuses_the_band_channel(self):
         # ReceiverManager.reset_source re-runs provision_channels with the same runtime.
@@ -195,6 +263,15 @@ class InstanceArchiveRootTests(unittest.TestCase):
                                   "archive_max_gb": 2.0}, "v", rx.msqp_instance_id).archive.root
                      for rx in rxs]
             self.assertEqual(roots, [Path(td) / "msqp" / "AC0G-B4", Path(td) / "msqp" / "AC0G-ND"])
+
+    def test_band_channel_gets_the_configured_preset(self):
+        from meteor_scatter.core.receiver_manager import ReceiverManager
+        rx = ReceiverManager(config={"paths": {}, "station": {}, "processing": {}},
+                             radiod_block={"status": "rx.local"}, spool_root=Path("/tmp/x"),
+                             log_dir=Path("/tmp/x"), radiod_lifetime_frames=0)
+        rt = unittest.mock.MagicMock()
+        rx._msqp_channel(rt, 50260000, "AC0G/B4", 30.0, "usb2")
+        self.assertEqual(rt.channel.call_args.kwargs["preset"], "usb2")
 
     def test_instance_id_falls_back_to_config_then_radiod(self):
         from meteor_scatter.core.receiver_manager import ReceiverManager
@@ -256,3 +333,17 @@ class RecorderHousekeepingTests(unittest.TestCase):
         self.assertEqual([g.archive.root for g in got],
                          [self.spool / "msqp" / "a.local", self.spool / "msqp" / "b.local"])
         self.assertNotIn("keep_wav", rec.receivers[0].provision_channels.call_args.kwargs)
+
+
+class BadMsqpBlockTests(unittest.TestCase):
+    def test_bad_block_disables_the_archive_and_the_daemon_runs_on(self):
+        from meteor_scatter.core.recorder import MeteorScatterRecorder
+        with tempfile.TemporaryDirectory() as td:
+            cfg = {"paths": {"spool_dir": td, "log_dir": td}, "station": {},
+                   "processing": {"radiod_lifetime_frames": 0},
+                   "msqp": {"archive_max_gb": "2"}}
+            rec = MeteorScatterRecorder(cfg, {"status": "rx.local"})
+            with self.assertLogs("meteor_scatter.core.recorder", "ERROR") as cm:
+                rec._build_msqp_runtimes()
+            self.assertEqual(rec._msqp_runtimes, {})
+            self.assertIn("MSQP archive disabled", cm.output[0])

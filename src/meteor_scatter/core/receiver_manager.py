@@ -311,7 +311,7 @@ class ReceiverManager:
                     sample_rate, preset, encoding_str,
                 )
                 msqp = self._msqp_channel(msqp_runtime, freq_hz, msqp_reporter,
-                                          tr_period_sec)
+                                          tr_period_sec, preset)
                 sink = ChannelSink(
                     mode=mode,
                     frequency_hz=freq_hz,
@@ -354,7 +354,7 @@ class ReceiverManager:
             )
 
     def _msqp_channel(self, msqp_runtime, freq_hz: int, reporter_id: str,
-                      tr_period_sec: float):
+                      tr_period_sec: float, preset: str = "usb"):
         """This band's MsqpChannel, or None.  A bad per-band calibration value
         costs the band its archive, never its decodes."""
         if msqp_runtime is None:
@@ -366,6 +366,7 @@ class ReceiverManager:
                 scale_db=get_scale_db(self._radiod, freq_hz),
                 noise_cal_dbfs=get_noise_cal_dbfs(self._radiod, freq_hz),
                 cadence_sec=tr_period_sec,
+                preset=preset,
             )
         except Exception as e:  # noqa: BLE001
             logger.warning("ReceiverManager %s: %d Hz not archived for MSQP: %s",
@@ -456,7 +457,7 @@ class ReceiverManager:
 
         # AGC off at 0 dB, stated rather than left to ka9q-python's defaults:
         # MSQP recordings and their scale_db rest on a fixed channel gain
-        # (core/msqp.CHANNEL_REQUESTED records the same request).
+        # (core/msqp.channel_requested records the same request).
         info = self._control.ensure_channel(
             frequency_hz=float(sink.frequency_hz),
             preset=sink.preset,

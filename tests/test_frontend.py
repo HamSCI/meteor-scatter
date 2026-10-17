@@ -64,6 +64,43 @@ class WindowTests(unittest.TestCase):
         w = log.window(1000.0, 1030.0, SR)
         self.assertEqual(w["frontend_status"], "missing")
         self.assertEqual(w["missing_sample_windows"], [[0, 30 * SR]])
+        self.assertIsNone(w["start"])           # a 500 s old reading never stands in
+        self.assertIsNone(w["end"])
+
+    def test_stale_start_is_null_but_fresh_end_reported(self):
+        log = FrontendLog()
+        log.add(r(990.0)); log.add(r(1020.0, gain=12.5)); log.add(r(1028.0, gain=12.5))
+        w = log.window(1000.0, 1030.0, SR)
+        self.assertIsNone(w["start"])           # 10 s before t0: older than the 5 s gap
+        self.assertEqual(w["end"]["t"], 1028.0)
+        self.assertEqual(w["end"]["rf_gain"], 12.5)
+
+    def test_reading_within_the_gap_before_t0_is_the_start(self):
+        log = FrontendLog()
+        log.add(r(996.0, gain=9.0)); log.add(r(1027.0, gain=9.0))
+        w = log.window(1000.0, 1030.0, SR)
+        self.assertEqual(w["start"]["t"], 996.0)
+        self.assertEqual(w["start"]["rf_gain"], 9.0)
+
+    def test_end_is_null_when_nothing_arrives_near_the_slot_end(self):
+        log = FrontendLog()
+        log.add(r(999.0)); log.add(r(1003.0)); log.add(r(1010.0))
+        w = log.window(1000.0, 1030.0, SR)
+        self.assertEqual(w["start"]["t"], 999.0)
+        self.assertIsNone(w["end"])             # last reading 20 s before t1
+
+    def test_first_reading_just_after_t0_is_the_start_without_a_before(self):
+        log = FrontendLog()
+        log.add(r(1002.0)); log.add(r(1029.0))
+        w = log.window(1000.0, 1030.0, SR)
+        self.assertEqual(w["start"]["t"], 1002.0)
+        self.assertEqual(w["end"]["t"], 1029.0)
+
+    def test_first_reading_long_after_t0_is_not_the_start(self):
+        log = FrontendLog()
+        log.add(r(1012.0)); log.add(r(1029.0))
+        w = log.window(1000.0, 1030.0, SR)
+        self.assertIsNone(w["start"])
 
     def test_ad_over_counter_reset_is_unknown_not_false(self):
         log = FrontendLog()
@@ -174,3 +211,34 @@ class ListenerSocketTests(unittest.TestCase):
             for now in (0.0, 1.0, 2.0, 59.0, 61.0):
                 lst._warn(OSError("down"), now)
         self.assertEqual(len(cm.records), 2)
+
+
+class ChannelStatusTests(unittest.TestCase):
+    def test_latest_report_per_frequency(self):
+        log = FrontendLog()
+        log.add_channel(50260000.0, ssrc=50260, preset="usb", agc_enable=False, gain_db=0.0,
+                        encoding="F32LE", t=1000.0)
+        log.add_channel(50260000.0, ssrc=50260, preset="usb", agc_enable=True, gain_db=3.0,
+                        encoding="F32LE", t=1001.0)
+        rep = log.channel_reported(50260000)
+        self.assertEqual(rep, {"ssrc": 50260, "preset": "usb", "agc_enable": True,
+                               "gain_db": 3.0, "encoding": "F32LE", "received_at": 1001.0})
+
+    def test_never_seen_is_none(self):
+        log = FrontendLog()
+        log.add_channel(28145000.0, ssrc=1, preset="usb", agc_enable=False, gain_db=0.0,
+                        encoding="F32LE", t=1000.0)
+        self.assertIsNone(log.channel_reported(50260000))
+
+    def test_listener_records_the_channel_from_the_same_packet(self):
+        from types import SimpleNamespace
+        log = FrontendLog()
+        lst = FrontendListener("x.local", log)
+        st = SimpleNamespace(
+            ssrc=77, frequency=50260000.0, preset="usb", agc_enable=False, gain=0.0,
+            encoding_name="F32LE",
+            frontend=SimpleNamespace(rf_gain=None, rf_atten=None, rf_agc=None,
+                                     if_power=None, ad_over=None))
+        lst._ingest(st, 1000.0)
+        self.assertEqual(log.channel_reported(50260000)["ssrc"], 77)
+        self.assertIsNone(log.latest())          # no front-end fields: no reading
