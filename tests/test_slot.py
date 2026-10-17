@@ -12,18 +12,21 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from unittest import mock
+
 import numpy as np
 
 from ka9q import SlotClock
 
 from meteor_scatter.core.ring import Ring
 from meteor_scatter.core.slot import SlotWorker
+from meteor_scatter.core.wav import WavStats
 
 SR = 12000
 
 
 def _make_worker(tmpdir, *, mode="msk144", cadence=15.0, ring=None,
-                 keep_wav=False, decoder_path=""):
+                 msqp=None, decoder_path=""):
     """Construct a SlotWorker wired to a SlotClock + ring + latest-rtp box."""
     if ring is None:
         ring = Ring(max_seconds=60, sample_rate=SR)
@@ -49,7 +52,7 @@ def _make_worker(tmpdir, *, mode="msk144", cadence=15.0, ring=None,
         get_latest_rtp=lambda: box["rtp"],
         clock_lock=lock,
         get_anchor_utc_now=_anchor_utc_now,
-        keep_wav=keep_wav,
+        msqp=msqp,
     )
     return worker, clock, ring, box
 
@@ -59,7 +62,7 @@ class SlotHarvestTickTests(unittest.TestCase):
 
     def test_tick_writes_wav_when_slot_complete(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            worker, clock, ring, box = _make_worker(tmpdir, keep_wav=True)
+            worker, clock, ring, box = _make_worker(tmpdir)
             # Anchor on a grid point (900000000 % 15 == 0) -> boundary0 @ off 0
             clock.anchor(rtp_timestamp=0, utc=900_000_000.0)
             # Fill 20 s of audio as 0.5 s chunks at contiguous offsets.
@@ -68,10 +71,13 @@ class SlotHarvestTickTests(unittest.TestCase):
             # latest RTP = just past newest sample (240000 samples in)
             box["rtp"] = clock.rtp_of_offset(40 * 6000)   # 240000 > 180000+settle
 
+            # No decoder: with no MSQP archive a launch failure deletes the WAV.
+            forked = []
+            worker._fork_decoder = lambda wav, start: forked.append((wav, start))
             worker._tick()
-            worker._reap_all(wait=True)
-
             wavs = list((Path(tmpdir) / "msk144").glob("*.wav"))
+            self.assertEqual([w for w, _ in forked], wavs)
+
             self.assertGreaterEqual(len(wavs), 1, "expected a WAV for slot0")
             # filename labels the epoch-aligned slot start (UTC 900000000)
             self.assertTrue(any("_28145.wav" in w.name for w in wavs))
@@ -86,7 +92,7 @@ class SlotHarvestTickTests(unittest.TestCase):
 
     def test_incomplete_slot_not_harvested(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            worker, clock, ring, box = _make_worker(tmpdir, keep_wav=True)
+            worker, clock, ring, box = _make_worker(tmpdir)
             clock.anchor(rtp_timestamp=0, utc=900_000_000.0)
             # only 10 s of data — slot0 (15 s) + settle not yet complete
             for i in range(20):
@@ -104,7 +110,7 @@ class SlotHarvestTickTests(unittest.TestCase):
         of freezing."""
         with tempfile.TemporaryDirectory() as tmpdir:
             worker, clock, ring, box = _make_worker(
-                tmpdir, keep_wav=True, decoder_path="/nonexistent/decode_msk144")
+                tmpdir, decoder_path="/nonexistent/decode_msk144")
             clock.anchor(rtp_timestamp=0, utc=900_000_000.0)
             for i in range(80):                       # 40 s of audio
                 ring.push(np.ones(6000, dtype=np.float32), start_offset=i * 6000)
@@ -133,8 +139,8 @@ class DecodeTimeoutTests(unittest.TestCase):
     otherwise grows until the MemoryMax cgroup OOM-kills the daemon.
     """
 
-    def _worker(self, tmpdir, keep_wav=False):
-        worker, _clock, _ring, _box = _make_worker(tmpdir, keep_wav=keep_wav)
+    def _worker(self, tmpdir):
+        worker, _clock, _ring, _box = _make_worker(tmpdir)
         return worker
 
     def test_hung_decode_killed_past_deadline(self):
@@ -170,7 +176,7 @@ class DecodeTimeoutTests(unittest.TestCase):
         import subprocess
         import time
         with tempfile.TemporaryDirectory() as tmpdir:
-            worker = self._worker(tmpdir, keep_wav=True)
+            worker = self._worker(tmpdir)
             wav = Path(tmpdir) / "young.wav"
             wav.write_bytes(b"RIFFfake")
             proc = subprocess.Popen(
@@ -236,7 +242,7 @@ class Jt9StdoutHarvestTests(unittest.TestCase):
             )
             fake.chmod(0o755)
             worker, clock, ring, box = _make_worker(
-                tmpdir, keep_wav=True, decoder_path=str(fake))
+                tmpdir, decoder_path=str(fake))
             clock.anchor(rtp_timestamp=0, utc=900_000_000.0)
             for i in range(40):
                 ring.push(np.ones(6000, dtype=np.float32), start_offset=i * 6000)
@@ -271,6 +277,87 @@ class DesyncGuardTests(unittest.TestCase):
             worker._on_desync = None
             box["rtp"] = 2**30 + 10 * SR
             worker._tick()                 # must not raise
+
+
+class _FakeMsqp:
+    def __init__(self, fail=False):
+        self.calls, self.slots, self.fail = [], [], fail
+        self.scale_db = None
+
+    def on_slot(self, slot_start, stats):
+        self.slots.append(slot_start)
+
+    def on_decoded(self, wav_path, slot_start, sr, stats, decodes):
+        self.calls.append((wav_path, decodes))
+        return not self.fail
+
+
+class ArchiveDecisionTests(unittest.TestCase):
+    LINE = "000000  -5  0.2 1500 & CQ AC0G EM38\n<DecodeFinished>\n"
+
+    def _reap_with(self, stdout_text, msqp):
+        with tempfile.TemporaryDirectory() as td:
+            w, *_ = _make_worker(td, msqp=msqp)
+            wav = Path(td) / "msk144" / "x.wav"
+            wav.parent.mkdir(parents=True, exist_ok=True)
+            wav.write_bytes(b"\0" * 64)
+            w._slot_stats[wav] = WavStats(gain_db=30.0, clipped_samples=0, noise_dbfs=-80.0)
+            proc = mock.MagicMock()
+            proc.poll.return_value = 0
+            proc.stdout.read.return_value = stdout_text.encode()
+            proc.stderr.read.return_value = b""
+            w._pending_procs = [(proc, wav, 1797206370.0, 0.0)]
+            w._reap_finished()
+            return wav.exists()
+
+    def test_decoded_slot_is_offered_to_the_archive(self):
+        m = _FakeMsqp()
+        self._reap_with(self.LINE, m)
+        self.assertEqual(len(m.calls), 1)
+        self.assertEqual(m.calls[0][1][0]["message"], "CQ AC0G EM38")
+
+    def test_sentinel_only_output_is_not_archived(self):
+        m = _FakeMsqp()
+        still_there = self._reap_with("<DecodeFinished>\n", m)
+        self.assertEqual(m.calls, [])
+        self.assertFalse(still_there)
+
+    def test_archive_failure_deletes_and_counts(self):
+        m = _FakeMsqp(fail=True)
+        still_there = self._reap_with(self.LINE, m)
+        self.assertFalse(still_there)
+
+    def test_shutdown_reap_offers_decoded_slot(self):
+        m = _FakeMsqp(fail=True)
+        with tempfile.TemporaryDirectory() as td:
+            w, *_ = _make_worker(td, msqp=m)
+            wav = Path(td) / "msk144" / "x.wav"
+            wav.parent.mkdir(parents=True, exist_ok=True)
+            wav.write_bytes(b"\0" * 64)
+            w._slot_stats[wav] = WavStats(gain_db=30.0, clipped_samples=0, noise_dbfs=-80.0)
+            proc = mock.MagicMock()
+            proc.returncode = 0
+            proc.stdout.read.return_value = self.LINE.encode()
+            proc.stderr.read.return_value = b""
+            w._pending_procs = [(proc, wav, 1797206370.0, 0.0)]
+            w._reap_all(wait=True)
+            self.assertEqual(len(m.calls), 1)
+            self.assertFalse(wav.exists())
+            self.assertEqual(w._slot_stats, {})
+
+    def test_spool_write_feeds_noise_watch_and_keeps_stats(self):
+        m = _FakeMsqp()
+        with tempfile.TemporaryDirectory() as td:
+            w, *_ = _make_worker(td, msqp=m)
+            wav = w._write_spool_wav(np.full(SR, 0.01, dtype=np.float32), 900_000_000.0)
+            self.assertEqual(m.slots, [900_000_000.0])
+            self.assertIsInstance(w._slot_stats[wav], WavStats)
+
+    def test_mutant_keep_everything_would_fail(self):
+        # Guards the keep decision: a worker that archived every slot would call on_decoded here.
+        m = _FakeMsqp()
+        self._reap_with("", m)
+        self.assertEqual(m.calls, [])
 
 
 if __name__ == "__main__":

@@ -81,7 +81,7 @@ class StatusListenerStartTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 rx.provision_channels(
                     decoder="", decoder_kind="jt9",
-                    keep_wav=False, spool_spots=False,
+                    spool_spots=False,
                 )
         sl_cls = mods["ka9q.status_listener"].StatusListener
         sl_cls.assert_called_once_with("rx.local")
@@ -98,7 +98,7 @@ class StatusListenerStartTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):   # zero bands, as above
                 rx.provision_channels(
                     decoder="", decoder_kind="jt9",
-                    keep_wav=False, spool_spots=False,
+                    spool_spots=False,
                 )
         self.assertIsNone(rx._status_listener)
 
@@ -167,3 +167,36 @@ class StopStopsListenerTests(unittest.TestCase):
         rx._status_listener = listener
         rx.stop()   # must not raise
         self.assertIsNone(rx._status_listener)
+
+
+class MsqpListenerWiringTests(unittest.TestCase):
+    """The MSQP front-end listener starts beside the StatusListener, best-effort, and stops
+    with it."""
+
+    def _provision(self, rx, mods, runtime):
+        with mock.patch.dict(sys.modules, mods):
+            with self.assertRaises(RuntimeError):   # zero bands, as above
+                rx.provision_channels(decoder="", decoder_kind="jt9",
+                                      spool_spots=False, msqp_runtime=runtime)
+
+    def test_provision_starts_frontend_listener(self):
+        runtime = MagicMock()
+        rx = _make_rx()
+        self._provision(rx, _fake_ka9q_modules(), runtime)
+        runtime.start_listener.assert_called_once_with("rx.local")
+
+    def test_frontend_listener_failure_does_not_block_provisioning(self):
+        runtime = MagicMock()
+        runtime.start_listener.side_effect = RuntimeError("boom")
+        mods = _fake_ka9q_modules()
+        rx = _make_rx()
+        self._provision(rx, mods, runtime)     # RuntimeError only from zero bands
+        self.assertIs(rx._status_listener,
+                      mods["ka9q.status_listener"].StatusListener.return_value)
+
+    def test_stop_stops_frontend_listener(self):
+        runtime = MagicMock()
+        rx = _make_rx()
+        self._provision(rx, _fake_ka9q_modules(), runtime)
+        rx.stop()
+        runtime.stop_listener.assert_called_once_with()

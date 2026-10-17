@@ -30,8 +30,11 @@ from typing import TYPE_CHECKING, Optional
 
 from meteor_scatter.config import (
     derive_source_key,
+    extract_reporter_id,
     get_freqs,
     get_mode_params,
+    get_noise_cal_dbfs,
+    get_scale_db,
     resolve_radiod_status,
 )
 from meteor_scatter.core.ch_tailer import ChTailer
@@ -121,6 +124,9 @@ class ReceiverManager:
 
         self._control = None
         self._status_listener = None
+        # MsqpRuntime (core/msqp.py) handed in by provision_channels; owns the
+        # front-end listener this manager starts and stops.
+        self._msqp_runtime = None
         self._sinks: list[ChannelSink] = []
         self._multi_streams: list = []
         # (MultiStream, ssrc) pairs the process-global keepalive
@@ -159,8 +165,8 @@ class ReceiverManager:
         *,
         decoder: str,
         decoder_kind: str,
-        keep_wav: bool,
         spool_spots: bool,
+        msqp_runtime=None,
     ) -> None:
         """Create ChannelSinks and register them with MultiStream(s).
 
@@ -168,6 +174,9 @@ class ReceiverManager:
         (mcast_addr, port) returned by ensure_channel().  In the common
         case (FT8+FT4 share preset/sample_rate/encoding) all channels
         land on one group and we end up with a single MultiStream.
+
+        ``msqp_runtime`` (core/msqp.MsqpRuntime) archives each decoded
+        recording with its sidecar; None deletes every recording after decode.
         """
         from ka9q import MultiStream, RadiodControl
         # Lazy: stream.py imports numpy.  See module docstring.
@@ -205,6 +214,19 @@ class ReceiverManager:
             logger.warning("ReceiverManager %s: status anchor listener unavailable: %s",
                            self._radiod_id, e)
             self._status_listener = None
+
+        # MSQP front-end listener: same status group, passive.  Best-effort
+        # like the StatusListener above — without it the sidecars say the
+        # front end is "missing", and decoding carries on regardless.
+        self._msqp_runtime = msqp_runtime
+        if msqp_runtime is not None:
+            try:
+                msqp_runtime.start_listener(status)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("ReceiverManager %s: MSQP front-end listener unavailable: %s",
+                               self._radiod_id, e)
+        msqp_reporter = (self._reporter_id or extract_reporter_id(self._config)
+                         or self._radiod_id)
 
         # Surface the Fusion governor identity at startup so the journal
         # record makes multi-radiod attribution clear.
@@ -278,6 +300,8 @@ class ReceiverManager:
                     self._radiod_id, mode.upper(), freq_hz,
                     sample_rate, preset, encoding_str,
                 )
+                msqp = self._msqp_channel(msqp_runtime, freq_hz, msqp_reporter,
+                                          tr_period_sec)
                 sink = ChannelSink(
                     mode=mode,
                     frequency_hz=freq_hz,
@@ -288,7 +312,7 @@ class ReceiverManager:
                     log_fd=self._log_fds[mode],
                     decoder_path=decoder,
                     decoder_kind=decoder_kind,
-                    keep_wav=keep_wav,
+                    msqp=msqp,
                     spool_spots=spool_spots,
                     tr_period_sec=tr_period_sec,
                 )
@@ -318,6 +342,25 @@ class ReceiverManager:
                 f"provisioned on {status} ({len(failed)} verify attempt(s) "
                 f"timed out — is radiod streaming?)"
             )
+
+    def _msqp_channel(self, msqp_runtime, freq_hz: int, reporter_id: str,
+                      tr_period_sec: float):
+        """This band's MsqpChannel, or None.  A bad per-band calibration value
+        costs the band its archive, never its decodes."""
+        if msqp_runtime is None:
+            return None
+        try:
+            return msqp_runtime.channel(
+                freq_hz,
+                reporter_id=reporter_id,
+                scale_db=get_scale_db(self._radiod, freq_hz),
+                noise_cal_dbfs=get_noise_cal_dbfs(self._radiod, freq_hz),
+                cadence_sec=tr_period_sec,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("ReceiverManager %s: %d Hz not archived for MSQP: %s",
+                           self._radiod_id, freq_hz, e)
+            return None
 
     def _provision_one_with_retry(self, sink, multi_by_group, deadline) -> bool:
         """Provision one channel, retrying on verify timeout within budget.
@@ -401,11 +444,16 @@ class ReceiverManager:
             if self._radiod_lifetime_frames > 0 else None
         )
 
+        # AGC off at 0 dB, stated rather than left to ka9q-python's defaults:
+        # MSQP recordings and their scale_db rest on a fixed channel gain
+        # (core/msqp.CHANNEL_REQUESTED records the same request).
         info = self._control.ensure_channel(
             frequency_hz=float(sink.frequency_hz),
             preset=sink.preset,
             sample_rate=sink.sample_rate,
             encoding=sink.encoding,
+            agc_enable=0,
+            gain=0.0,
             lifetime=lifetime_arg,
             timeout=timeout,
         )
@@ -420,6 +468,8 @@ class ReceiverManager:
             preset=sink.preset,
             sample_rate=sink.sample_rate,
             encoding=sink.encoding,
+            agc_enable=0,
+            gain=0.0,
             on_samples=sink.on_samples,
             on_stream_dropped=sink.on_stream_dropped,
             on_stream_restored=sink.on_stream_restored,
@@ -558,6 +608,16 @@ class ReceiverManager:
                     self._radiod_id,
                 )
             self._status_listener = None
+
+        if self._msqp_runtime is not None:
+            try:
+                self._msqp_runtime.stop_listener()
+            except Exception:
+                logger.exception(
+                    "ReceiverManager %s: error stopping MSQP front-end listener",
+                    self._radiod_id,
+                )
+            self._msqp_runtime = None
 
         for tailer in self._ch_tailers:
             try:

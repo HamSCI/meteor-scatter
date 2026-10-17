@@ -68,7 +68,7 @@ class ChannelSink:
         spool_dir: Path,
         log_fd,
         decoder_path: str,
-        keep_wav: bool = False,
+        msqp=None,
         authority_reader: Optional[AuthorityReader] = None,
         decoder_kind: str = "jt9",
         spool_spots: bool = False,
@@ -113,7 +113,7 @@ class ChannelSink:
             clock_lock=self._clock_lock,
             get_anchor_utc_now=self._anchor_utc_now,
             decoder_kind=decoder_kind,
-            keep_wav=keep_wav,
+            msqp=msqp,
             spool_spots=spool_spots,
             on_desync=self._reset_timing,
         )

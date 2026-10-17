@@ -52,7 +52,7 @@ def _make_sink(authority_reader=None) -> ChannelSink:
     sink = ChannelSink(
         mode="msk144", frequency_hz=28_145_000, sample_rate=SR,
         preset="usb", encoding=0, spool_dir=tmp, log_fd=log_fd,
-        decoder_path="/nonexistent", keep_wav=False,
+        decoder_path="/nonexistent",
         authority_reader=authority_reader,
     )
     sink._tmp_dir = tmp  # type: ignore[attr-defined]

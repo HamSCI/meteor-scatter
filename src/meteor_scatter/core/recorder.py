@@ -30,6 +30,7 @@ from typing import Optional, Union
 from meteor_scatter.config import (
     derive_source_key,
     get_freqs,
+    get_msqp,
     resolve_radiod_status,
 )
 # ChannelSink imports numpy via meteor_scatter.core.stream — kept under
@@ -54,6 +55,24 @@ from meteor_scatter.core.receiver_manager import (
 )
 
 logger = logging.getLogger(__name__)
+
+# The MSQP archive is pruned to its age/size caps this often (stats thread).
+MSQP_PRUNE_INTERVAL_SEC = 3600.0
+
+
+def _software_version() -> str:
+    """``<package version>+<git short sha>`` — spot rows and MSQP sidecars."""
+    try:
+        from meteor_scatter.version import GIT_INFO
+        short = (GIT_INFO or {}).get("short", "")
+    except Exception:
+        short = ""
+    try:
+        from importlib.metadata import version as pkg_version
+        ver = pkg_version("meteor-scatter")
+    except Exception:
+        ver = "0.1.0"
+    return f"{ver}+{short}" if short else ver
 
 
 def _supervise(name, alive, fn, *args):
@@ -262,6 +281,10 @@ class MeteorScatterRecorder:
         self._lifetime_entries: list[tuple[object, int]] = []
         # Recorded so a scoped rebuild can repeat the original call.
         self._provision_kwargs: dict = {}
+        # One MsqpRuntime per ReceiverManager (core/msqp.py), built in
+        # _provision_all_receivers; a scoped rebuild reuses its source's.
+        self._msqp_runtimes: dict = {}
+        self._msqp_last_prune: Optional[float] = None
         # One ladder per source: a fault on one radiod must never
         # escalate a healthy peer.
         self._ladders: dict = {}
@@ -373,7 +396,6 @@ class MeteorScatterRecorder:
         decoder = self._paths.get(
             "decoder_jt9", self._paths.get("decoder", ""),
         )
-        keep_wav = self._paths.get("keep_wav", False)
         # Tee per-slot decoder output into <wav>.spots.txt files only
         # when there is no SQLite sink for the uploader's shim to read
         # — that's the file-fallback mode FileTreeSource picks up.
@@ -384,18 +406,60 @@ class MeteorScatterRecorder:
             len(self._receivers),
         )
 
+        self._build_msqp_runtimes()
+        self._provision_kwargs = dict(
+            decoder=decoder,
+            decoder_kind=decoder_kind,
+            spool_spots=spool_spots,
+        )
         for rx in self._receivers:
-            self._provision_kwargs = dict(
-                decoder=decoder,
-                decoder_kind=decoder_kind,
-                keep_wav=keep_wav,
-                spool_spots=spool_spots,
+            rx.provision_channels(
+                **self._provision_kwargs,
+                msqp_runtime=self._msqp_runtimes.get(rx),
             )
-            rx.provision_channels(**self._provision_kwargs)
             # Gather this manager's lifetime entries for the global
             # keepalive thread.  Each manager's list is stable after
             # provision_channels returns.
             self._lifetime_entries.extend(rx.lifetime_entries)
+
+    def _build_msqp_runtimes(self) -> None:
+        """One MSQP runtime per source: its own front-end log and listener,
+        all sharing the configured archive.  A bad [msqp] block costs the
+        archive, never the decodes."""
+        try:
+            from meteor_scatter.core.msqp import MsqpRuntime
+            cfg = get_msqp(self._config)
+            version = _software_version()
+            for rx in self._receivers:
+                if rx not in self._msqp_runtimes:
+                    self._msqp_runtimes[rx] = MsqpRuntime(cfg, version)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("MSQP archive disabled: %s", exc)
+            self._msqp_runtimes = {}
+
+    def _msqp_housekeeping(self, now_mono: float) -> None:
+        """Stats-thread hook: leave ``<spool>/<radiod_id>/msqp-state.json``
+        every call; prune the archive once an hour.  Best-effort, like
+        _write_applied_state: neither may take the stats thread down."""
+        spool_root = Path(self._paths.get("spool_dir", "/var/lib/meteor-scatter"))
+        prune_due = (self._msqp_last_prune is None
+                     or now_mono - self._msqp_last_prune >= MSQP_PRUNE_INTERVAL_SEC)
+        if prune_due:
+            self._msqp_last_prune = now_mono
+        pruned_roots: set = set()
+        for rx, runtime in list(self._msqp_runtimes.items()):
+            if prune_due and runtime.archive.root not in pruned_roots:
+                # Sources share one archive root; prune it once.
+                pruned_roots.add(runtime.archive.root)
+                try:
+                    from datetime import datetime, timezone
+                    runtime.prune(datetime.now(timezone.utc).date())
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("MSQP archive prune failed: %s", exc)
+            try:
+                runtime.write_state(spool_root / rx.radiod_id / "msqp-state.json")
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("msqp-state write for %s failed: %s", rx.radiod_id, exc)
 
     def _start_all_streams(self) -> None:
         for rx in self._receivers:
@@ -404,17 +468,7 @@ class MeteorScatterRecorder:
     def _start_all_ch_tailers(self) -> None:
         callsign = self._station.get("callsign", "")
         grid = self._station.get("grid_square", "")
-        try:
-            from meteor_scatter.version import GIT_INFO
-            short = (GIT_INFO or {}).get("short", "")
-        except Exception:
-            short = ""
-        try:
-            from importlib.metadata import version as pkg_version
-            ver = pkg_version("meteor-scatter")
-        except Exception:
-            ver = "0.1.0"
-        proc_version = f"{ver}+{short}" if short else ver
+        proc_version = _software_version()
 
         # forward_to_pskreporter rides each row into the wsprdaemon tar and
         # gates the SERVER-side PSKReporter forwarder (wd30's
@@ -753,7 +807,8 @@ class MeteorScatterRecorder:
                 "source %s: no delivery progress for %d check(s) — %s",
                 key, ladder.consecutive_degraded, action.value,
             )
-            if rx.reset_source(**self._provision_kwargs):
+            if rx.reset_source(**self._provision_kwargs,
+                               msqp_runtime=self._msqp_runtimes.get(rx)):
                 # A rebuild replaces the MultiStreams the keepalive
                 # thread was holding, so refresh its entry list.
                 self._lifetime_entries = [
@@ -795,6 +850,7 @@ class MeteorScatterRecorder:
 
         while self._running:
             self._write_applied_state()
+            self._msqp_housekeeping(time.monotonic())
             # Aggregate per (radiod, mode) so the multi-source case
             # surfaces each source's contribution.  Single-source
             # deployments emit one line per mode exactly like before.

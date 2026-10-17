@@ -24,6 +24,10 @@ The decoder backend (selected by ``decoder_kind``):
 The normalized lines land in ``<radiod>-msk144.log``;
 ``ch_tailer.parse_decoder_line`` parses each one into a spot row.
 
+Recordings: every slot's WAV lands in the spool.  A slot jt9 decoded something
+in goes to the MSQP archive (core/msqp.py) with a JSON sidecar; every other
+slot, and any recording the archive could not take, is deleted.
+
 MSK144 cadence: T/R slots at the configured tr_period_sec (default 30 s,
 matching stock WSJT-X — slots at :00, :30; a 15 s config gives :00/:15/:30/:45).
 """
@@ -43,7 +47,7 @@ from ka9q import SlotClock, SlotClockDesyncError
 
 from meteor_scatter.core import decoder as _decoder
 from meteor_scatter.core.ring import Ring
-from meteor_scatter.core.wav import write_wav
+from meteor_scatter.core.wav import WavStats, write_wav
 
 logger = logging.getLogger(__name__)
 
@@ -87,7 +91,7 @@ class SlotWorker:
         get_latest_rtp: Callable[[], Optional[int]],
         clock_lock: threading.Lock,
         get_anchor_utc_now: Callable[[], Optional[float]],
-        keep_wav: bool = False,
+        msqp=None,
         decoder_kind: str = DECODER_JT9,
         spool_spots: bool = False,
         on_desync: Optional[Callable[[], None]] = None,
@@ -127,7 +131,10 @@ class SlotWorker:
         self._next_boundary_utc: Optional[float] = None
         self._sr = clock.sample_rate
         self._decoder_kind = decoder_kind
-        self._keep_wav = keep_wav
+        # MsqpChannel (core/msqp.py) or None: None deletes every recording after decode.
+        self._msqp = msqp
+        # What write_wav did to each spool WAV still awaiting its decode.
+        self._slot_stats: dict[Path, WavStats] = {}
         self._spool_spots = spool_spots
         # Stable per-channel jt9 data dir — jt9 keeps its FFTW wisdom and
         # scratch files (decoded.txt, timer.out) here across slots.  NOTE:
@@ -263,13 +270,33 @@ class SlotWorker:
         filename = time.strftime("%Y%m%d_%H%M%S", slot_time) + f"_{freq_khz}.wav"
         wav_path = self._spool_dir / filename
 
-        write_wav(
+        stats = write_wav(
             path=wav_path,
             samples=samples,
             sample_rate=self._ring.sample_rate,
             frequency_hz=self._frequency_hz,
+            scale_db=self._msqp.scale_db if self._msqp is not None else None,
         )
+        self._slot_stats[wav_path] = stats
+        if self._msqp is not None:
+            try:
+                self._msqp.on_slot(slot_start_utc, stats)
+            except Exception:  # noqa: BLE001 — the noise watch must never cost a decode
+                logger.exception("%s %d Hz: MSQP noise watch failed",
+                                 self._mode.upper(), self._frequency_hz)
         return wav_path
+
+    def _finish_slot(self, wav_path: Path, slot_start: float, decodes: list) -> None:
+        """Archive a decoded recording, or delete it.  Never leaves a spool WAV behind."""
+        stats = self._slot_stats.pop(wav_path, None)
+        if self._msqp is not None and decodes and stats is not None:
+            try:
+                if self._msqp.on_decoded(wav_path, slot_start, self._sr, stats, decodes):
+                    return                       # moved into the archive
+            except Exception:  # noqa: BLE001 — archiving must never cost a decode
+                logger.exception("%s %d Hz: MSQP archive failed for %s",
+                                 self._mode.upper(), self._frequency_hz, wav_path.name)
+        wav_path.unlink(missing_ok=True)
 
     def _fork_decoder(self, wav_path: Path, slot_start: float) -> None:
         self._fork_decoder_jt9(wav_path, slot_start)
@@ -304,8 +331,7 @@ class SlotWorker:
             )
         except OSError as exc:
             logger.error("Failed to launch jt9: %s", exc)
-            if not self._keep_wav:
-                wav_path.unlink(missing_ok=True)
+            self._finish_slot(wav_path, slot_start, [])
 
     @staticmethod
     def _kill_proc(proc: subprocess.Popen) -> None:
@@ -361,18 +387,19 @@ class SlotWorker:
                     )
                     self.decodes_fail += 1
                     self._kill_proc(proc)
-                    if not self._keep_wav:
-                        wav_path.unlink(missing_ok=True)
+                    self._finish_slot(wav_path, slot_start, [])
                     continue
                 still_pending.append(
                     (proc, wav_path, slot_start, fork_mono)
                 )
                 continue
             # jt9 exits 0 on a clean run whether or not it found anything.
+            decodes: list = []
             if ret == 0:
                 self.decodes_ok += 1
                 stdout_text = self._read_proc_stdout(proc)
-                self._materialise_jt9_output(wav_path, slot_start, stdout_text)
+                decodes = self._materialise_jt9_output(
+                    wav_path, slot_start, stdout_text)
                 self._drain_proc_pipes(proc)
             else:
                 self.decodes_fail += 1
@@ -387,24 +414,23 @@ class SlotWorker:
                 logger.warning(
                     "jt9 exit %d for %s: %s", ret, wav_path.name, stderr,
                 )
-            if not self._keep_wav:
-                wav_path.unlink(missing_ok=True)
+            self._finish_slot(wav_path, slot_start, decodes)
         self._pending_procs = still_pending
 
     def _reap_all(self, wait: bool = False) -> None:
         for proc, wav_path, slot_start, _fork_mono in self._pending_procs:
+            decodes: list = []
             if wait:
                 try:
                     proc.wait(timeout=5.0)
                     if proc.returncode == 0:
                         stdout_text = self._read_proc_stdout(proc)
-                        self._materialise_jt9_output(
+                        decodes = self._materialise_jt9_output(
                             wav_path, slot_start, stdout_text)
                 except subprocess.TimeoutExpired:
                     proc.kill()
             self._drain_proc_pipes(proc)
-            if not self._keep_wav:
-                wav_path.unlink(missing_ok=True)
+            self._finish_slot(wav_path, slot_start, decodes)
         self._pending_procs.clear()
 
     @staticmethod
@@ -424,7 +450,7 @@ class SlotWorker:
 
     def _materialise_jt9_output(
         self, wav_path: Path, slot_start: float, stdout_text: str,
-    ) -> None:
+    ) -> list[dict]:
         """Parse this slot's jt9 stdout decodes, normalize, append to log.
 
         jt9 --msk144 prints each decode to stdout (NOT decoded.txt, which
@@ -434,24 +460,29 @@ class SlotWorker:
         is set, the same lines are teed to a per-slot ``.spots.txt`` for
         the hs-uploader file-fallback path.  The ``<DecodeFinished>``
         sentinel and blank lines are dropped by the parser.
+
+        Returns the parsed decodes (``parse_decoded_txt_line`` dicts), ``[]``
+        when none parsed: an empty list means the slot is not archived.
         """
         raw = [ln for ln in stdout_text.splitlines() if ln.strip()]
         if not raw:
-            return
+            return []
 
         slot_struct = time.gmtime(int(math.ceil(slot_start)))
         out_lines: list[str] = []
+        decodes: list[dict] = []
         for line in raw:
             decode = _decoder.parse_decoded_txt_line(line)
             if decode is None:
                 continue
+            decodes.append(decode)
             out_lines.append(
                 _decoder.normalize_log_line(
                     decode, slot_struct, self._frequency_hz,
                 )
             )
         if not out_lines:
-            return
+            return []
 
         try:
             for ln in out_lines:
@@ -474,3 +505,4 @@ class SlotWorker:
                     "%s: failed writing per-slot spots file %s: %s",
                     self._mode.upper(), spots_path, exc,
                 )
+        return decodes

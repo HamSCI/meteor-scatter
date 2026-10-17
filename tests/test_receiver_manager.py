@@ -93,6 +93,51 @@ class StopIsIdempotentTests(unittest.TestCase):
             self.assertEqual(rx._log_fds, {})
 
 
+class ExplicitAgcOffTests(unittest.TestCase):
+    """Every channel asks radiod for AGC off at 0 dB gain, explicitly: MSQP recordings depend on
+    a fixed channel gain, so the request must not rest on ka9q-python's defaults."""
+
+    def test_channel_requests_carry_agc_off_and_zero_gain(self):
+        import types
+        from unittest import mock
+        rx = _make_rx({"status": "rx.local"})
+        rx._control = mock.MagicMock()
+        info = mock.MagicMock(multicast_address="239.1.2.3", port=5004)
+        rx._control.ensure_channel.return_value = info
+        ka9q = types.ModuleType("ka9q")
+        ka9q.MultiStream = mock.MagicMock(name="MultiStream")
+        sink = mock.MagicMock(frequency_hz=50_260_000, preset="usb", sample_rate=12000,
+                              encoding=4)
+        with mock.patch.dict(sys.modules, {"ka9q": ka9q}):
+            rx._add_sink_to_multi(sink, {})
+        kw = rx._control.ensure_channel.call_args.kwargs
+        self.assertEqual((kw["agc_enable"], kw["gain"]), (0, 0.0))
+        kw = ka9q.MultiStream.return_value.add_channel.call_args.kwargs
+        self.assertEqual((kw["agc_enable"], kw["gain"]), (0, 0.0))
+
+
+class MsqpChannelBuildTests(unittest.TestCase):
+
+    def test_bad_calibration_value_costs_the_archive_not_the_band(self):
+        from unittest import mock
+        rx = _make_rx({"status": "rx.local", "msk144": {"scale_db": {"50260000": "loud"}}})
+        runtime = mock.MagicMock()
+        with self.assertLogs("meteor_scatter.core.receiver_manager", level="WARNING"):
+            self.assertIsNone(rx._msqp_channel(runtime, 50260000, "AC0G/B4", 30.0))
+        runtime.channel.assert_not_called()
+
+    def test_band_gets_its_calibration_and_cadence(self):
+        from unittest import mock
+        rx = _make_rx({"status": "rx.local",
+                       "msk144": {"scale_db": {"50260000": 12.5},
+                                  "noise_cal_dbfs": {"50260000": -95.0}}})
+        runtime = mock.MagicMock()
+        rx._msqp_channel(runtime, 50260000, "AC0G/B4", 15.0)
+        runtime.channel.assert_called_once_with(50260000, reporter_id="AC0G/B4", scale_db=12.5,
+                                                noise_cal_dbfs=-95.0, cadence_sec=15.0)
+        self.assertIsNone(rx._msqp_channel(None, 50260000, "AC0G/B4", 15.0))
+
+
 class MeteorScatterRecorderMultiSourceTests(unittest.TestCase):
     """Verify MeteorScatterRecorder accepts both the single-block and
     list-of-blocks signature, and creates one ReceiverManager per
