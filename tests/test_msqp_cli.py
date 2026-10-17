@@ -462,3 +462,298 @@ class CmdPackageTests(unittest.TestCase):
         self.assertEqual(rc, 2)
         self.assertIn("several [[radiod]] blocks", err)
         self.assertIn("rx.local", err)
+
+
+import os, stat
+from unittest import mock
+from meteor_scatter import msqp_cli
+from meteor_scatter.msqp_cli import run_draft, read_token, site_upload_mode, DraftRefused
+from meteor_scatter.zenodo import ZenodoError
+
+
+class FakeZenodo:
+    """The brief's fake, adapted to upload_bytes (R-safe-io): the uploaded bytes come from the
+    package directory's fd, so the fake receives a key and the bytes instead of a path."""
+    def __init__(self, fail_upload_once=None):
+        self.calls, self.fail, self.data = [], fail_upload_once, {}
+    def create_draft(self, md):
+        self.calls.append(("create",)); self.md = md
+        return {"id": "r1", "links": {"self_html": "https://z/r1"}}
+    def draft_url(self, rec): return rec["links"]["self_html"]
+    def get_draft(self, rid): return {"id": rid, "links": {"self_html": "https://z/r1"}}
+    def committed_files(self, rid): return {c[1] for c in self.calls if c[0] == "upload"}
+    def upload_bytes(self, rid, key, data):
+        if self.fail == key:
+            self.fail = None; raise OSError("network")
+        self.calls.append(("upload", key)); self.data[key] = data
+    def upload(self, rid, p):
+        raise AssertionError("run_draft must not upload by path")
+    def reserve_doi(self, rid): self.calls.append(("doi",))
+    def request_community(self, rid, cid): self.calls.append(("community", cid))
+
+
+class DraftTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.pkg = Path(self.tmp.name) / "T"
+        self.pkg.mkdir()
+        os.chmod(self.pkg, 0o755)        # the login umask (0002) leaves it group-writable
+        (self.pkg / "metadata.json").write_text('{"metadata": {"title": "T"}}')
+        (self.pkg / "T.zip").write_bytes(b"PK")
+        (self.pkg / "ALL.TXT").write_text("x\n")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_full_run_order_and_no_publish(self):
+        z = FakeZenodo()
+        url = run_draft(self.pkg, z, "comm-id", "upload")
+        self.assertEqual(url, "https://z/r1")
+        self.assertEqual([c[0] for c in z.calls], ["create", "upload", "upload", "doi", "community"])
+
+    def test_resume_after_failed_upload_does_not_duplicate(self):
+        z = FakeZenodo(fail_upload_once="ALL.TXT")
+        with self.assertRaises(OSError):
+            run_draft(self.pkg, z, "c", "upload")
+        run_draft(self.pkg, z, "c", "upload")
+        self.assertEqual([c for c in z.calls if c[0] == "create"], [("create",)])
+        self.assertEqual(sorted(c[1] for c in z.calls if c[0] == "upload"), ["ALL.TXT", "T.zip"])
+
+    def test_refuses_unless_upload_mode(self):
+        for mode in ("hold", "discard"):
+            with self.assertRaisesRegex(DraftRefused, mode):
+                run_draft(self.pkg, FakeZenodo(), "c", mode)
+
+    def test_token_must_exist_and_be_private(self):
+        p = Path(self.tmp.name) / "tok"
+        with self.assertRaises(DraftRefused):
+            read_token(p)
+        p.write_text("abc\n"); os.chmod(p, 0o644)
+        with self.assertRaisesRegex(DraftRefused, "0600"):
+            read_token(p)
+        os.chmod(p, 0o600)
+        self.assertEqual(read_token(p), "abc")
+
+    def test_site_mode_absent_file_means_upload(self):
+        self.assertEqual(site_upload_mode(Path(self.tmp.name) / "none.toml"), "upload")
+
+    def test_site_mode_reads_hold(self):
+        p = Path(self.tmp.name) / "c.toml"
+        p.write_text('[uploads]\nmode = "hold"\n')
+        self.assertEqual(site_upload_mode(p), "hold")
+        p.write_text('[uploads]\nenabled = false\n')
+        self.assertEqual(site_upload_mode(p), "hold")
+
+    # ---- beyond the brief: the controller's rulings ----
+
+    def test_uploads_the_bytes_and_metadata_read_from_the_package(self):
+        z = FakeZenodo()
+        run_draft(self.pkg, z, "comm-id", "upload")
+        self.assertEqual(z.data, {"T.zip": b"PK", "ALL.TXT": b"x\n"})
+        self.assertEqual(z.md, {"metadata": {"title": "T"}})
+        self.assertIn(("community", "comm-id"), z.calls)
+
+    def test_state_file_records_progress(self):
+        run_draft(self.pkg, FakeZenodo(), "c", "upload")
+        st = json.loads((self.pkg / "draft.json").read_text())
+        self.assertEqual(st["record_id"], "r1")
+        self.assertEqual(st["url"], "https://z/r1")
+        self.assertEqual(sorted(st["uploaded"]), ["ALL.TXT", "T.zip"])
+        self.assertTrue(st["doi_reserved"])
+        self.assertTrue(st["community_requested"])
+
+    def test_second_run_after_success_calls_nothing_new(self):
+        z = FakeZenodo()
+        run_draft(self.pkg, z, "c", "upload")
+        n = len(z.calls)
+        self.assertEqual(run_draft(self.pkg, z, "c", "upload"), "https://z/r1")
+        self.assertEqual(len(z.calls), n)
+
+    def test_refuses_empty_community(self):
+        z = FakeZenodo()
+        with self.assertRaisesRegex(DraftRefused, "zenodo_community"):
+            run_draft(self.pkg, z, "", "upload")
+        self.assertEqual(z.calls, [])
+
+    def test_zip_must_be_named_after_the_package_dir(self):
+        (self.pkg / "T.zip").rename(self.pkg / "other.zip")
+        z = FakeZenodo()
+        with self.assertRaisesRegex(DraftRefused, "T.zip"):
+            run_draft(self.pkg, z, "c", "upload")
+        self.assertEqual(z.calls, [])               # refused before any draft exists
+
+    def test_symlinked_input_refused_before_any_call(self):
+        real = Path(self.tmp.name) / "elsewhere.txt"; real.write_text("secret\n")
+        (self.pkg / "ALL.TXT").unlink()
+        (self.pkg / "ALL.TXT").symlink_to(real)
+        z = FakeZenodo()
+        with self.assertRaisesRegex(DraftRefused, "symlink"):
+            run_draft(self.pkg, z, "c", "upload")
+        self.assertEqual(z.calls, [])
+
+    def test_hard_linked_input_refused(self):
+        os.link(self.pkg / "T.zip", Path(self.tmp.name) / "twin.zip")
+        with self.assertRaisesRegex(DraftRefused, "hard link"):
+            run_draft(self.pkg, FakeZenodo(), "c", "upload")
+
+    def test_symlinked_package_dir_refused(self):
+        link = Path(self.tmp.name) / "L"; link.symlink_to(self.pkg)
+        with self.assertRaisesRegex(DraftRefused, "symlink"):
+            run_draft(link, FakeZenodo(), "c", "upload")
+
+    def test_group_writable_package_dir_refused(self):
+        os.chmod(self.pkg, 0o775)
+        with self.assertRaisesRegex(DraftRefused, "writable"):
+            run_draft(self.pkg, FakeZenodo(), "c", "upload")
+
+    def test_symlinked_state_file_refused(self):
+        real = Path(self.tmp.name) / "state.json"
+        real.write_text('{"record_id": "evil", "url": "https://evil"}')
+        (self.pkg / "draft.json").symlink_to(real)
+        z = FakeZenodo()
+        with self.assertRaisesRegex(DraftRefused, "draft.json"):
+            run_draft(self.pkg, z, "c", "upload")
+        self.assertEqual(z.calls, [])
+
+    def test_corrupt_state_file_refused_not_recreated(self):
+        (self.pkg / "draft.json").write_text("{not json")
+        z = FakeZenodo()
+        with self.assertRaisesRegex(DraftRefused, "draft.json"):
+            run_draft(self.pkg, z, "c", "upload")
+        self.assertEqual(z.calls, [])
+
+    def test_metadata_must_be_a_json_object(self):
+        (self.pkg / "metadata.json").write_text("[1]")
+        with self.assertRaisesRegex(DraftRefused, "metadata.json"):
+            run_draft(self.pkg, FakeZenodo(), "c", "upload")
+
+    def test_token_symlink_refused(self):
+        real = Path(self.tmp.name) / "real-tok"; real.write_text("abc\n"); os.chmod(real, 0o600)
+        link = Path(self.tmp.name) / "tok"; link.symlink_to(real)
+        with self.assertRaisesRegex(DraftRefused, "symlink"):
+            read_token(link)
+
+    def test_token_any_group_or_other_bit_refused(self):
+        p = Path(self.tmp.name) / "tok"; p.write_text("abc\n")
+        for mode in (0o640, 0o604, 0o610, 0o601, 0o620):
+            os.chmod(p, mode)
+            with self.assertRaisesRegex(DraftRefused, "0600"):
+                read_token(p)
+
+    def test_empty_token_refused(self):
+        p = Path(self.tmp.name) / "tok"; p.write_text("\n"); os.chmod(p, 0o600)
+        with self.assertRaises(DraftRefused):
+            read_token(p)
+
+    def test_site_mode_reads_discard_and_upload(self):
+        p = Path(self.tmp.name) / "c.toml"
+        p.write_text('[uploads]\nmode = "discard"\n')
+        self.assertEqual(site_upload_mode(p), "discard")
+        p.write_text('[other]\nx = 1\n')
+        self.assertEqual(site_upload_mode(p), "upload")
+
+
+DRAFT_CONFIG = """\
+[msqp]
+zenodo_url = "https://sandbox.example"
+zenodo_community = "{community}"
+zenodo_token_path = "{token}"
+"""
+
+
+class CmdDraftTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.pkg = self.root / "T"
+        self.pkg.mkdir(); os.chmod(self.pkg, 0o755)
+        (self.pkg / "metadata.json").write_text('{"metadata": {"title": "T"}}')
+        (self.pkg / "T.zip").write_bytes(b"PK")
+        (self.pkg / "ALL.TXT").write_text("x\n")
+        self.token = self.root / "tok"
+        self.token.write_text("SECRET-TOKEN\n"); os.chmod(self.token, 0o600)
+        self.cfg = self.root / "ms.toml"
+        self.write_cfg("comm-uuid")
+        self.coord = self.root / "coordination.toml"      # absent → upload
+        self.fake = FakeZenodo()
+        self.made = []
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def write_cfg(self, community):
+        self.cfg.write_text(DRAFT_CONFIG.format(community=community, token=self.token))
+
+    def factory(self, url, token, transport=None):
+        self.made.append((url, token))
+        return self.fake
+
+    def _run(self):
+        args = argparse.Namespace(package=str(self.pkg), instance=None, config=self.cfg,
+                                  log_level=None)
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(msqp_cli, "Zenodo", self.factory), \
+                mock.patch.object(msqp_cli, "COORDINATION", self.coord), \
+                redirect_stdout(out), redirect_stderr(err):
+            rc = msqp_cli.cmd_draft(args)
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_success_prints_url_and_next_step(self):
+        rc, out, err = self._run()
+        self.assertEqual(rc, 0, err)
+        self.assertIn("https://z/r1", out)
+        self.assertIn("Submit for review", out)
+        self.assertIn("community administrator publishes", out)
+        self.assertEqual(self.made, [("https://sandbox.example", "SECRET-TOKEN")])
+        self.assertIn(("community", "comm-uuid"), self.fake.calls)
+
+    def test_empty_community_refuses_exit_2(self):
+        self.write_cfg("")
+        self.token.unlink()                    # the community refusal comes before the token
+        rc, out, err = self._run()
+        self.assertEqual(rc, 2)
+        self.assertIn("zenodo_community", err)
+        self.assertIn("unknown", err)
+        self.assertNotIn("token", err)
+        self.assertEqual(self.fake.calls, [])
+
+    def test_hold_mode_refuses_exit_2(self):
+        self.coord.write_text('[uploads]\nmode = "hold"\n')
+        rc, out, err = self._run()
+        self.assertEqual(rc, 2)
+        self.assertIn("hold", err)
+        self.assertEqual(self.fake.calls, [])
+
+    def test_unreadable_coordination_refuses_exit_2(self):
+        self.coord.write_text('[uploads\n')
+        rc, out, err = self._run()
+        self.assertEqual(rc, 2)
+        self.assertEqual(self.fake.calls, [])
+
+    def test_public_token_refuses_exit_2(self):
+        os.chmod(self.token, 0o644)
+        rc, out, err = self._run()
+        self.assertEqual(rc, 2)
+        self.assertIn("0600", err)
+        self.assertNotIn("SECRET-TOKEN", err)
+
+    def test_zenodo_error_exit_1_with_status_body_no_token_and_resume_hint(self):
+        def boom(rid):
+            raise ZenodoError(403, b'{"message": "denied for SECRET-TOKEN"}', "reserve DOI")
+        self.fake.reserve_doi = boom
+        rc, out, err = self._run()
+        self.assertEqual(rc, 1)
+        self.assertIn("403", err)
+        self.assertIn("denied", err)
+        self.assertNotIn("SECRET-TOKEN", err + out)
+        self.assertIn("re-run", err)
+
+    def test_parser_registers_draft(self):
+        p = argparse.ArgumentParser()
+        sub = p.add_subparsers(dest="command")
+        m = sub.add_parser("msqp")
+        msqp_cli.add_subparsers(m, common=lambda s: s.add_argument("--config", type=Path))
+        a = p.parse_args(["msqp", "draft", "/x/pkg", "--instance", "AC0G-B4"])
+        self.assertEqual((a.msqp_command, a.package, a.instance), ("draft", "/x/pkg", "AC0G-B4"))
+        with mock.patch.object(msqp_cli, "cmd_draft", lambda args: 7):
+            self.assertEqual(msqp_cli.dispatch(a), 7)

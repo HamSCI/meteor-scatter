@@ -1,7 +1,7 @@
 """`meteor-scatter msqp ...`: calibrate, package and draft for the MSQP capture.
 
-Task 7 provides `calibrate`; `package` and `draft` register in add_subparsers() and dispatch()
-as they arrive.
+`calibrate` sets each band's scale, `package` builds the upload, and `draft` leaves it on
+Zenodo as an unsubmitted, unpublished draft for the operator to review.
 """
 from __future__ import annotations
 
@@ -21,6 +21,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 
 from meteor_scatter import msqp_package as P
+from meteor_scatter.zenodo import Zenodo, ZenodoError
 
 MIN_SLOTS = 10          # five minutes at 30 s
 
@@ -87,6 +88,10 @@ def _open_sub(name: str, dir_fd) -> int:
         raise ValueError(f"{Path(str(name)).name} cannot be opened ({e.strerror})")
 
 
+class _Missing(ValueError):
+    """_open_regular's refusal when the name does not exist (still a ValueError)."""
+
+
 def _open_regular(name: str, dir_fd):
     """(fd, fstat) for a regular, singly-linked file `name` inside the directory dir_fd,
     opened without following a link, or ValueError(reason).  The caller owns the fd."""
@@ -94,7 +99,7 @@ def _open_regular(name: str, dir_fd):
         fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=dir_fd)
     except OSError as e:
         if e.errno == errno.ENOENT:
-            raise ValueError(f"{name} is missing")
+            raise _Missing(f"{name} is missing")
         if e.errno == errno.ELOOP:
             raise ValueError(f"{name} is a symlink")
         raise ValueError(f"{name} cannot be opened ({e.strerror})")
@@ -373,6 +378,230 @@ def cmd_package(args) -> int:
     return 0
 
 
+COORDINATION = Path("/etc/sigmond/coordination.toml")
+UPLOAD_MODES = ("upload", "hold", "discard")
+COMMUNITY_UNKNOWN = ("the MSQP community's Zenodo id is unknown until it is set in the instance "
+                     "config's [msqp] zenodo_community; nothing was sent")
+
+
+class DraftRefused(Exception):
+    pass
+
+
+def site_upload_mode(path: Path = COORDINATION) -> str:
+    """The site sink switch, read the way sigmond's coordination.Uploads reads it: [uploads]
+    mode, else [uploads] enabled (false → hold); an absent file means upload.  An unreadable or
+    malformed file raises (OSError, ValueError) rather than defaulting to upload.  The per-client
+    sink state (tasks/plan-sink-control.md) replaces this function once sigmond ships it."""
+    try:
+        text = Path(path).read_text()
+    except FileNotFoundError:
+        return "upload"
+    up = tomllib.loads(text).get("uploads") or {}
+    if not isinstance(up, dict):
+        raise ValueError(f"{path}: [uploads] is not a table")
+    mode = str(up.get("mode", "")).lower()
+    if mode in UPLOAD_MODES:
+        return mode
+    return "upload" if up.get("enabled", True) else "hold"
+
+
+def _require_upload_mode(upload_mode: str) -> None:
+    if upload_mode != "upload":
+        raise DraftRefused(f"the site upload mode reads {upload_mode!r}; a Zenodo draft leaves "
+                           f"the station, so it waits for `upload`")
+
+
+def read_token(path: Path) -> str:
+    """The Zenodo token, from a regular file only its owner can reach.  The file is opened once
+    without following a link, and the mode check uses that open fd, so the check and the read
+    concern the same file."""
+    try:
+        # O_NONBLOCK: a FIFO in the token's place must not hang the open; the S_ISREG check
+        # then refuses it.
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except FileNotFoundError:
+        raise DraftRefused(f"no Zenodo token at {path}; create one (docs/OPERATIONS.md, MSQP) "
+                           f"and save it there, mode 0600")
+    except OSError as e:
+        if e.errno == errno.ELOOP:
+            raise DraftRefused(f"{path} is a symlink; put the token file itself there, mode 0600")
+        raise DraftRefused(f"{path} cannot be opened ({e.strerror})")
+    with os.fdopen(fd, "rb") as f:
+        st = os.fstat(f.fileno())
+        if not stat.S_ISREG(st.st_mode):
+            raise DraftRefused(f"{path} is not a regular file; save the token there, mode 0600")
+        if st.st_mode & 0o077:
+            raise DraftRefused(f"{path} has mode {stat.S_IMODE(st.st_mode):04o}, which lets "
+                               f"group or others reach it; chmod 0600 {path}")
+        data = f.read()
+    try:
+        token = data.decode().strip()
+    except UnicodeDecodeError:
+        raise DraftRefused(f"{path} does not hold a text token")
+    if not token:
+        raise DraftRefused(f"{path} is empty; save the Zenodo token there, mode 0600")
+    return token
+
+
+def run_draft(pkg_dir: Path, zenodo, community_id: str, upload_mode: str) -> str:
+    """Leave the package at `pkg_dir` on Zenodo as a draft: create it, upload the zip and
+    ALL.TXT, reserve the DOI and attach the community's review request, unsubmitted.  Returns
+    the draft's URL.  Progress lives in <pkg_dir>/draft.json, so a re-run after any failure
+    resumes without a second draft or a duplicate upload.
+
+    The package directory belongs to root and its parent to the daemon's account, so the
+    directory is opened once (no link, owner and mode checked) and every file inside is reached
+    through that fd without following a link: never by pathname after the open."""
+    _require_upload_mode(upload_mode)
+    if not community_id:
+        raise DraftRefused(COMMUNITY_UNKNOWN)
+    pkg_dir = Path(os.path.abspath(pkg_dir))
+    try:
+        pkg_fd = _open_dir(str(pkg_dir), f"package directory {pkg_dir}")
+    except ValueError as e:
+        raise DraftRefused(str(e))
+    try:
+        return _draft(pkg_fd, pkg_dir, zenodo, community_id)
+    finally:
+        os.close(pkg_fd)
+
+
+def _draft(pkg_fd: int, pkg_dir: Path, zenodo, community_id: str) -> str:
+    zip_name = f"{pkg_dir.name}.zip"            # the name `msqp package` gives it
+    held = {}
+    try:
+        try:
+            for name in (zip_name, "ALL.TXT"):
+                fd, _ = _open_regular(name, pkg_fd)
+                held[name] = os.fdopen(fd, "rb")
+            fd, _ = _open_regular("metadata.json", pkg_fd)
+            with os.fdopen(fd, "rb") as f:
+                md_raw = f.read()
+        except ValueError as e:
+            raise DraftRefused(f"{pkg_dir}: {e}; build it with `meteor-scatter msqp package`")
+        try:
+            md = json.loads(md_raw.decode())
+        except ValueError:
+            md = None
+        if not isinstance(md, dict):
+            raise DraftRefused(f"{pkg_dir}: metadata.json is not a JSON object; rebuild the "
+                               "package")
+        state = _read_state(pkg_fd, pkg_dir)
+
+        def save():
+            _write_atomic(pkg_fd, "draft.json",
+                          lambda f: f.write(json.dumps(state, indent=1).encode()))
+
+        if "record_id" not in state:
+            rec = zenodo.create_draft(md)
+            rid = rec.get("id") if isinstance(rec, dict) else None
+            if not rid:
+                raise ZenodoError(0, json.dumps(rec).encode(), "create draft (reply lacks an id)")
+            state.update(record_id=rid, url=zenodo.draft_url(rec), uploaded=[],
+                         doi_reserved=False, community_requested=False)
+            save()
+        rid = state["record_id"]
+        state.setdefault("uploaded", [])
+        done = zenodo.committed_files(rid)
+        for name in (zip_name, "ALL.TXT"):
+            if name not in done:
+                zenodo.upload_bytes(rid, name, held[name].read())
+            if name not in state["uploaded"]:
+                state["uploaded"].append(name)
+                save()
+        if not state.get("doi_reserved"):
+            zenodo.reserve_doi(rid)
+            state["doi_reserved"] = True
+            save()
+        if not state.get("community_requested"):
+            zenodo.request_community(rid, community_id)
+            state["community_requested"] = True
+            save()
+        if not state.get("url"):
+            state["url"] = zenodo.draft_url(zenodo.get_draft(rid))
+            save()
+        return state["url"]
+    finally:
+        for f in held.values():
+            f.close()
+
+
+def _read_state(pkg_fd: int, pkg_dir: Path) -> dict:
+    """draft.json through the package fd: {} when absent; DraftRefused when it is a link, not
+    a regular file, or not a state object.  A bad file stays where it is: it names a draft that
+    already exists, and removing it makes the next run create a second one."""
+    keep = ("it names the Zenodo draft this package already has; fix it by hand, or move it "
+            "aside to start a new draft")
+    try:
+        fd, _ = _open_regular("draft.json", pkg_fd)
+    except _Missing:
+        return {}
+    except ValueError as e:
+        raise DraftRefused(f"{pkg_dir}: {e}")
+    with os.fdopen(fd, "rb") as f:
+        raw = f.read()
+    try:
+        state = json.loads(raw.decode())
+    except ValueError:
+        raise DraftRefused(f"{pkg_dir}: draft.json is not valid JSON; {keep}")
+    if not isinstance(state, dict) or ("record_id" in state and (
+            not state["record_id"] or not isinstance(state["record_id"], (str, int))
+            or not isinstance(state.get("url", ""), str)
+            or not isinstance(state.get("uploaded", []), list))):
+        raise DraftRefused(f"{pkg_dir}: draft.json does not hold a draft's state; {keep}")
+    return state
+
+
+def cmd_draft(args) -> int:
+    from meteor_scatter._reporter_id import unescape_systemd_instance
+    from meteor_scatter.config import get_msqp, load_config, resolve_config_path
+
+    token = None
+    try:
+        instance = unescape_systemd_instance(args.instance) if args.instance else None
+        config = load_config(resolve_config_path(instance=instance, explicit_path=args.config))
+        cfg = get_msqp(config)
+        community = cfg["zenodo_community"].strip()
+        if not community:
+            raise DraftRefused(COMMUNITY_UNKNOWN)
+        try:
+            mode = site_upload_mode(COORDINATION)
+        except (OSError, ValueError) as e:
+            raise DraftRefused(f"cannot read the site upload mode from {COORDINATION}: {e}")
+        _require_upload_mode(mode)
+        pkg = Path(args.package)
+        if os.path.realpath(pkg) != os.path.abspath(pkg):
+            raise DraftRefused(f"{pkg} passes through a symlink; give the real path")
+        token = read_token(Path(cfg["zenodo_token_path"]))
+        url = run_draft(pkg, Zenodo(cfg["zenodo_url"], token), community, mode)
+    except DraftRefused as e:
+        print(f"msqp draft: {e}", file=sys.stderr)
+        return 2
+    except ZenodoError as e:
+        # str(e) carries the step, the HTTP status (0: no answer) and a body excerpt
+        msg = f"msqp draft: {'could not reach Zenodo: ' if e.status == 0 else ''}{e}"
+        if e.status == 404:
+            msg += ("\nif the draft was deleted on Zenodo, move the package's draft.json aside "
+                    "to start a new one")
+        msg += "\nprogress is saved in the package's draft.json; a re-run resumes from there"
+        if token:
+            msg = msg.replace(token, "<token>")
+        print(msg, file=sys.stderr)
+        return 1
+    except (OSError, ValueError) as e:
+        msg = f"msqp draft: {e}"
+        if token:
+            msg = msg.replace(token, "<token>")
+            msg += "\nprogress is saved in the package's draft.json; a re-run resumes from there"
+        print(msg, file=sys.stderr)
+        return 1 if token else 2
+    print(f"draft: {url}")
+    print("next: open it, check it, press Submit for review; a community administrator "
+          "publishes")
+    return 0
+
+
 def cmd_calibrate(args) -> int:
     from meteor_scatter import configurator
     from meteor_scatter._reporter_id import unescape_systemd_instance
@@ -463,6 +692,16 @@ def add_subparsers(sub_msqp: argparse.ArgumentParser, *, common=None) -> None:
     if common:
         common(pkg)
 
+    dr = msqp_sub.add_parser(
+        "draft",
+        help="leave a package on Zenodo as an unsubmitted draft for you to check and submit")
+    dr.add_argument("package", help="package directory that `msqp package` printed")
+    dr.add_argument("--instance", default=None,
+                    help="instance whose config holds [msqp] (selects "
+                         "/etc/meteor-scatter/<instance>.toml)")
+    if common:
+        common(dr)
+
 
 def dispatch(args) -> int:
     sub = getattr(args, "msqp_command", None)
@@ -470,5 +709,7 @@ def dispatch(args) -> int:
         return cmd_calibrate(args)
     if sub == "package":
         return cmd_package(args)
-    print("usage: meteor-scatter msqp {calibrate,package} --instance <id>", file=sys.stderr)
+    if sub == "draft":
+        return cmd_draft(args)
+    print("usage: meteor-scatter msqp {calibrate,package,draft} ...", file=sys.stderr)
     return 2

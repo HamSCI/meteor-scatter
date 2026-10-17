@@ -113,3 +113,24 @@ class ZenodoRobustnessTests(unittest.TestCase):
         self.assertNotIn("authorization", {k.lower() for k in other.headers})
         same = h.redirect_request(req, None, 302, "Found", {}, "https://z/elsewhere")
         self.assertIn("authorization", {k.lower() for k in same.headers})
+
+
+class UploadBytesTests(unittest.TestCase):
+    def test_upload_bytes_is_init_content_commit_with_the_given_key(self):
+        t = FakeTransport([(201, b"{}"), (200, b"{}"), (200, b"{}")])
+        Zenodo("https://z", "T", transport=t).upload_bytes("abc", "my shower.zip", b"PK\x03")
+        self.assertEqual([c[0] for c in t.calls], ["POST", "PUT", "POST"])
+        self.assertEqual(json.loads(t.calls[0][3]), [{"key": "my shower.zip"}])
+        self.assertTrue(t.calls[1][1].endswith("/api/records/abc/draft/files/my%20shower.zip/content"))
+        self.assertEqual(t.calls[1][3], b"PK\x03")
+        self.assertEqual(t.calls[1][2]["Content-Type"], "application/octet-stream")
+        self.assertTrue(t.calls[2][1].endswith("/draft/files/my%20shower.zip/commit"))
+
+    def test_upload_by_path_delegates_to_upload_bytes(self):
+        z = Zenodo("https://z", "T", transport=FakeTransport([]))
+        seen = []
+        z.upload_bytes = lambda rid, key, data: seen.append((rid, key, data))
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "a.zip"; p.write_bytes(b"PK")
+            z.upload("abc", p)
+        self.assertEqual(seen, [("abc", "a.zip", b"PK")])

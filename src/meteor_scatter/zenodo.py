@@ -90,10 +90,15 @@ class Zenodo:
         return {e["key"] for e in r.get("entries", []) if e.get("status") == "completed"}
 
     def upload(self, record_id: str, path: Path) -> None:
-        key = urllib.parse.quote(path.name)
+        self.upload_bytes(record_id, path.name, path.read_bytes())
+
+    def upload_bytes(self, record_id: str, key: str, data: bytes) -> None:
+        """Upload `data` as the draft file `key`: start, send the content, commit.  The caller
+        reads the bytes (`msqp draft` reads them through a directory fd)."""
         base = f"/api/records/{self._id(record_id)}/draft/files"
-        self._call("start upload", "POST", base, [{"key": path.name}])
-        self._call("upload", "PUT", f"{base}/{key}/content", raw=path.read_bytes(),
+        self._call("start upload", "POST", base, [{"key": key}])
+        key = urllib.parse.quote(key)
+        self._call("upload", "PUT", f"{base}/{key}/content", raw=data,
                    content_type="application/octet-stream")
         self._call("commit upload", "POST", f"{base}/{key}/commit")
 
