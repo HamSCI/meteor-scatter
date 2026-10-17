@@ -75,39 +75,64 @@ class PackageResult:
 SIDECAR_KEYS = ("slot_start_utc", "dial_freq_hz", "decodes")
 
 
-def _open_regular(path: Path):
-    """(fd, fstat) for a regular, singly-linked file opened without following a link, or
-    ValueError(reason).  The caller owns the fd."""
+def _open_sub(name: str, dir_fd) -> int:
+    """fd of directory `name` (a path, when dir_fd is None) opened without following a link."""
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        return os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dir_fd)
+    except OSError as e:
+        if e.errno in (errno.ELOOP, errno.ENOTDIR):
+            raise ValueError(f"{Path(str(name)).name} is a symlink or not a directory")
+        if e.errno == errno.ENOENT:
+            raise ValueError(f"{Path(str(name)).name} is missing")
+        raise ValueError(f"{Path(str(name)).name} cannot be opened ({e.strerror})")
+
+
+def _open_regular(name: str, dir_fd):
+    """(fd, fstat) for a regular, singly-linked file `name` inside the directory dir_fd,
+    opened without following a link, or ValueError(reason).  The caller owns the fd."""
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=dir_fd)
     except OSError as e:
         if e.errno == errno.ENOENT:
-            raise ValueError(f"{path.name} is missing")
+            raise ValueError(f"{name} is missing")
         if e.errno == errno.ELOOP:
-            raise ValueError(f"{path.name} is a symlink")
-        raise ValueError(f"{path.name} cannot be opened ({e.strerror})")
-    st = os.fstat(fd)
-    if not stat.S_ISREG(st.st_mode):
+            raise ValueError(f"{name} is a symlink")
+        raise ValueError(f"{name} cannot be opened ({e.strerror})")
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise ValueError(f"{name} is not a regular file")
+        if st.st_nlink != 1:
+            raise ValueError(f"{name} has {st.st_nlink} hard links")
+    except BaseException:
         os.close(fd)
-        raise ValueError(f"{path.name} is not a regular file")
-    if st.st_nlink != 1:
-        os.close(fd)
-        raise ValueError(f"{path.name} has {st.st_nlink} hard links")
+        raise
     return fd, st
 
 
-def _check_recording(root: Path, wav: Path, side_path: Path):
+def _open_recording(root_fd: int, parts):
+    """_open_regular for archive-relative `parts` (band, day, file), walking each directory
+    from the root fd with O_NOFOLLOW so that no name is ever resolved twice."""
+    held, cur = [], root_fd
+    try:
+        for part in parts[:-1]:
+            cur = _open_sub(part, cur)
+            held.append(cur)
+        return _open_regular(parts[-1], cur)
+    finally:
+        for fd in held:
+            os.close(fd)
+
+
+def _check_recording(root_fd: int, parts):
     """(sidecar dict, ALL.TXT lines, sidecar bytes, wav identity) for one recording, or
     raise ValueError(reason).  The archive belongs to the daemon's account and this may run
-    as root, so a link, a hard link or a path outside the archive is never read.  Both files
-    open by fd without following links; the sidecar is parsed from the bytes read there, and
-    the wav's (st_dev, st_ino) lets the zip pass confirm it reopens the same file."""
-    for p in (wav, side_path):
-        if not p.resolve().is_relative_to(root):
-            raise ValueError(f"{p.name} resolves outside the archive")
-    fd, wst = _open_regular(wav)
+    as root, so a link, a hard link or a swapped directory is never followed: every open walks
+    from the archive's root fd.  The sidecar is parsed from the bytes read there, and the
+    wav's (st_dev, st_ino) lets the zip pass confirm it reopens the same file."""
+    fd, wst = _open_recording(root_fd, parts)
     os.close(fd)
-    fd, _ = _open_regular(side_path)
+    fd, _ = _open_recording(root_fd, parts[:-1] + (Path(parts[-1]).with_suffix(".json").name,))
     with os.fdopen(fd, "rb") as f:
         raw = f.read()
     try:
@@ -123,7 +148,7 @@ def _check_recording(root: Path, wav: Path, side_path: Path):
         raise ValueError("sidecar decodes is not a list")
     for d in side["decodes"]:
         msg = d.get("message") if isinstance(d, dict) else None
-        if isinstance(msg, str) and ("\n" in msg or "\r" in msg):
+        if isinstance(msg, str) and msg != "".join(msg.splitlines()):
             raise ValueError("a decode message holds a line break")
     try:
         lines = [P.all_txt_line(side, d) for d in side["decodes"]]
@@ -142,7 +167,11 @@ def _open_dir(path, what: str, dir_fd=None) -> int:
         if e.errno == errno.ELOOP or e.errno == errno.ENOTDIR:
             raise ValueError(f"{what} is a symlink or not a directory; refusing to write there")
         raise ValueError(f"{what} cannot be opened ({e.strerror})")
-    st = os.fstat(fd)
+    try:
+        st = os.fstat(fd)
+    except BaseException:
+        os.close(fd)
+        raise
     if st.st_uid != os.geteuid() or st.st_mode & 0o022:
         os.close(fd)
         raise ValueError(f"{what} must be owned by the current user and not group- or "
@@ -171,7 +200,9 @@ def _write_atomic(dir_fd: int, name: str, writer):
 
 def build_package(archive, cfg, callsign, grid, first, last, out_root, version):
     """Zip a date range of one instance's archive with ALL.TXT, description and draft metadata.
-    Every refusal comes before the first mkdir.  Unsafe or unreadable recordings are skipped
+    A refusal for the date range, the operator fields or an empty or wholly unusable archive
+    comes before any directory exists; once the package directory is open, a failure leaves
+    earlier files whole and removes its own temp files.  Unsafe or unreadable recordings are skipped
     and reported.  Each output lands by temp file + os.replace, so a failure leaves any
     earlier package whole.  A rerun leaves draft.json (the Zenodo draft's state) alone."""
     if first > last:
@@ -183,16 +214,29 @@ def build_package(archive, cfg, callsign, grid, first, last, out_root, version):
     recs = archive.recordings(first, last)
     if not recs:
         raise PackageRefused(f"no recordings in the archive between {first} and {last}")
-    root = Path(archive.root).resolve()
+    try:
+        arch_fd = _open_sub(str(archive.root), None)
+    except ValueError as e:
+        raise PackageRefused(f"archive root {archive.root}: {e}")
+    try:
+        return _package(archive, arch_fd, recs, cfg, callsign, grid, first, last, out_root,
+                        version)
+    finally:
+        os.close(arch_fd)
+
+
+def _package(archive, arch_fd, recs, cfg, callsign, grid, first, last, out_root, version):
     valid, lines, per, flagged, bands, skipped = [], [], {}, [], [], []
     for band, wav, side_path in recs:
         rel = wav.relative_to(archive.root)
         try:
-            side, side_lines, raw, ident = _check_recording(root, wav, side_path)
+            if len(rel.parts) != 3:
+                raise ValueError("not at <band>/<day>/<file>")
+            side, side_lines, raw, ident = _check_recording(arch_fd, rel.parts)
         except ValueError as e:
             skipped.append(f"{rel}: {e}")
             continue
-        valid.append((wav, raw, ident, rel))
+        valid.append((raw, ident, rel))
         lines.extend(side_lines)
         day = rel.parts[1]
         per.setdefault(band, {}).setdefault(day, 0)
@@ -231,9 +275,9 @@ def build_package(archive, cfg, callsign, grid, first, last, out_root, version):
 
     def write_zip(f):
         with zipfile.ZipFile(f, "w", compression=zipfile.ZIP_STORED) as z:
-            for wav, raw, ident, rel in valid:
+            for raw, ident, rel in valid:
                 try:
-                    fd, st = _open_regular(wav)
+                    fd, st = _open_recording(arch_fd, rel.parts)
                 except ValueError as e:
                     raise PackageRefused(f"{rel} changed during packaging: {e}")
                 with os.fdopen(fd, "rb") as src:
@@ -310,6 +354,8 @@ def cmd_package(args) -> int:
         archive = Archive(Path(cfg["archive_dir"]) / instance_dirname(instance_id),
                           cfg["archive_max_days"], cfg["archive_max_gb"])
         out_root = Path(args.out) if args.out else DEFAULT_OUT_ROOT
+        if os.path.realpath(out_root) != os.path.abspath(out_root):
+            raise PackageRefused(f"{out_root} passes through a symlink; give the real path")
         r = build_package(archive, cfg, callsign, grid, first, last, out_root,
                           _software_version())
     except (PackageRefused, OSError, ValueError) as e:

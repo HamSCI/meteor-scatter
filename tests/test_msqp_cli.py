@@ -249,18 +249,74 @@ class PackageHardeningTests(unittest.TestCase):
         wav = self.day13 / "261213_235930.wav"
         real, seen = msqp_cli._open_regular, []
 
-        def swapping(path):
-            if Path(path) == wav:
+        def swapping(path, *a, **kw):
+            if Path(path).name == wav.name:
                 seen.append(1)
                 if len(seen) == 2:                  # the zip pass
                     wav.unlink(); wav.symlink_to(secret)
-            return real(path)
+            return real(path, *a, **kw)
         with mock.patch.object(msqp_cli, "_open_regular", swapping):
             with self.assertRaises(PackageRefused):
                 self._build()
         for z in self.out.rglob("*.zip"):
             self.fail("a zip was left behind")
         self.assertEqual([p for p in self.out.rglob("*") if p.is_file()], [])
+
+    def test_day_directory_swapped_at_open_never_reaches_the_zip(self):
+        import os
+        from unittest import mock
+        from meteor_scatter import msqp_cli
+        outside = self.root / "outside"; outside.mkdir()
+        (outside / "261213_235930.wav").write_bytes(b"TOPSECRET" * 10)
+        moved = self.root / "day13-moved"
+        real = msqp_cli._open_regular
+
+        def swapping(name, *a, **kw):
+            # the attacker shows a symlinked day while the wav opens, the real day otherwise
+            want_link = Path(name).name == "261213_235930.wav"
+            is_link = self.day13.is_symlink()
+            if want_link and not is_link:
+                os.rename(self.day13, moved); self.day13.symlink_to(outside)
+            elif not want_link and is_link:
+                self.day13.unlink(); os.rename(moved, self.day13)
+            return real(name, *a, **kw)
+        with mock.patch.object(msqp_cli, "_open_regular", swapping):
+            try:
+                r = self._build()
+            except PackageRefused:
+                return
+        with zipfile.ZipFile(r.zip_path) as z:
+            self.assertTrue(all(b"TOPSECRET" not in z.read(n) for n in z.namelist()))
+
+    def test_wav_replaced_by_another_regular_file_between_passes_refused(self):
+        import os
+        from unittest import mock
+        from meteor_scatter import msqp_cli
+        wav = self.day13 / "261213_235930.wav"
+        real, seen = msqp_cli._open_regular, []
+
+        def swapping(name, *a, **kw):
+            if Path(name).name == wav.name:
+                seen.append(1)
+                if len(seen) == 2:                  # the zip pass
+                    other = self.day13 / "new.tmp"
+                    other.write_bytes(b"IMPOSTOR" * 10)
+                    os.rename(other, wav)           # new inode, still a regular file
+            return real(name, *a, **kw)
+        with mock.patch.object(msqp_cli, "_open_regular", swapping):
+            with self.assertRaisesRegex(PackageRefused, "changed during packaging"):
+                self._build()
+        self.assertEqual([p for p in self.out.rglob("*") if p.is_file()], [])
+
+    def test_every_line_separator_in_a_message_is_skipped(self):
+        side = self.day13 / "261213_235930.json"
+        base = json.loads(side.read_text())
+        for ch in "\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029":
+            d = json.loads(json.dumps(base)); d["decodes"][0]["message"] = f"CQ{ch}X"
+            side.write_text(json.dumps(d))
+            r = self._build()
+            self.assertEqual(r.files, 1, repr(ch))
+            self.assertIn("line break", r.skipped[0], repr(ch))
 
     def test_hardlinked_wav_skipped(self):
         import os
@@ -372,6 +428,18 @@ class CmdPackageTests(unittest.TestCase):
         self.assertIn("2 recordings", out)
         self.assertIn("flagged", out)
         self.assertIn("261214_000030.wav", out)
+
+    def test_out_through_a_symlink_refused(self):
+        real = self.root / "real-out"; real.mkdir()
+        link = self.root / "link-out"; link.symlink_to(real)
+        args = argparse.Namespace(instance="AC0G-B4", config=self.cfg, date_from="2026-12-13",
+                                  date_to="2026-12-14", out=str(link), log_level=None)
+        err = io.StringIO()
+        with redirect_stdout(io.StringIO()), redirect_stderr(err):
+            rc = cmd_package(args)
+        self.assertEqual(rc, 2)
+        self.assertIn("symlink", err.getvalue())
+        self.assertEqual(list(real.iterdir()), [])
 
     def test_bad_date_refuses_with_exit_2_and_writes_nothing(self):
         rc, out, err = self._run(first="2026-13-01")
