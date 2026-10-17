@@ -53,3 +53,63 @@ class ZenodoTests(unittest.TestCase):
         src = Path(zmod.__file__).read_text()
         self.assertNotIn("submit-review", src)
         self.assertNotIn("/actions/publish", src)
+
+
+class ZenodoRobustnessTests(unittest.TestCase):
+    def test_trailing_slash_base_url(self):
+        t = FakeTransport([(201, b"{}")])
+        Zenodo("https://z/", "T", transport=t).create_draft({})
+        self.assertEqual(t.calls[0][1], "https://z/api/records")
+
+    def test_urlerror_becomes_zenodo_error(self):
+        import urllib.error
+
+        def boom(method, url, headers, data):
+            raise urllib.error.URLError("connection refused")
+        with self.assertRaises(ZenodoError) as cm:
+            Zenodo("https://z", "T", transport=boom).create_draft({})
+        self.assertEqual(cm.exception.status, 0)
+        self.assertIn(b"connection refused", cm.exception.body)
+
+    def test_socket_timeout_becomes_zenodo_error(self):
+        def boom(method, url, headers, data):
+            raise TimeoutError("timed out")
+        with self.assertRaises(ZenodoError):
+            Zenodo("https://z", "T", transport=boom).get_draft("abc")
+
+    def test_upload_put_is_octet_stream(self):
+        t = FakeTransport([(201, b"{}"), (200, b"{}"), (200, b"{}")])
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "a.zip"; p.write_bytes(b"PK")
+            Zenodo("https://z", "T", transport=t).upload("abc", p)
+        self.assertEqual(t.calls[1][2]["Content-Type"], "application/octet-stream")
+        self.assertEqual(t.calls[0][2]["Content-Type"], "application/json")
+
+    def test_non_json_2xx_raises_zenodo_error(self):
+        t = FakeTransport([(200, b"<html>maintenance</html>")])
+        with self.assertRaises(ZenodoError) as cm:
+            Zenodo("https://z", "T", transport=t).get_draft("abc")
+        self.assertEqual(cm.exception.status, 200)
+
+    def test_record_id_is_quoted(self):
+        t = FakeTransport([(200, b"{}"), (200, b"{}"), (200, b"{}"), (200, b"{}"), (200, b"{}")])
+        z = Zenodo("https://z", "T", transport=t)
+        z.get_draft("a/b c"); z.committed_files("a/b c"); z.reserve_doi("a/b c")
+        z.request_community("a/b c", "comm")
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "a.zip"; p.write_bytes(b"PK")
+            t.replies[:] = [(200, b"{}")] * 3
+            z.upload("a/b c", p)
+        for _, url, _, _ in t.calls:
+            self.assertIn("/api/records/a%2Fb%20c/", url)
+
+    def test_cross_host_redirect_drops_authorization(self):
+        import urllib.request
+        from meteor_scatter.zenodo import _SameHostRedirect
+        req = urllib.request.Request("https://z/api/records/x/draft/files",
+                                     headers={"Authorization": "Bearer TOK"}, method="GET")
+        h = _SameHostRedirect()
+        other = h.redirect_request(req, None, 302, "Found", {}, "https://s3.example/blob")
+        self.assertNotIn("authorization", {k.lower() for k in other.headers})
+        same = h.redirect_request(req, None, 302, "Found", {}, "https://z/elsewhere")
+        self.assertIn("authorization", {k.lower() for k in same.headers})
