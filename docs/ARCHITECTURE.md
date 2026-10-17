@@ -348,7 +348,13 @@ restarting RTP streams.
   never called with `destination=`; the resolved address is read back
   from `ChannelInfo` for the inventory payload (contract §7).
 - **Subprocess only for decoding.** The uploader is in-process.
-- **WAV deleted after decode** (`paths.keep_wav = false` default).
+- **Decoded recordings go to the MSQP archive.** When jt9 decodes at least one
+  line in a slot, `core/msqp.py` moves that slot's WAV into
+  `<archive_dir>/<instance>/<band>/<YYYYMMDD>/` and writes a JSON sidecar beside
+  it. Any other WAV is deleted, as before. An age cap and a size cap prune the
+  archive. `paths.keep_wav` is retired. The daemon also writes
+  `<spool>/<radiod_id>/msqp-state.json` once a minute, which `inventory --json`
+  reports as the `msqp` block.
 - **Fail fast on an unconfigured radiod.** The placeholder status
   `<configure-via-config-init>` can never resolve, so the daemon exits
   `EX_CONFIG` (78) and the unit's `RestartPreventExitStatus=78` stops it

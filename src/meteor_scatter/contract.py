@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import shutil
+import time
 from importlib.metadata import version as pkg_version
 from pathlib import Path
 from typing import Any
@@ -18,6 +20,21 @@ from meteor_scatter.config import (
 )
 from meteor_scatter.version import GIT_INFO
 from hamsci_dsp.timing import read_applied_state
+
+MSQP_STATE_MAX_AGE_S = 300.0
+
+
+def _read_msqp_state(path: Path, now: float | None = None) -> dict | None:
+    """The daemon's ``msqp-state.json``, or None when absent, unreadable,
+    or older than five minutes."""
+    try:
+        state = json.loads(path.read_text())
+        age = (time.time() if now is None else now) - float(state["written_at"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    if not isinstance(state, dict) or age > MSQP_STATE_MAX_AGE_S:
+        return None
+    return state
 
 logger = logging.getLogger(__name__)
 
@@ -116,6 +133,11 @@ def build_inventory(config: dict, config_path: Path) -> dict:
             "timing_authority_applied": read_applied_state(
                 Path(spool_path) / "timing-authority.json",
             ),
+            # The daemon leaves its MSQP report (archive usage, front-end
+            # packet age, per-band noise watch) at <spool>/<radiod_id>/
+            # msqp-state.json once a minute.  Same rule as above: stale
+            # or absent reads as null.
+            "msqp": _read_msqp_state(Path(spool_path) / "msqp-state.json"),
         }
         instances.append(instance)
 

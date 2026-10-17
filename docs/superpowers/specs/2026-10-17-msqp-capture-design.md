@@ -43,8 +43,8 @@ For each band the client asks radiod for a channel with AGC off and 32-bit float
 (`ensure_channel(agc_enable=0, gain=0.0, encoding=F32, …)`).  The channel already streams 32-bit
 float, because `receiver_manager` forces f32.  ka9q-python's `create_channel` already sends
 `AGC_ENABLE=0` and `GAIN=0.0`.  The client will pass both explicitly, so the request stays
-visible in the code.  A passive status-packet read on B4's live channels, which will confirm that
-radiod reports AGC off, is pending.
+visible in the code.  One check stays pending.  A passive status-packet read on B4's live
+channels will confirm that radiod reports AGC off.
 
 ### 3.2 From float to WAV
 
@@ -67,11 +67,14 @@ When jt9 reports at least one decode, the client moves the recording out of the 
 the archive instead of deleting it:
 
 ```
-/var/lib/meteor-scatter/archive/<band>/<YYYYMMDD>/<YYMMDD_HHMMSS>.wav
-                                                  <YYMMDD_HHMMSS>.json
+<archive_dir>/<instance>/<band>/<YYYYMMDD>/<YYMMDD_HHMMSS>.wav
+                                           <YYMMDD_HHMMSS>.json
 ```
 
-The file name follows WSJT-X's own pattern; the directory carries the band.  A recording with
+`archive_dir` defaults to `/var/lib/meteor-scatter/archive`.  The instance level carries the
+reporter id, made safe for a path.  Two radiods on one host would otherwise write the same
+`<band>/<day>/<stem>.wav` and overwrite each other's recordings.  The file name follows WSJT-X's
+own pattern; the next directory up carries the band.  A recording with
 no decode goes away as it does today.  The `paths.keep_wav` setting, which kept every recording
 without limit, retires.
 
@@ -100,7 +103,8 @@ or `archive_max_gb` (default 2), whichever binds first, and logs each deletion.
 The client estimates each band's noise floor from the recordings it already writes, from the
 quietest stretch of each slot so that pings do not raise it.  When a band's floor moves more
 than 10 dB from its calibrated level and stays there for an hour, the client warns: once in the
-journal on the change, once again on recovery, and continuously in `smd status`.  The warning
+journal on the change, once again on recovery, and in the `msqp` block of `inventory --json`
+while it stays open (§6).  The warning
 reports the front-end gain's change over the same hour, so an operator can tell a noisier band
 from a moved amplifier.  The client never adjusts the scale itself.  An operator re-runs
 `calibrate`, deliberately, between showers; a scale that shifted silently during a shower would
@@ -124,9 +128,8 @@ One listener per instance reads the status packets radiod already multicasts.  k
 listener and decodes each packet with `ka9q.status.decode_status_packet`.  It sends no poll
 and no control traffic, and so cannot disturb T6 or any other client.  From each packet it takes
 `rf_gain`, `rf_atten`, `rf_agc`, `if_power` and `ad_over`.  The listener times each reading by the host's receive time of the status packet, and
-the sidecar names that basis.  For each kept recording the sidecar
-holds the reading in force at the slot's start, every change during the slot, and the last
-reading.
+the sidecar names that basis.  For each kept recording the sidecar holds the reading in force at
+the slot's start, every change during the slot, and the last reading.
 
 A status packet shows that the gain changed somewhere between two packets, not at which sample.
 The sidecar therefore gives each step as a window of samples, from the last packet with the old
@@ -198,7 +201,7 @@ reads anything but `upload`, or when no token exists.
   step.  The exact token scopes follow from the same answer.
 - Calls against `sandbox.zenodo.org` with a test token settle all three before code lands.
 
-These questions stay open pending Michael's Zenodo setup.  `msqp draft` refuses while
+These questions stay open until the operator probes the sandbox.  `msqp draft` refuses while
 `msqp.zenodo_community` is empty.
 
 ## 6. Settings and sigmond
@@ -209,6 +212,7 @@ The instance config gains:
 [msqp]
 archive_max_days = 90
 archive_max_gb   = 2
+zenodo_community = ""                     # the MSQP community's Zenodo id; draft refuses while empty
 zenodo_token_path = "/etc/meteor-scatter/zenodo-token"
 operator         = ""                     # names and calls
 contact_email    = ""

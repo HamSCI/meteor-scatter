@@ -283,6 +283,165 @@ passes. If `chronyc` was unavailable the journal says so loudly and the
 anchor was taken unverified. Restart the instance after the clock is
 disciplined — but read the restart-cost section first.
 
+## MSQP
+
+The HamSCI Meteor Scatter QSO Party asks every entrant for a WAV recording of each decode,
+gathered into one zip and uploaded to Zenodo.  meteor-scatter keeps those recordings all year
+and builds the upload for you.  You press the last button yourself.
+
+### What the station keeps
+
+When jt9 decodes something in a slot, the daemon moves that slot's WAV into the archive and
+writes a JSON sidecar beside it.  A slot with no decode goes away as before.  The layout:
+
+```
+<archive_dir>/<instance>/<band>/<YYYYMMDD>/<YYMMDD_HHMMSS>.wav
+                                           <YYMMDD_HHMMSS>.json
+```
+
+`archive_dir` defaults to `/var/lib/meteor-scatter/archive`.  `<instance>` is the reporter id,
+made safe for a path, so two radiods on one host keep separate trees.  The sidecar records the
+band, the slot's start, the scale, the clipped-sample count, jt9's decode lines, and the
+front-end gain radiod reported while the slot ran.
+
+### The cap
+
+Once an hour the daemon deletes the oldest archive days.  It stops when the archive holds no
+day older than `archive_max_days` (default 90) and fits in `archive_max_gb` (default 2).  Each
+deletion appears in the journal.  Raise either cap in `[msqp]` before a long shower if you want
+the whole shower to survive.
+
+### Calibrate
+
+Until you calibrate a band, the writer normalises each slot's peak, so recordings from different
+slots have different levels.  The sidecars say `"scale": "uncalibrated"`.  Calibration fixes one
+scale per band.
+
+```
+sudo meteor-scatter msqp calibrate --instance <reporter-id>
+```
+
+The command reads the noise floors the daemon logged in
+`<spool>/<radiod_id>/noise-<freq>.txt`.  It needs ten slots of measurements per band, so let the
+daemon run five minutes first.  It takes the median floor and chooses the scale that puts the
+noise at -50 dBFS.  It prints one line per band and writes `scale_db` and `noise_cal_dbfs` into
+the config.  `--dry-run` prints the values and writes nothing.
+
+The command writes through `config apply`, and `config apply` drops every comment in the config
+file.  Copy the file first if its comments matter to you.
+
+The new scale takes effect after `sudo systemctl restart meteor-scatter@<instance>`.  That
+restart stops no radiod, but read the restart-cost section above before you do it.
+
+Run `calibrate` again after any change to the receiver: a new antenna, a new preamplifier, a
+radiod restart that moves the front-end gain.  Run it between showers.  A scale that changes
+during a shower leaves that shower's recordings incomparable with each other.  Calibrate while
+the band holds only its usual noise, and not during a storm or an opening.
+
+### The noise warning
+
+The daemon watches each calibrated band's noise floor.  When the floor sits more than 10 dB from
+its calibrated level for an hour, the journal carries one warning.  It names the deviation and
+how far the front-end gain moved over the same hour.  A second line appears when the floor
+returns.  The daemon never changes the scale itself.
+
+`meteor-scatter inventory --json` shows the same state in each instance's `msqp` block: the
+archive's size, its oldest day, the recordings kept today, each band's noise against calibration,
+and the age of the last front-end packet.  The block reads `null` when the daemon has not
+refreshed it in five minutes.
+
+When the warning appears, read the front-end gain figure in it.
+
+- The gain moved by about the same amount: the amplifier moved, not the band.  If the new level
+  will last, recalibrate.
+- The gain stayed put: the band got noisier or quieter.  Look for a local noise source, a
+  disconnected antenna, or an overload.  Recalibrate only after you fix the cause, and only
+  between showers.
+
+### The operator fields
+
+`msqp package` fills the Zenodo description from the instance config.  Set these once in the
+`[msqp]` block, in `/etc/meteor-scatter/<reporter-id>.toml`:
+
+- `operator`: the names and calls of the people who operate the station
+- `contact_email`: an address the MSQP organizers can reach
+- `antenna`: a short description of the antenna
+- `comments`: optional text for the description
+
+`[station] grid_square` must hold a grid too.  `package` refuses while any of the four required
+values is missing, and names it.
+
+### A Zenodo account and token
+
+Each operator uses a Zenodo account of their own.  The MSQP's own procedure
+(github.com/HamSCI/MSQP, `Zenodo.md`) covers the account: sign up at zenodo.org with ORCID (which
+it recommends), with GitHub, or with an institutional email address.
+
+That procedure never mentions a token, and `draft` needs one.
+
+1. In Zenodo, open your account menu, then Applications, then Personal access tokens.
+2. Create a new token.  Tick the scopes `deposit:write` and `deposit:actions`.
+3. Copy the token once.  Zenodo shows it only at creation.
+4. Save it as the only content of `/etc/meteor-scatter/zenodo-token`, mode 0600:
+
+```
+sudo install -m 0600 /dev/null /etc/meteor-scatter/zenodo-token
+sudo tee /etc/meteor-scatter/zenodo-token >/dev/null    # paste the token, then Ctrl-D
+```
+
+`draft` refuses a token file that has a mode other than 0600, that is a symlink, or that is
+empty.
+
+### Build the package
+
+```
+sudo meteor-scatter msqp package --instance <reporter-id> --from 2026-12-12 --to 2026-12-15
+```
+
+The two dates give the first and last UTC start day, inclusive.  The command builds
+`/var/lib/meteor-scatter/msqp/<title>/`, where the title has the MSQP form
+`<CALL> <GRID6> <YYYYMMDD-DD> Meteor Scatter QSO Party` and `/` becomes `-`.  The directory
+holds:
+
+- `<title>.zip`: the recordings and sidecars for those days, by band
+- `ALL.TXT`: built from the station's own decode log for the same days
+- `description.md`: the MSQP description template, filled in
+- `metadata.json`: the record exactly as `draft` will send it
+
+The command prints the recordings per band per day, the count, the zip's size, and the
+recordings that clipped or overloaded.  It writes only to local disk.  It runs as root and
+refuses an output directory that its invoking user does not own, or that group or other can write
+to.  `--out <dir>` replaces `/var/lib/meteor-scatter/msqp`.
+
+Read `description.md` and `metadata.json` before you go on.
+
+### Leave a draft on Zenodo
+
+```
+sudo meteor-scatter msqp draft '/var/lib/meteor-scatter/msqp/<title>' --instance <reporter-id>
+```
+
+`draft` creates a draft on Zenodo, uploads the zip and `ALL.TXT`, sets the metadata, reserves a
+DOI, and attaches the draft to the MSQP community.  It never submits and never publishes.  It
+writes its progress to `draft.json` in the package directory, so after a failure you run the same
+command again and it resumes the same draft.  It prints the draft's URL.
+
+`draft` refuses in these cases, and each message names the fix:
+
+- The site's upload mode for meteor-scatter reads anything but `upload`.  The draft leaves the
+  station, so it waits for the mode `upload`.
+- No token exists, or the token file is unsafe (see above).
+- `[msqp] zenodo_community` is empty.  Zenodo's identifier for the MSQP community is not yet
+  known.  The operator settles it with a probe against sandbox.zenodo.org, then sets the key.  Until then
+  `draft` sends nothing.
+
+### The last step, on Zenodo
+
+Open the draft's URL.  Check the files, the title, the description and the community.  Press
+"Submit for review".  A community administrator then reviews the record and publishes it with
+its DOI, or asks for more information.  Zenodo allows no change to a record after publication,
+which is why a person makes these last two moves and the station does not.
+
 ## Where the spots go
 
 ```

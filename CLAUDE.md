@@ -163,8 +163,9 @@ docstring — the codebase is well-documented at module level.
 - **Subprocess only for decoding** — shells out to `decode_ft8`. The
   uploader is now in-process via hs-uploader (the legacy `pskreporter`
   subprocess was removed during the ClickHouse-removal sweep).
-- **WAV spool deleted after decode** — `paths.keep_wav = false`
-  default.
+- **Decoded recordings go to the MSQP archive** — a slot WAV in which jt9
+  decoded something moves to `<archive_dir>/<instance>/<band>/<day>/`; every
+  other WAV is deleted after decode. `paths.keep_wav` is retired.
 - **PSWS station/instrument IDs are optional** — meteor-scatter doesn't
   require them; optional fields exist for operators who also run PSWS.
 
@@ -240,7 +241,6 @@ spool_dir   = "/var/lib/meteor-scatter"
 log_dir     = "/var/log/meteor-scatter"
 decoder     = "/usr/local/bin/decode_ft8"
 pskreporter = "/usr/local/bin/pskreporter"   # legacy; see "External dependencies"
-keep_wav    = false
 
 [[radiod]]
 id            = "bee1-rx888"

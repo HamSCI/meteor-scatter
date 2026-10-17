@@ -312,3 +312,48 @@ class TimingAuthorityAppliedFromRuntimeState(unittest.TestCase):
         # The recorder subscribes whenever an authority is published (§3:
         # capability, not the currently active mode).
         self.assertTrue(self._inventory()["uses_timing_calibration"])
+
+
+class MsqpInventoryFromRuntimeState(unittest.TestCase):
+    """The daemon leaves <spool>/<radiod_id>/msqp-state.json once a minute.
+    Inventory reports it while it is fresh and null otherwise, the way it
+    treats timing-authority.json."""
+
+    STATE = Path("/tmp/meteor-scatter-test/spool/test-status.local/msqp-state.json")
+
+    def tearDown(self):
+        self.STATE.unlink(missing_ok=True)
+
+    def _inventory(self):
+        env = os.environ.copy()
+        env["PSK_RECORDER_CONFIG"] = str(TEST_CONFIG)
+        env["PYTHONPATH"] = SRC_DIR + os.pathsep + env.get("PYTHONPATH", "")
+        proc = subprocess.run(
+            [sys.executable, "-m", "meteor_scatter", "inventory", "--json",
+             "--config", str(TEST_CONFIG)],
+            capture_output=True, text=True, timeout=10, env=env, cwd=str(REPO_ROOT),
+        )
+        return json.loads(proc.stdout)["instances"][0]
+
+    def _write(self, written_at):
+        self.STATE.parent.mkdir(parents=True, exist_ok=True)
+        self.STATE.write_text(json.dumps({
+            "written_at": written_at,
+            "archive": {"bytes": 10},
+            "frontend_last_packet_age_sec": 2.0,
+            "channels": [{"band": "6m", "archived": 3}],
+        }))
+
+    def test_fresh_state_is_reported(self):
+        import time
+        self._write(time.time() - 30)
+        msqp = self._inventory()["msqp"]
+        self.assertEqual(msqp["channels"][0]["band"], "6m")
+
+    def test_stale_state_reports_null(self):
+        import time
+        self._write(time.time() - 3600)
+        self.assertIsNone(self._inventory()["msqp"])
+
+    def test_absent_state_reports_null(self):
+        self.assertIsNone(self._inventory()["msqp"])

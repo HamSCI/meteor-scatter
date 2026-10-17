@@ -34,9 +34,9 @@ call site named in the row.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `spool_dir` | `/var/lib/meteor-scatter` | WAV spool root. Slots land in `<spool_dir>/<radiod_id>/msk144/`. |
+| `spool_dir` | `/var/lib/meteor-scatter` | Spool root. Slots land in `<spool_dir>/<radiod_id>/msk144/`. |
 | `log_dir` | `/var/log/meteor-scatter` | Spot-log dir. One append-only file per radiod: `<radiod_id>-msk144.log`. |
-| `keep_wav` | `false` | Keep slot WAVs after decode. Debug only — at 12 kHz mono s16 a kept slot is ~24 KB/s per channel. |
+| `keep_wav` | *(retired)* | Retired. A config that still sets it loads, with a warning. The daemon now keeps each recording that decoded something in the MSQP archive (`[msqp] archive_dir`) and deletes the rest. |
 | `decoder_kind` | `"jt9"` | Which decoder backend `SlotWorker` uses. `VALID_DECODER_KINDS = ("jt9",)` — jt9 is the only accepted value. |
 | `decoder_jt9` | `""` | Explicit path to a jt9 binary. Empty (the default) means "resolve `jt9` from PATH", where sigmond's from-source WSJT-X 3.0.2 build installs it as `/usr/local/bin/jt9`. |
 | `decoder` | `""` | Legacy alias for `decoder_jt9`, consulted only when `decoder_jt9` is absent. Prefer `decoder_jt9`. |
@@ -45,6 +45,25 @@ call site named in the row.
 An explicit decoder override that resolves to neither an existing file
 nor a `which`-able name is a `validate` **warning** (not a failure) — the
 recorder still records slots, it just cannot decode them.
+
+## `[msqp]` (optional)
+
+Settings for the MSQP capture: the archive of decoded recordings and the Zenodo draft.
+The daemon reads the archive keys.  `msqp package` and `msqp draft` read the operator and
+Zenodo keys.  See the MSQP section of OPERATIONS.md.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `archive_dir` | `/var/lib/meteor-scatter/archive` | Archive root. Each instance writes under `<archive_dir>/<instance>/<band>/<YYYYMMDD>/`, where `<instance>` is the reporter id made safe for a path. Keep it on the spool's filesystem so keeping a recording is a rename. |
+| `archive_max_days` | `90` | Delete archive days older than this. A positive integer. |
+| `archive_max_gb` | `2.0` | Delete the oldest days until the instance's archive fits. A positive number. The age cap and the size cap both apply. |
+| `operator` | `""` | Operator names and calls for the Zenodo record. `msqp package` refuses while empty. |
+| `contact_email` | `""` | Contact address for the record. `msqp package` refuses while empty. |
+| `antenna` | `""` | Antenna description for the record. `msqp package` refuses while empty. |
+| `comments` | `""` | Optional free text added to the record's description. |
+| `zenodo_url` | `https://zenodo.org` | Zenodo server. Use `https://sandbox.zenodo.org` with a sandbox token to practise. |
+| `zenodo_community` | `""` | The MSQP community's Zenodo identifier. `msqp draft` refuses while empty, because the identifier is not yet known. |
+| `zenodo_token_path` | `/etc/meteor-scatter/zenodo-token` | File holding the Zenodo token. It must be a regular file, mode 0600, with no symlink in the way. |
 
 ## `[processing]`
 
@@ -87,6 +106,25 @@ The only mode block — `config.MODES = ("msk144",)`.
 | `preset` | `"usb"` | radiod preset. Its filter (low +50, high +3k → ~2950 Hz passband) is the full SSB audio width a real WSJT-X station receives on. **Do not narrow it:** MSK144 is ~2.4–2.5 kHz wide (2000 baud MSK) centred on 1500 Hz, and a tighter filter clips the sidebands and kills decodes. |
 | `encoding` | `"s16be"` | Wire encoding requested from radiod. |
 | `tr_period_sec` | `30` (`MSK144_CADENCE_SEC = 30.0`) | The MSK144 T/R sequence length in seconds. This is simultaneously the recorded slot length, the decode cadence, and `jt9 -p`. It **must match the T/R period the stations you monitor use** — a mismatch still decodes (MSK144 frames are self-contained) but the same TX shows up in adjacent slots with a wandering `dt`. Stock WSJT-X defaults MSK144 to 30 s; 5/10/15 s are also offered, and 15 s is the 2 m VHF meteor-ping convention. |
+
+Two optional sub-tables hold the per-band scale for MSQP recordings. Each is keyed by the
+frequency in Hz written as a string, one key for each entry of `freqs_hz`.
+`meteor-scatter msqp calibrate` writes both.
+
+| Table | Meaning |
+|---|---|
+| `[radiod.msk144.scale_db]` | The fixed gain in dB the WAV writer applies to that band. A band with no entry keeps the old per-slot peak normalisation, and its sidecars read `"scale": "uncalibrated"`. |
+| `[radiod.msk144.noise_cal_dbfs]` | The band's noise floor in dBFS at calibration. The noise watch compares the running floor against it. A band with no entry has no watch. |
+
+```toml
+[radiod.msk144.scale_db]
+"28145000" = 12.4
+"50260000" = 9.8
+
+[radiod.msk144.noise_cal_dbfs]
+"28145000" = -62.4
+"50260000" = -59.8
+```
 
 Note that the sink's cycle *bucketing* grid is a fixed
 `MSK144_CYCLE_SEC = 15.0` in `core/cycle_batcher.py`, independent of
