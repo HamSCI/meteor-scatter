@@ -394,12 +394,11 @@ Each operator uses a Zenodo account of their own.  The MSQP's own procedure
 (github.com/HamSCI/MSQP, `Zenodo.md`) covers the account: sign up at zenodo.org with ORCID (which
 it recommends), with GitHub, or with an institutional email address.
 
-That procedure never mentions a token, and `draft` needs one.  The scopes below follow the
-current plan; they stay provisional until the sandbox probe settles which Zenodo API `draft`
-calls.
+That procedure never mentions a token, and `draft` needs one.
 
 1. In Zenodo, open your account menu, then Applications, then Personal access tokens.
-2. Create a new token.  Tick the scopes `deposit:write` and `deposit:actions`.
+2. Create a new token.  Tick only the scope `deposit:write`.  Leave `deposit:actions` off: it
+   lets a token publish, which `draft` never does.
 3. Copy the token once.  Zenodo shows it only at creation.
 4. Save it as the only content of `/etc/meteor-scatter/zenodo-token`, mode 0600:
 
@@ -459,9 +458,8 @@ command again and it resumes the same draft.  It prints the draft's URL.
   but `upload`.  The draft leaves the station, so it waits for the mode `upload`.  A
   per-client switch for meteor-scatter will replace this once sigmond ships one.
 - No token exists, or the token file is unsafe (see above).
-- `[msqp] zenodo_community` is empty.  Zenodo's identifier for the MSQP community is not yet
-  known.  The operator settles it with a probe against sandbox.zenodo.org, then sets the key.  Until then
-  `draft` sends nothing.
+- `[msqp] zenodo_community` is empty.  The default names the HamSCI community; someone blanked
+  it.  Restore the default or name the community, and `draft` sends nothing until then.
 
 ### The last step, on Zenodo
 

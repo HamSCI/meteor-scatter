@@ -16,9 +16,10 @@ except ModuleNotFoundError:
 
 log = logging.getLogger(__name__)
 
-# Zenodo's community id stays unknown until the operator's sandbox probe
-# answers (plan Task 0 Step 2); `msqp draft` refuses while it is empty.
-ZENODO_COMMUNITY_ID = ""
+# zenodo.org/communities/hamsci, "Ham Radio Science Citizen Investigation", the
+# community the MSQP procedure names (found 2026-10-18).  `msqp draft` refuses
+# while the key is empty; a sandbox run sets a sandbox community's id instead.
+ZENODO_COMMUNITY_ID = "1479b1c5-2a33-4f9e-9f09-fffcc9f4fe0b"
 
 DEFAULT_CONFIG_PATH = Path("/etc/meteor-scatter/meteor-scatter-config.toml")
 PER_INSTANCE_CONFIG_DIR = Path("/etc/meteor-scatter")

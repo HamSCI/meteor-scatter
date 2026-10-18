@@ -4,8 +4,8 @@ This module can create a draft, upload files, reserve a DOI and attach the commu
 request.  It has no way to submit the request or publish: a person does that on Zenodo, because a
 published record can never change.
 
-The endpoint paths follow InvenioRDM as the capture plan lists them; they stay provisional until
-the operator's Zenodo sandbox probe (deferred) confirms them.
+The endpoint paths follow InvenioRDM.  A run against sandbox.zenodo.org on 2026-10-18 confirmed
+every one, with a token holding only the deposit:write scope.
 """
 from __future__ import annotations
 

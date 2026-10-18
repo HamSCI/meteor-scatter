@@ -197,18 +197,26 @@ that writes deposits, and save it into `/etc/meteor-scatter/zenodo-token`.
 but `upload`, or when no token exists.  A per-client switch for meteor-scatter replaces the
 site-wide one once sigmond ships it.
 
-### 5.3 To settle before code lands
+### 5.3 What the sandbox showed (2026-10-18)
 
-- Zenodo's identifier for the community.  The MSQP documents give only its display name.
-- Which API carries the steps above.  The MSQP's "Submit for review" shows that Zenodo now runs
-  InvenioRDM, where a community joins a record through a review request rather than a metadata
-  field.  The plan expects InvenioRDM's records API (a draft, its files, a reserved DOI, and a
-  review request created but not submitted); the legacy deposit API may lack the community
-  step.  The exact token scopes follow from the same answer.
-- Calls against `sandbox.zenodo.org` with a test token settle all three before code lands.
+A probe and an end-to-end `draft` run against `sandbox.zenodo.org` settled the three open
+questions.
 
-These questions stay open until the operator probes the sandbox.  `msqp draft` refuses while
-`msqp.zenodo_community` is empty.
+- The community.  On zenodo.org the title "Ham Radio Science Citizen Investigation" belongs to
+  the community with slug `hamsci` and id `1479b1c5-2a33-4f9e-9f09-fffcc9f4fe0b`.  That id
+  became the default for `msqp.zenodo_community`.
+- The API.  InvenioRDM's records API carries every step: `POST /api/records` creates the draft,
+  the files API uploads and commits each file, `POST .../draft/pids/doi` reserves a DOI, and
+  `PUT .../draft/review` attaches the community-submission request.  After the run the draft
+  read `status: draft_with_review` and its review request read `created`, never submitted.  A
+  second run found the draft's state, saw both files committed, and created and uploaded
+  nothing.
+- The token.  The scope `deposit:write` alone covers every step.  `deposit:actions` grants
+  publishing, which `draft` never does, so operators leave it off.
+
+Zenodo answers a plain `Accept: application/json` with its legacy record shape on some calls
+(the DOI reservation, a draft read).  `draft` reads only `id` and `links.self_html` from the
+create reply and `entries` from the file list; both shapes carry those.
 
 ## 6. Settings and sigmond
 
@@ -218,7 +226,7 @@ The instance config gains:
 [msqp]
 archive_max_days = 90
 archive_max_gb   = 2
-zenodo_community = ""                     # the MSQP community's Zenodo id; draft refuses while empty
+zenodo_community = "1479b1c5-2a33-4f9e-9f09-fffcc9f4fe0b"   # zenodo.org/communities/hamsci
 zenodo_token_path = "/etc/meteor-scatter/zenodo-token"
 operator         = ""                     # names and calls
 contact_email    = ""

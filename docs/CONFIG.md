@@ -66,7 +66,7 @@ runs on without an archive.  `validate` warns about it, and `config apply` refus
 | `antenna` | `""` | Antenna description for the record. `msqp package` refuses while empty. |
 | `comments` | `""` | Optional free text added to the record's description. |
 | `zenodo_url` | `https://zenodo.org` | Zenodo server. Use `https://sandbox.zenodo.org` with a sandbox token to practise. |
-| `zenodo_community` | `""` | The MSQP community's Zenodo identifier. `msqp draft` refuses while empty, because the identifier is not yet known. |
+| `zenodo_community` | `1479b1c5-2a33-4f9e-9f09-fffcc9f4fe0b` | The MSQP community's Zenodo identifier (zenodo.org/communities/hamsci). A sandbox practice run needs a sandbox community's id here instead. `msqp draft` refuses while empty. |
 | `zenodo_token_path` | `/etc/meteor-scatter/zenodo-token` | File holding the Zenodo token. It must be a regular file, mode 0600, with no symlink in the way. |
 
 ## `[processing]`
