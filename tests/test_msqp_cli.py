@@ -1,4 +1,5 @@
 import argparse
+import difflib
 import io
 import tempfile
 import tomllib
@@ -161,6 +162,111 @@ class CmdCalibrateTests(unittest.TestCase):
         self.assertEqual(rc, 0, err)
         m = tomllib.loads(self.cfg.read_text())["radiod"][0]["msk144"]
         self.assertEqual(m["scale_db"], {"28145000": 31.0, "50260000": 12.5})
+
+
+COMMENTED = """\
+# AC0G-B4 meteor-scatter: the operator's notes stay put
+[station]
+callsign = "AC0G"   # licensee
+grid = "EM38"
+
+[paths]
+# the daemon's spool
+spool_dir = "{spool}"
+
+[[radiod]]
+status = "rx.local"   # B4's radiod
+
+# 10 m and 6 m
+[radiod.msk144]
+sample_rate   = 12000
+freqs_hz      = [
+  28_145_000,   # 10 m
+  50_260_000,   # 6 m
+]
+# Written by calibration, keyed by frequency in Hz as a string:
+[radiod.msk144.scale_db]
+"28145000" = 20.0   # set by hand on 10-01
+"50260000" = 12.5   # 6 m, left alone
+
+[radiod.msk144.noise_cal_dbfs]
+# measured 10-01
+"28145000" = -70.0
+
+# Meteor Scatter QSO Party archive
+#[msqp]
+#archive_max_days  = 90
+"""
+
+
+class CalibrateKeepsCommentsTests(unittest.TestCase):
+    """calibrate changes the numbers it writes and no other byte of the file."""
+
+    NOW = CmdCalibrateTests.NOW
+    _noise = CmdCalibrateTests._noise
+    _run = CmdCalibrateTests._run
+    tearDown = CmdCalibrateTests.tearDown
+
+    def setUp(self):
+        CmdCalibrateTests.setUp(self)
+        self.before = COMMENTED.format(spool=self.spool)
+        self.cfg.write_text(self.before)
+
+    def test_changes_only_the_values_it_writes(self):
+        self._noise(28145000, [-81.0] * 12)
+        rc, _, err = self._run()
+        self.assertEqual(rc, 0, err)
+        want = (self.before
+                .replace('"28145000" = 20.0   # set by hand', '"28145000" = 31.0   # set by hand')
+                .replace('"28145000" = -70.0', '"28145000" = -81.0'))
+        self.assertNotEqual(want, self.before)
+        self.assertEqual(self.cfg.read_text(), want)
+        self.assertEqual(list(self.root.glob("*.part")), [])
+
+    def test_adds_a_missing_key_and_keeps_every_line(self):
+        self._noise(50260000, [-70.0] * 12)
+        rc, _, err = self._run()
+        self.assertEqual(rc, 0, err)
+        after = self.cfg.read_text()
+        want = (self.before
+                .replace('"50260000" = 12.5   # 6 m', '"50260000" = 20.0   # 6 m')
+                .replace('"28145000" = -70.0\n', '"28145000" = -70.0\n"50260000" = -70.0\n'))
+        self.assertEqual(after, want)
+
+    def test_adds_missing_tables_without_touching_a_comment(self):
+        bare = self.before.split("# Written by calibration")[0] + \
+            "\n# Meteor Scatter QSO Party archive\n#[msqp]\n"
+        self.cfg.write_text(bare)
+        self._noise(28145000, [-81.0] * 12)
+        rc, _, err = self._run()
+        self.assertEqual(rc, 0, err)
+        after = self.cfg.read_text()
+        a, b = bare.splitlines(), after.splitlines()
+        ops = difflib.SequenceMatcher(a=a, b=b, autojunk=False).get_opcodes()
+        self.assertEqual({op for op, *_ in ops}, {"equal", "insert"})     # nothing lost
+        added = [ln for op, _i1, _i2, j1, j2 in ops if op == "insert" for ln in b[j1:j2]]
+        self.assertEqual([ln for ln in added if ln],
+                         ["[radiod.msk144.scale_db]", '"28145000" = 31.0',
+                          "[radiod.msk144.noise_cal_dbfs]", '"28145000" = -81.0'])
+        m = tomllib.loads(after)["radiod"][0]["msk144"]
+        self.assertEqual(m["scale_db"], {"28145000": 31.0})
+
+    def test_inline_table_falls_back_to_the_rewrite_and_says_so(self):
+        self.cfg.write_text(CONFIG.format(spool=self.spool)
+                            + 'scale_db = { "50260000" = 12.5 }\n')
+        self._noise(28145000, [-81.0] * 12)
+        rc, _, err = self._run()
+        self.assertEqual(rc, 0, err)
+        self.assertIn("drops its comments", err)
+        m = tomllib.loads(self.cfg.read_text())["radiod"][0]["msk144"]
+        self.assertEqual(m["scale_db"], {"28145000": 31.0, "50260000": 12.5})
+
+    def test_keeps_the_file_mode(self):
+        os.chmod(self.cfg, 0o640)
+        self._noise(28145000, [-81.0] * 12)
+        rc, _, err = self._run()
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self.cfg.stat().st_mode & 0o777, 0o640)
 
 
 import json, zipfile

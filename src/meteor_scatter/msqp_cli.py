@@ -12,6 +12,7 @@ import shutil
 import time
 import json
 import os
+import re
 import stat
 import sys
 import tomllib
@@ -722,11 +723,159 @@ def cmd_calibrate(args) -> int:
     if args.dry_run:
         print("dry run: nothing written")
         return 0
-    rc = configurator.apply_payload(config_path, {"radiod": raw_blocks})
+    expected = dict(raw)
+    expected["radiod"] = raw_blocks if isinstance(raw.get("radiod"), list) else raw_blocks[0]
+    try:
+        patched = _patch_band_tables(config_path.read_text(encoding="utf-8"), raw_blocks, expected)
+    except (OSError, UnicodeDecodeError):
+        patched = None
+    if patched is not None:
+        rc = _write_patched(config_path, patched, load_config)
+    else:
+        # A shape the in-place patch does not handle (an inline table, dotted keys):
+        # the validated rewrite, which loses the file's comments.
+        print("msqp calibrate: could not patch the config in place; rewriting it, "
+              "which drops its comments", file=sys.stderr)
+        rc = configurator.apply_payload(config_path, {"radiod": raw_blocks})
     if rc != 0:
         return rc
     shown = args.instance or ""
     print(f"restart meteor-scatter@{shown} to apply; this restarts no radiod")
+    return 0
+
+
+_HEADER_RE = re.compile(r"^\s*(\[\[?)\s*([^\[\]#]+?)\s*\]\]?\s*(?:#.*)?$")
+_BAND_TABLES = ("scale_db", "noise_cal_dbfs")
+
+
+def _header_name(line: str):
+    """(dotted name with whitespace and quotes removed, is_array) for a table header, else None."""
+    m = _HEADER_RE.match(line)
+    if not m:
+        return None
+    name = ".".join(part.strip().strip('"\'') for part in m.group(2).split("."))
+    return name, m.group(1) == "[["
+
+
+def _patch_band_tables(text: str, blocks: list, expected: dict):
+    """``text`` with each [[radiod]] block's [radiod.msk144.scale_db] and
+    [radiod.msk144.noise_cal_dbfs] entries set from ``blocks``, every other line untouched.
+
+    Changes a value in place (keeping a trailing comment), adds a missing key after the
+    table's last key, and adds a missing table at the end of its block.  Returns None when
+    the result would not parse to ``expected``: a shape this does not handle, which the
+    caller must not write."""
+    lines = text.splitlines(keepends=True)
+    headers = [(i, h) for i, h in ((i, _header_name(ln)) for i, ln in enumerate(lines)) if h]
+    # [[radiod]] (or a lone [radiod]) opens a block; a header outside radiod.* closes it
+    spans, start = [], None
+    for i, (name, _arr) in headers:
+        if name == "radiod":
+            if start is not None:
+                spans.append((start, i))
+            start = i
+        elif start is not None and not name.startswith("radiod."):
+            spans.append((start, i))
+            start = None
+    if start is not None:
+        spans.append((start, len(lines)))
+    if len(spans) != len(blocks):
+        return None
+
+    edits = []          # (line index, "replace" | "insert", new text), applied bottom-up
+    for (b0, b1), block in zip(spans, blocks):
+        msk = block.get("msk144") or {}
+        inner = [(i, name) for i, (name, _a) in headers if b0 < i < b1]
+        for table in _BAND_TABLES:
+            values = msk.get(table) or {}
+            if not values:
+                continue
+            want = f"radiod.msk144.{table}"
+            at = [i for i, name in inner if name == want]
+            if len(at) > 1:
+                return None
+            if not at:
+                end = b1
+                while end - 1 > b0 and (not lines[end - 1].strip()
+                                        or lines[end - 1].lstrip().startswith("#")):
+                    end -= 1
+                body = "".join(f'"{k}" = {_toml_float(v)}\n' for k, v in values.items())
+                lead = "" if lines[end - 1].endswith("\n") else "\n"
+                tail = "\n" if end < len(lines) and lines[end].strip() else ""
+                edits.append((end, "insert", f"{lead}\n[{want}]\n{body}{tail}"))
+                continue
+            h = at[0]
+            t_end = next((i for i, _n in inner if i > h), b1)
+            last_kv = h
+            for k, v in values.items():
+                key_re = re.compile(r"^(\s*(?:\"%s\"|'%s'|%s)\s*=\s*)([^#\r\n]*?)(\s*(?:#.*)?)(\r?\n?)$"
+                                    % ((re.escape(k),) * 3))
+                hit = None
+                for j in range(h + 1, t_end):
+                    if key_re.match(lines[j]):
+                        hit = j
+                        break
+                if hit is not None:
+                    m = key_re.match(lines[hit])
+                    if m.group(2).strip() != _toml_float(v):
+                        edits.append((hit, "replace",
+                                      m.group(1) + _toml_float(v) + m.group(3) + m.group(4)))
+            for j in range(h + 1, t_end):
+                if lines[j].strip() and not lines[j].lstrip().startswith("#"):
+                    last_kv = j
+            missing = [k for k in values
+                       if not any(re.match(r"^\s*(?:\"%s\"|'%s'|%s)\s*=" % ((re.escape(k),) * 3),
+                                           lines[j]) for j in range(h + 1, t_end))]
+            if missing:
+                lead = "" if lines[last_kv].endswith("\n") else "\n"
+                edits.append((last_kv + 1, "insert",
+                              lead + "".join(f'"{k}" = {_toml_float(values[k])}\n' for k in missing)))
+    # bottom-up, and at one index the later edit first, so the file reads in edit order
+    for _seq, (idx, kind, new) in sorted(enumerate(edits), key=lambda e: (e[1][0], e[0]),
+                                         reverse=True):
+        if kind == "replace":
+            lines[idx] = new
+        else:
+            lines.insert(idx, new)
+    out = "".join(lines)
+    try:
+        if tomllib.loads(out) != expected:
+            return None
+    except tomllib.TOMLDecodeError:
+        return None
+    return out
+
+
+def _toml_float(v) -> str:
+    s = repr(float(v))
+    return s if any(c in s for c in ".eEn") else s + ".0"
+
+
+def _write_patched(config_path: Path, text: str, load_config) -> int:
+    """Validate ``text`` through load_config, then replace ``config_path`` with it atomically,
+    keeping the file's mode."""
+    tmp = config_path.with_name(config_path.name + ".part")
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        try:
+            shutil.copymode(config_path, tmp)
+        except OSError:
+            pass
+        try:
+            load_config(tmp)
+        except (ValueError, tomllib.TOMLDecodeError) as e:
+            print(f"msqp calibrate: rejected by load_config: {e}", file=sys.stderr)
+            tmp.unlink(missing_ok=True)
+            return 2
+        tmp.replace(config_path)
+    except OSError as e:
+        print(f"msqp calibrate: {e}", file=sys.stderr)
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return 1
+    print(f"wrote {config_path}")
     return 0
 
 

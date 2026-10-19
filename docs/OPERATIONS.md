@@ -343,8 +343,11 @@ puts the noise at -50 dBFS.  It prints one line per band, with the number of slo
 span it used, and writes `scale_db` and `noise_cal_dbfs` into the config.  `--dry-run` prints
 the values and writes nothing.
 
-The command writes through `config apply`, and `config apply` drops every comment in the config
-file.  Copy the file first if its comments matter to you.
+The command changes those two tables in place and leaves every other line of the file alone,
+comments included.  It adds a missing table at the end of its `[[radiod]]` block.  A config that
+holds the tables in another shape, such as an inline table, defeats the in-place edit; the
+command then rewrites the whole file through `config apply`, which drops every comment, and says
+so on stderr.
 
 The new scale takes effect after `sudo systemctl restart meteor-scatter@<instance>`.  That
 restart stops no radiod, but read the restart-cost section above before you do it.
