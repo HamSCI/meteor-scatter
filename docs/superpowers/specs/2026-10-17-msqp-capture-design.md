@@ -287,3 +287,29 @@ sidecars.
 Capture, archive, sidecar and the noise-floor watch ship first; they start filling the archive.
 `package` and `draft` follow.  Should v3.73 run late, the second pair can come in a point
 release, since the archive holds 90 days.
+
+## 10. The working group's answers (Robert Suggs, 2026-10-20)
+
+Robert Suggs answered the questions this design put to the meteor-scatter working group.
+
+| Question | Answer | What follows |
+|---|---|---|
+| Does the sidecar carry what an analyst needs? | "Looks very complete, and way more than we are currently getting"; the group will ponder it further | No change now |
+| A monitor has no ADIF log.  Does `ALL.TXT` serve? | Fully: many entrants run receive only.  The WAV's comment tag carries too little and sometimes stale information, so the group reads `ALL.TXT` "extensively" | `ALL.TXT` now matches WSJT-X's columns exactly (200f1c3) |
+| Keep every slot at a shower's peak, decoded or not? | No value: a signal that does not decode cannot be placed | Keep only decoded slots, as now |
+| Noise 50 dB below full scale? | Reasonable: strong meteors and many weak ones both fit | No change |
+| The same HamSCI Zenodo community as QSO entries? | Yes, as now; a separate meteor-scatter "folder" may come later | No change |
+
+He raised three points about the decoder and the receiver, and each led to a change:
+
+- **The T/R period.**  The WSJT-X User Guide sets MSK144 to 15 s, and slots now run 15 s
+  (afb4568).  A 30 s station spans two slots, and its repeat gets spotted once.
+- **jt9.**  `jt9 --msk144` runs WSJT-X's own MSK144 decoder, `mskrtd`, the routine the
+  WSJT-X program calls in real time.  It now runs at the Guide's tolerance and depth, `-F 200 -d 3`
+  (afb4568).  jt9's file mode hard-codes short messages and SWL mode off; turning them on takes a
+  patch to `decode_msk144.f90` (v3.74).
+- **The front-end AGC.**  It has no decay time constant: it steps the VGA at most once a second,
+  and radiod rescales the samples at each step.  The package's `README.txt` says so (200f1c3).
+  Still to do: measure the step response on a bench RX888 (B1) with a steady tone, so analysts get a
+  measured kernel in place of a reading of the code; and locate each step to the sample within its
+  window (v3.74).
