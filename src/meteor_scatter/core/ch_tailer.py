@@ -33,6 +33,8 @@ from typing import Any, Optional
 
 from callhash import parse_message
 
+from meteor_scatter.core.plausible import out_of_reach
+
 logger = logging.getLogger(__name__)
 
 
@@ -168,6 +170,7 @@ class ChTailer:
         self._reporter_id = reporter_id or radiod_id
         self._host_call = host_call
         self._host_grid = host_grid
+        self.rejected_out_of_reach = 0
         self._processing_version = processing_version
         self._batch_rows = batch_rows
         self._writer_factory = writer_factory or _default_writer_factory
@@ -364,6 +367,15 @@ class ChTailer:
         for line in text.splitlines():
             row = parse_decoder_line(line, mode=self._mode, table=self._callhash)
             if row is None:
+                continue
+            # A grid meteor scatter cannot reach marks a false decode.
+            # Keep it out of the sink, so no upload path ships it; the
+            # archive keeps the recording and its decode regardless.
+            why = out_of_reach(row.get("grid", ""), self._host_grid)
+            if why:
+                self.rejected_out_of_reach += 1
+                logger.info("ch_tailer %s: not spotted, %s: %s",
+                            self._mode, why, row["message"])
                 continue
             row["timing_authority"] = timing_authority
             row["host_call"] = self._host_call
