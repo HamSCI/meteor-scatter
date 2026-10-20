@@ -338,6 +338,8 @@ def _package(archive, arch_fd, recs, cfg, callsign, grid, first, last, out_root,
             # analyst to filter by confidence.
             z.writestr("classification.csv", classified,
                        compress_type=zipfile.ZIP_STORED)
+            z.writestr("README.txt", P.readme_text(version),
+                       compress_type=zipfile.ZIP_STORED)
 
     fields = P.description_fields(cfg, callsign, grid, bands, version)
     md = P.record_metadata(title_text, P.description_html(fields), cfg["operator"],
@@ -345,6 +347,8 @@ def _package(archive, arch_fd, recs, cfg, callsign, grid, first, last, out_root,
     try:
         _write_atomic(pkg_fd, zip_path.name, write_zip)
         _write_atomic(pkg_fd, "ALL.TXT", lambda f: f.write("".join(lines).encode()))
+        _write_atomic(pkg_fd, "README.txt",
+                      lambda f: f.write(P.readme_text(version).encode()))
         _write_atomic(pkg_fd, "description.md",
                       lambda f: f.write(P.description_text(fields).encode()))
         _write_atomic(pkg_fd, "metadata.json",

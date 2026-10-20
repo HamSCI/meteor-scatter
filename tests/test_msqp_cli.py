@@ -304,9 +304,12 @@ class PackageTests(unittest.TestCase):
             self.assertEqual(sorted(z.namelist()), [
                 "6m/20261213/261213_235930.json", "6m/20261213/261213_235930.wav",
                 "6m/20261214/261214_000030.json", "6m/20261214/261214_000030.wav",
-                "classification.csv"])
+                "README.txt", "classification.csv"])
         self.assertEqual(len((r.dir / "ALL.TXT").read_text().splitlines()), 2)
         self.assertTrue((r.dir / "description.md").exists())
+        # The AGC note an analyst needs so as not to correct a step twice.
+        self.assertIn("Do not correct for a step a second time",
+                      (r.dir / "README.txt").read_text())
         self.assertIn("title", json.loads((r.dir / "metadata.json").read_text())["metadata"])
         self.assertEqual(r.flagged, ["6m/20261214/261214_000030.wav"])
 
@@ -344,7 +347,7 @@ class PackageTests(unittest.TestCase):
         self.assertEqual((r.dir / "draft.json").read_text(), '{"id": 7}')
         self.assertEqual(len((r.dir / "ALL.TXT").read_text().splitlines()), 2)
         with zipfile.ZipFile(r2.zip_path) as z:
-            self.assertEqual(len(z.namelist()), 5)        # 2 recordings + classification.csv
+            self.assertEqual(len(z.namelist()), 6)   # 2 recordings, README.txt, classification.csv
 
 
 class PackageHardeningTests(unittest.TestCase):

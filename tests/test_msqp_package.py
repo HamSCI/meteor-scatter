@@ -20,7 +20,7 @@ class AllTxtTests(unittest.TestCase):
         side = {"slot_start_utc": "2026-12-13T23:59:30+00:00", "dial_freq_hz": 50260000}
         d = {"snr": -2, "dt": 0.3, "audio_freq_hz": 1500, "message": "CQ W3USR FN21"}
         self.assertEqual(P.all_txt_line(side, d),
-                         "261213_235930    50.260 Rx MSK144     -2  0.3 1500 CQ W3USR FN21\n")
+                         "261213_235930    50.260 Rx MSK144  -2  0.3 1500 CQ W3USR FN21\n")
 
 
 class DescriptionTests(unittest.TestCase):
