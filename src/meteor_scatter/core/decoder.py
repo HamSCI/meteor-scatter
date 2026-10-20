@@ -30,10 +30,17 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 # WSJT-X MSK144 conventions.
-# Default T/R sequence length: a stock WSJT-X install defaults MSK144 to 30 s.
-# This is only the fallback for build_jt9_cmd — the live value is the recorder's
-# configured tr_period_sec, passed in from the slot cadence.
-MSK144_TR_PERIOD_SEC = 30
+# Default T/R sequence length.  The WSJT-X User Guide's MSK144 setup says "Set
+# the T/R sequence duration to 15 s".  This is only the fallback for
+# build_jt9_cmd — the live value is the recorder's configured tr_period_sec,
+# passed in from the slot cadence.
+MSK144_TR_PERIOD_SEC = 15
+# The settings the Guide asks of an MSK144 operator, which jt9's own defaults
+# (+-20 Hz, Fast) fall short of: "F Tol 100", raised to 200 when the CPU
+# allows, and decoding depth raised from Fast to Normal or Deep.  Deep (3)
+# adds the 4-, 5- and 7-frame averages to the single-ping decoder.
+MSK144_FTOL_HZ = 200
+MSK144_DEPTH = 3
 MSK144_AUDIO_FREQ_HZ = 1500        # default audio Tx passband centre (jt9 -f)
 # The MSK144 sync indicator jt9 writes in the mode column (FT8=`~`, FT4=`+`,
 # JT65=`#`, JT9=`@`, MSK144=`&`).  Used both to tag normalized log lines and
@@ -73,7 +80,7 @@ def build_jt9_cmd(
     """Build the ``jt9 --msk144`` argv for one slot WAV.
 
     ``tr_period_sec`` is jt9's ``-p`` (T/R period); it must match the slot
-    cadence and the transmitting stations' WSJT-X T/R period (default 30 s).
+    cadence and the transmitting stations' WSJT-X T/R period (default 15 s).
 
     ``-a workdir`` is jt9's writeable data dir (decoded.txt, wisdom,
     timer.out land there); run the process with ``cwd=workdir`` and
@@ -93,6 +100,8 @@ def build_jt9_cmd(
         "--msk144",
         "-p", str(int(tr_period_sec)),
         "-f", str(MSK144_AUDIO_FREQ_HZ),
+        "-F", str(MSK144_FTOL_HZ),
+        "-d", str(MSK144_DEPTH),
         "-a", str(workdir),
         str(wav_path),
     ]

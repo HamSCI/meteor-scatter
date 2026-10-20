@@ -239,11 +239,13 @@ def get_noise_cal_dbfs(radiod_block: dict, freq_hz: int) -> Optional[float]:
 # transmitting WSJT-X stations use, or the recorded slots won't frame their
 # transmissions cleanly (a mismatch still decodes — MSK144 frames are self-
 # contained — but the same TX shows up in adjacent slots with a wandering dt).
-# A stock WSJT-X install defaults MSK144 to 30 s, so that is our default;
-# WSJT-X also offers 5/10/15 s.  Overridable per radiod via the
+# The WSJT-X User Guide sets MSK144 to 15 s, so that is our default; WSJT-X
+# also offers 5, 10 and 30 s.  A 30 s transmission spans two of our slots, and
+# ch_tailer spots its repeat in the second slot once.  Overridable per radiod
+# via the
 # ``[radiod.msk144] tr_period_sec`` key.  We record one T/R-aligned slot per
 # period and decode it once with ``jt9 --msk144 -p <tr_period_sec>``.
-MSK144_CADENCE_SEC = 30.0
+MSK144_CADENCE_SEC = 15.0
 # Single decode mode for this client.  Kept as a tuple so the per-mode loops
 # inherited from the FT4/FT8 skeleton iterate cleanly over just this one.
 MODES = ("msk144",)

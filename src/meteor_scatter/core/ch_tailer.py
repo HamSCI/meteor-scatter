@@ -178,6 +178,8 @@ class ChTailer:
                 "decode gets spotted.  Set [station] grid_square to a 4- or "
                 "6-character Maidenhead locator", mode, host_grid)
         self.rejected: dict = {}
+        self.repeats_skipped = 0
+        self._slot_messages: dict = {}
         self._rejected_since: dict = {}
         self._rejected_report = time.monotonic()
         self._processing_version = processing_version
@@ -376,6 +378,20 @@ class ChTailer:
         for line in text.splitlines():
             row = parse_decoder_line(line, mode=self._mode, table=self._callhash)
             if row is None:
+                continue
+            # A station on 30 s periods (they start at :00 and :30) spans two
+            # 15 s slots and repeats its message in both.  Spot it once; the
+            # archive keeps both recordings.  Slots of 30 s never start at
+            # :15 or :45, so this never fires for them.
+            slot = int(row["time"].timestamp())
+            msgs = self._slot_messages.setdefault(slot, set())
+            repeat = (slot % 30 == 15
+                      and row["message"] in self._slot_messages.get(slot - 15, ()))
+            msgs.add(row["message"])
+            for old in [t for t in self._slot_messages if t < slot - 15]:
+                del self._slot_messages[old]
+            if repeat:
+                self.repeats_skipped += 1
                 continue
             # A decode with something plainly wrong gets no sink row, so
             # no upload path ships it; the archive keeps the recording and

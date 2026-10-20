@@ -182,7 +182,7 @@ Each `[[radiod]]` block corresponds to one systemd instance:
 [[radiod]]
 status = "sigma-rx888mk2-status.local"
 [radiod.msk144]
-tr_period_sec = 30
+tr_period_sec = 15
 freqs_hz = [28_145_000, 50_260_000]
 
 [[radiod]]

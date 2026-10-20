@@ -148,13 +148,13 @@ class NoiseLogTests(unittest.TestCase):
         self.ch.on_slot(T0 + 30, WavStats(0.0, 0, None))
         self.assertEqual(self.log.read_text().splitlines(), [f"{int(T0)} -81.2"])
 
-    def test_keeps_the_last_120_lines(self):
-        for i in range(130):
-            self.ch.on_slot(T0 + 30 * i, WavStats(0.0, 0, -80.0 - i * 0.1))
+    def test_keeps_an_hour_of_15_s_slots(self):
+        for i in range(250):
+            self.ch.on_slot(T0 + 15 * i, WavStats(0.0, 0, -80.0 - i * 0.01))
         lines = self.log.read_text().splitlines()
-        self.assertEqual(len(lines), 120)
-        self.assertEqual(lines[0].split()[0], str(int(T0 + 30 * 10)))
-        self.assertEqual(lines[-1].split()[0], str(int(T0 + 30 * 129)))
+        self.assertEqual(len(lines), 240)
+        self.assertEqual(lines[0].split()[0], str(int(T0 + 15 * 10)))
+        self.assertEqual(lines[-1].split()[0], str(int(T0 + 15 * 249)))
 
     def test_oserror_never_escapes_and_warns_once(self):
         self.ch._noise_log = self.root / "no-such-dir" / "deeper" / "n.txt"

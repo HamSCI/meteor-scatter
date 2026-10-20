@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from meteor_scatter.config import (
+    MSK144_CADENCE_SEC,
     get_freqs,
     get_mode_params,
     get_msqp,
@@ -283,6 +284,19 @@ def _collect_issues(config: dict, paths: dict) -> list[dict]:
 
     for block in radiod_blocks:
         rid = block.get("status", "<unnamed>")
+        period = (block.get("msk144") or {}).get("tr_period_sec")
+        if period is not None and float(period) != MSK144_CADENCE_SEC:
+            issues.append({
+                "severity": "warn",
+                "instance": rid,
+                "message": (
+                    f"[radiod.msk144] tr_period_sec = {period}: the WSJT-X User Guide "
+                    f"sets MSK144 to {int(MSK144_CADENCE_SEC)} s, so slots of {period} s "
+                    "frame most stations' transmissions badly.  Set it to "
+                    f"{int(MSK144_CADENCE_SEC)} unless the stations you monitor use "
+                    "another period"
+                ),
+            })
         if not block.get("status"):
             issues.append({
                 "severity": "fail",

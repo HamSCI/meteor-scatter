@@ -184,3 +184,34 @@ def test_the_tailer_spots_only_what_passes() -> None:
     assert got["AC0G JA1ABC PM95"]["suspect"] == [P.SUSPECT_REACH]
     assert got["AC0G K1ABC R EN37"]["suspect"] == []
     assert tailer.rejected == {P.REJECT_BAD_CALL: 1, P.REJECT_NO_GRID: 1}
+
+
+def test_a_30_s_station_repeated_across_two_slots_is_spotted_once() -> None:
+    lines = [
+        # K1ABC on 30 s periods: :00-:30 spans the :00 and :15 slots.
+        "2026/10/19 18:11:00 -3 +2.00 50260900 & AC0G K1ABC EN37",
+        "2026/10/19 18:11:15 -4 +6.00 50260900 & AC0G K1ABC EN37",
+        # The same text again in the next period, :30, is a new transmission.
+        "2026/10/19 18:11:30 -3 +1.00 50260900 & AC0G K1ABC EN37",
+        # A 15 s station in the :45 slot, after a different message at :30.
+        "2026/10/19 18:11:45 -5 +1.00 50260900 & AC0G W9XYZ EN52"]
+    with tempfile.TemporaryDirectory() as td:
+        log = Path(td) / "b4-msk144.log"
+        log.write_text("")
+        fake = FakeWriter()
+        tailer = ChTailer(
+            log_path=log, mode="msk144", radiod_id="test-rx888",
+            host_call="AC0G", host_grid=HOME, processing_version="0.1.0+abc",
+            writer_factory=lambda batch_rows: fake)
+        tailer.start()
+        try:
+            with open(log, "a") as f:
+                f.write("\n".join(lines) + "\n")
+            deadline = time.monotonic() + 4.0
+            while time.monotonic() < deadline and len(fake.inserts) < 3:
+                time.sleep(0.1)
+        finally:
+            tailer.stop(timeout=2.0)
+    times = [r["time"].strftime("%M:%S") for r in fake.inserts]
+    assert times == ["11:00", "11:30", "11:45"]
+    assert tailer.repeats_skipped == 1

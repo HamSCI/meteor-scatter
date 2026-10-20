@@ -22,7 +22,7 @@ from meteor_scatter.core.wav import WavStats
 
 logger = logging.getLogger(__name__)
 
-NOISE_LOG_LINES = 120            # an hour of 30 s slots, for `msqp calibrate`
+NOISE_LOG_LINES = 240            # an hour of 15 s slots, for `msqp calibrate`
 
 
 def channel_requested(preset: str) -> dict:
@@ -72,7 +72,7 @@ def _noise_line_ok(line: str) -> bool:
 class MsqpChannel:
     def __init__(self, archive: Archive, frontend: FrontendLog, freq_hz: int, reporter_id: str,
                  scale_db: Optional[float], noise: NoiseWatch, version: str,
-                 cadence_sec: float = 30.0, noise_log: Optional[Path] = None,
+                 cadence_sec: float = 15.0, noise_log: Optional[Path] = None,
                  preset: str = "usb"):
         self._archive = archive
         self._frontend = frontend

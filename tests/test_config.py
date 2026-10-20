@@ -40,10 +40,10 @@ class TestModeParams(unittest.TestCase):
     """tr_period_sec (jt9 -p + slot cadence) is config-driven, default 30 s
     to match a stock WSJT-X MSK144 install."""
 
-    def test_tr_period_defaults_to_30(self):
+    def test_tr_period_defaults_to_the_wsjtx_guides_15(self):
         params = get_mode_params({"msk144": {"freqs_hz": [28145000]}}, "msk144")
-        self.assertEqual(params["tr_period_sec"], 30.0)
-        self.assertEqual(MSK144_CADENCE_SEC, 30.0)
+        self.assertEqual(params["tr_period_sec"], 15.0)
+        self.assertEqual(MSK144_CADENCE_SEC, 15.0)
 
     def test_tr_period_override(self):
         block = {"msk144": {"freqs_hz": [144360000], "tr_period_sec": 15}}

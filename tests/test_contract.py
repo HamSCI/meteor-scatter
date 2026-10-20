@@ -196,6 +196,19 @@ class ValidateTests(unittest.TestCase):
         self.assertIn("ok", data)
         self.assertIsInstance(data["issues"], list)
 
+    def test_a_30_s_period_warns_and_15_s_does_not(self):
+        from meteor_scatter.contract import _collect_issues
+        def issues(period):
+            cfg = {"station": {"callsign": "AC0G", "grid_square": "EM38ww"},
+                   "radiod": [{"status": "rx.local",
+                               "msk144": {"tr_period_sec": period,
+                                          "freqs_hz": [50260000]}}]}
+            return [i["message"] for i in _collect_issues(cfg, {})
+                    if "tr_period_sec" in i["message"]]
+        self.assertEqual(len(issues(30)), 1)
+        self.assertIn("WSJT-X User Guide sets MSK144 to 15 s", issues(30)[0])
+        self.assertEqual(issues(15), [])
+
     def test_missing_config_returns_fail(self):
         proc = self._run_validate(Path("/nonexistent/config.toml"))
         data = json.loads(proc.stdout)

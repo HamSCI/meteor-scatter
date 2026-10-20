@@ -48,10 +48,13 @@ class TestBuildCmd(unittest.TestCase):
         # -Y emits unresolved compound-call hashes as <NNNNNNN> so the
         # callhash table can resolve them (parity with wspr's FST4W path).
         self.assertIn("-Y", cmd)
-        # -p 30 (default T/R period = stock WSJT-X MSK144), -f 1500 (audio
-        # offset), -a workdir, wav last.
-        self.assertEqual(cmd[cmd.index("-p") + 1], "30")
+        # -p 15 (the WSJT-X Guide's MSK144 period), -f 1500 (audio offset),
+        # -F 200 and -d 3 (the Guide's tolerance and depth; jt9's own
+        # defaults are +-20 Hz and Fast), -a workdir, wav last.
+        self.assertEqual(cmd[cmd.index("-p") + 1], "15")
         self.assertEqual(cmd[cmd.index("-f") + 1], "1500")
+        self.assertEqual(cmd[cmd.index("-F") + 1], "200")
+        self.assertEqual(cmd[cmd.index("-d") + 1], "3")
         self.assertEqual(cmd[cmd.index("-a") + 1], "/wd")
         self.assertEqual(cmd[-1], "/wd/slot.wav")
         self.assertEqual(cmd[0], "jt9")

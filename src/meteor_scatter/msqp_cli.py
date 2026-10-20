@@ -25,7 +25,7 @@ from meteor_scatter import msqp_package as P
 from meteor_scatter.core import review as R
 from meteor_scatter.zenodo import Zenodo, ZenodoError
 
-MIN_SLOTS = 10          # five minutes at 30 s
+MIN_SLOTS = 10          # the fewest noise measurements calibrate accepts (2.5 min at 15 s)
 CALIBRATE_WINDOW_SEC = 600.0     # calibrate reads only the last ten minutes of the noise log
 FUTURE_SLACK_SEC = 60.0          # a line stamped further ahead than this comes from a clock step
 
