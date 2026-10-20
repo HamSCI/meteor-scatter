@@ -59,7 +59,8 @@ def test_valid_transmitter_calls(call) -> None:
     assert P.tx_call_valid(call)
 
 
-@pytest.mark.parametrize("call", ["1B0OCH", "Q1ABC", "0X1AB", "", "CQ", "<...>"])
+@pytest.mark.parametrize("call", ["1B0OCH", "Q1ABC", "0X1AB", "", "CQ", "<...>",
+                                  "599", "73", "5NN"])
 def test_invalid_transmitter_calls(call) -> None:
     assert not P.tx_call_valid(call)
 
@@ -215,3 +216,29 @@ def test_a_30_s_station_repeated_across_two_slots_is_spotted_once() -> None:
     times = [r["time"].strftime("%M:%S") for r in fake.inserts]
     assert times == ["11:00", "11:30", "11:45"]
     assert tailer.repeats_skipped == 1
+
+
+# ── the repeat filter (review, 10-20) ───────────────────────────────────────
+
+def test_repeats_key_on_slot_time_not_arrival_order() -> None:
+    f = P.RepeatFilter()
+    a, b = P.channel_of(50260900), P.channel_of(28145900)
+    assert not f.repeat(660, a, "AC0G K1ABC EN37")      # A at :00
+    assert not f.repeat(690, b, "AC0G W9XYZ EN52")      # B at :30 lands first
+    assert f.repeat(675, a, "AC0G K1ABC EN37")          # A's slow :15 still a repeat
+
+
+def test_repeats_stay_on_their_own_channel() -> None:
+    f = P.RepeatFilter()
+    assert not f.repeat(660, P.channel_of(50260900), "CQ K1ABC EN37")
+    assert not f.repeat(675, P.channel_of(144150900), "CQ K1ABC EN37")
+
+
+def test_review_applies_the_daemons_repeat_rule() -> None:
+    side = lambda start, dt: {"slot_start_utc": start, "dial_freq_hz": 50260000,
+                              "band": "6m", "decodes": [
+        {"snr": -3, "dt": dt, "audio_freq_hz": 1500, "message": "AC0G K1ABC EN37"}]}
+    rows = classify(sidecar_decodes(side("2026-10-19T18:11:00+00:00", 2.0), "a.wav")
+                    + sidecar_decodes(side("2026-10-19T18:11:15+00:00", 6.0), "b.wav"), HOME)
+    assert [r["spot"] for r in rows] == [True, False]
+    assert rows[1]["rejected"] == [P.REJECT_REPEAT]

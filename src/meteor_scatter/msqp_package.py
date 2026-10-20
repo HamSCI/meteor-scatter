@@ -85,8 +85,9 @@ Software: meteor-scatter {version}.  Receiver: ka9q-radio's radiod on an RX888.
 Files
 -----
 <band>/<YYYYMMDD>/<YYMMDD_HHMMSS>.wav
-    One 15 s slot in which jt9 decoded at least one MSK144 message, named for
-    the slot's start (UTC).  Slots without a decode are not kept.
+    One slot (15 s, unless the station set another period) in which jt9
+    decoded at least one MSK144 message, named for the slot's start (UTC).
+    Slots without a decode are not kept.
 <band>/<YYYYMMDD>/<YYMMDD_HHMMSS>.json
     The sidecar: the recording's gain, noise floor, front-end state and decodes.
 ALL.TXT
@@ -94,11 +95,14 @@ ALL.TXT
     recording's start (its WAV name), and dt the decode's offset into it.
     WSJT-X live stamps an MSK144 line with the clock time of the decode instead.
 classification.csv
-    Every decode with its verdict: spotted to PSKReporter or not, and why; where
+    Every decode with its verdict, by the rules the station's daemon applies
+    before sending a spot to PSKReporter: spotted or not, and why; where
     the transmitter's grid came from (the message itself, or a message from the
     same callsign within 24 h); the path length; any suspect flag; and the
     exchange it belongs to, where this monitor heard both stations and an
-    acknowledgement.
+    acknowledgement.  The daemon also resolves hashed compound callsigns
+    from what it has heard before; this file does not, so a decode carrying
+    one can read "no transmitter callsign" here though the station spotted it.
 
 Gain
 ----

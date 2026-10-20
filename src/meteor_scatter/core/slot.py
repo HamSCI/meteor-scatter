@@ -28,8 +28,8 @@ Recordings: every slot's WAV lands in the spool.  A slot jt9 decoded something
 in goes to the MSQP archive (core/msqp.py) with a JSON sidecar; every other
 slot, and any recording the archive could not take, is deleted.
 
-MSK144 cadence: T/R slots at the configured tr_period_sec (default 30 s,
-matching stock WSJT-X — slots at :00, :30; a 15 s config gives :00/:15/:30/:45).
+MSK144 cadence: T/R slots at the configured tr_period_sec (default 15 s, the
+WSJT-X User Guide's MSK144 period — slots at :00/:15/:30/:45; 30 s gives :00, :30).
 """
 
 from __future__ import annotations

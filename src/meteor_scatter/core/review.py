@@ -13,7 +13,8 @@ from typing import Iterable, List, Tuple
 
 from callhash import parse_message
 
-from meteor_scatter.core.plausible import Classifier, heard_exchanges
+from meteor_scatter.core.plausible import (REJECT_REPEAT, Classifier, RepeatFilter,
+                                           channel_of, heard_exchanges)
 
 CSV_FIELDS = ["utc", "band", "recording", "frequency_hz", "snr_db", "dt", "message",
               "tx_call", "rx_call", "grid", "grid_source", "distance_km", "spot",
@@ -35,6 +36,7 @@ def sidecar_decodes(side: dict, recording: str) -> List[dict]:
         parsed = parse_message(message)
         out.append({
             "time": start + float(d.get("dt") or 0.0),
+            "slot": int(start),
             "band": side.get("band", ""),
             "recording": recording,
             "frequency_hz": dial + int(d.get("audio_freq_hz") or 0),
@@ -49,14 +51,20 @@ def sidecar_decodes(side: dict, recording: str) -> List[dict]:
 
 
 def classify(decodes: Iterable[dict], host_grid: str) -> List[dict]:
-    """Each decode, in time order, with its classification and exchange."""
+    """Each decode, in time order, with its classification and exchange, by
+    the daemon's rules: the same Classifier, and the same RepeatFilter."""
     rows = sorted(decodes, key=lambda d: d["time"])
     c = Classifier(host_grid)
+    repeats = RepeatFilter()
     exchanges = heard_exchanges(rows)
     out = []
     for i, d in enumerate(rows):
-        v = c.classify(d["time"], d["tx_call"], d["message_grid"])
-        out.append({**d, **v.as_dict(), "heard_exchange": exchanges.get(i, "")})
+        if repeats.repeat(d["slot"], channel_of(d["frequency_hz"]), d["message"]):
+            v = {"spot": False, "grid": "", "grid_source": "none", "distance_km": None,
+                 "rejected": [REJECT_REPEAT], "suspect": []}
+        else:
+            v = c.classify(d["time"], d["tx_call"], d["message_grid"]).as_dict()
+        out.append({**d, **v, "heard_exchange": exchanges.get(i, "")})
     return out
 
 

@@ -33,7 +33,7 @@ from typing import Any, Optional
 
 from callhash import parse_message
 
-from meteor_scatter.core.plausible import Classifier
+from meteor_scatter.core.plausible import Classifier, RepeatFilter, channel_of
 
 logger = logging.getLogger(__name__)
 
@@ -175,11 +175,11 @@ class ChTailer:
         if not self._classifier.host_grid_ok:
             logger.warning(
                 "ch_tailer %s: the station grid %r is missing or malformed, so no "
-                "decode gets spotted.  Set [station] grid_square to a 4- or "
-                "6-character Maidenhead locator", mode, host_grid)
+                "decode gets spotted.  Set [station] grid_square to "
+                "a Maidenhead locator of 4 to 10 characters", mode, host_grid)
         self.rejected: dict = {}
         self.repeats_skipped = 0
-        self._slot_messages: dict = {}
+        self._repeats = RepeatFilter()
         self._rejected_since: dict = {}
         self._rejected_report = time.monotonic()
         self._processing_version = processing_version
@@ -379,18 +379,10 @@ class ChTailer:
             row = parse_decoder_line(line, mode=self._mode, table=self._callhash)
             if row is None:
                 continue
-            # A station on 30 s periods (they start at :00 and :30) spans two
-            # 15 s slots and repeats its message in both.  Spot it once; the
-            # archive keeps both recordings.  Slots of 30 s never start at
-            # :15 or :45, so this never fires for them.
-            slot = int(row["time"].timestamp())
-            msgs = self._slot_messages.setdefault(slot, set())
-            repeat = (slot % 30 == 15
-                      and row["message"] in self._slot_messages.get(slot - 15, ()))
-            msgs.add(row["message"])
-            for old in [t for t in self._slot_messages if t < slot - 15]:
-                del self._slot_messages[old]
-            if repeat:
+            # A 30 s station's repeat in the next 15 s slot gets spotted
+            # once (plausible.RepeatFilter); the archive keeps both recordings.
+            if self._repeats.repeat(int(row["time"].timestamp()),
+                                    channel_of(row.get("frequency")), row["message"]):
                 self.repeats_skipped += 1
                 continue
             # A decode with something plainly wrong gets no sink row, so

@@ -285,7 +285,11 @@ def _collect_issues(config: dict, paths: dict) -> list[dict]:
     for block in radiod_blocks:
         rid = block.get("status", "<unnamed>")
         period = (block.get("msk144") or {}).get("tr_period_sec")
-        if period is not None and float(period) != MSK144_CADENCE_SEC:
+        try:
+            off_period = period is not None and float(period) != MSK144_CADENCE_SEC
+        except (TypeError, ValueError):
+            off_period = True
+        if off_period:
             issues.append({
                 "severity": "warn",
                 "instance": rid,

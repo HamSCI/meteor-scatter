@@ -50,6 +50,7 @@ REJECT_NO_CALL = "no transmitter callsign"
 REJECT_BAD_CALL = "transmitter callsign not ITU-allocated"
 REJECT_NO_GRID = "no transmitter grid"
 REJECT_HOST_GRID = "receiver grid missing or malformed"
+REJECT_REPEAT = "repeat of a 30 s transmission"
 SUSPECT_REACH = "beyond meteor-scatter reach"
 
 
@@ -85,6 +86,11 @@ def tx_call_valid(call: str) -> bool:
     use.  For "VE3/K1ABC" the prefix before the slash decides."""
     call = (call or "").strip().upper()
     if not call or not _CALL_RE.match(call):
+        return False
+    # Every call ends in letters after its last digit (K1ABC, AC0G); "599"
+    # and "73" match the shape but are reports.  For "K1ABC/P" or
+    # "VE3/K1ABC", one part must.
+    if not any(re.search(r"[0-9][A-Z]+$", part) for part in call.split("/")):
         return False
     if call[0] == "1":
         return call.startswith("1A")
@@ -137,6 +143,9 @@ class Classifier:
             v.grid, v.grid_source = grid.strip(), "message"
             if not v.rejected:
                 self._grids[call] = (when, v.grid)
+                if len(self._grids) > 4096:
+                    self._grids = {c: g for c, g in self._grids.items()
+                                   if when - g[0] <= self._memory_s}
         elif call and not v.rejected:
             seen = self._grids.get(call)
             if seen and 0 <= when - seen[0] <= self._memory_s:
@@ -151,6 +160,39 @@ class Classifier:
                 v.suspect.append(SUSPECT_REACH)
         v.spot = not v.rejected
         return v
+
+
+class RepeatFilter:
+    """Spots a 30 s station's message once.  WSJT-X starts 30 s periods at
+    :00 and :30, so on 15 s slots such a station fills a slot at :00 or :30
+    and repeats in the slot 15 s later.  A repeat is the same message, on
+    the same channel, in a slot starting at :15 or :45.  Slots of 30 s
+    never start there, so the filter never fires for them.  Keyed by slot
+    time, not arrival order: one log carries every channel's lines, and a
+    slow decode can land late."""
+
+    KEEP_S = 120
+
+    def __init__(self) -> None:
+        self._seen: Dict[Tuple[int, int], set] = {}
+        self._newest = 0
+
+    def repeat(self, slot: int, channel: int, message: str) -> bool:
+        is_repeat = (slot % 30 == 15
+                     and message in self._seen.get((channel, slot - 15), ()))
+        self._seen.setdefault((channel, slot), set()).add(message)
+        if slot > self._newest:
+            self._newest = slot
+            for key in [k for k in self._seen if k[1] < slot - self.KEEP_S]:
+                del self._seen[key]
+        return is_repeat
+
+
+def channel_of(frequency_hz: float) -> int:
+    """The channel a decode came in on: its RF frequency to 10 kHz.  A
+    channel's decodes sit within its 3 kHz passband, and channels sit
+    far further apart."""
+    return int(frequency_hz or 0) // 10_000
 
 
 def heard_exchanges(decodes: Sequence[dict],
