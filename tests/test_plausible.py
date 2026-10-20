@@ -1,8 +1,7 @@
-"""A decode whose grid meteor scatter cannot reach stays out of the sink.
-
-B4 on its dummy load, 10-19: "MJ3XMF 1B0OCH R CI31", a grid in the open
-Pacific.  Short-wave listeners report spots too, so the test reads the
-grid, not the call."""
+"""Each MSK144 decode gets classified: spotted or not, and flagged when
+unlikely (Michael, 10-20).  B4 on its dummy load, 10-19, decoded
+"MJ3XMF 1B0OCH R CI31": a callsign from no ITU series, and a grid in the
+open Pacific."""
 from __future__ import annotations
 
 import tempfile
@@ -11,8 +10,12 @@ from pathlib import Path
 
 import pytest
 
-from meteor_scatter.core.plausible import distance_km, grid_center, out_of_reach
+from meteor_scatter.core import plausible as P
 from meteor_scatter.core.ch_tailer import ChTailer
+from meteor_scatter.core.review import classify, sidecar_decodes, summary, to_csv
+
+HOME = "EM38ww"
+DAY = 24 * 3600.0
 
 
 class FakeWriter:
@@ -31,58 +34,153 @@ class FakeWriter:
     def close(self) -> None:
         pass
 
-FALSE = "2026/10/19 18:10:30 -7 +8.50 50261200 & MJ3XMF 1B0OCH R CI31"
-REAL = "2026/10/19 18:11:00 -3 +0.20 50260900 & AC0G K1ABC R EN37"
 
+# ── grids and calls ─────────────────────────────────────────────────────────
 
 def test_grid_center_four_and_six_characters() -> None:
-    assert grid_center("EM38") == (38.5, -93.0)
-    lat, lon = grid_center("EM38ww")
+    assert P.grid_center("EM38") == (38.5, -93.0)
+    lat, lon = P.grid_center("EM38ww")
     assert 38.9 < lat < 39.0 and -92.2 < lon < -92.0
-    assert grid_center("em38") == (38.5, -93.0)
-    assert grid_center("RR7") is None
-    assert grid_center("") is None
+    assert P.grid_center("em38") == (38.5, -93.0)
+    # B4's config carries a 10-character locator.
+    assert P.grid_center("EM38ww40pk") == P.grid_center("EM38ww")
+    assert P.Classifier("EM38ww40pk").host_grid_ok
+    for bad in ("RR73", "RR7", "", "ZZ99"):
+        assert P.grid_center(bad) is None
 
 
 def test_distance_is_great_circle() -> None:
-    # One degree of latitude: about 111 km.
-    assert distance_km((0.0, 0.0), (1.0, 0.0)) == pytest.approx(111.2, abs=0.2)
+    assert P.distance_km((0.0, 0.0), (1.0, 0.0)) == pytest.approx(111.2, abs=0.2)
 
 
-def test_the_b4_false_decode_is_out_of_reach() -> None:
-    why = out_of_reach("CI31", "EM38ww")
-    assert why is not None and "CI31" in why and "km" in why
+@pytest.mark.parametrize("call", ["K1ABC", "AC0G", "W9XYZ", "VE3/K1ABC", "K1ABC/P",
+                                  "1A0KM", "9A1A", "3D2AG"])
+def test_valid_transmitter_calls(call) -> None:
+    assert P.tx_call_valid(call)
 
 
-@pytest.mark.parametrize("grid", ["EN37", "FN42", "DM79", "EL29"])
-def test_meteor_scatter_distances_pass(grid) -> None:
-    assert out_of_reach(grid, "EM38ww") is None
+@pytest.mark.parametrize("call", ["1B0OCH", "Q1ABC", "0X1AB", "", "CQ", "<...>"])
+def test_invalid_transmitter_calls(call) -> None:
+    assert not P.tx_call_valid(call)
 
 
-def test_no_grid_on_either_end_is_no_evidence() -> None:
-    assert out_of_reach("", "EM38ww") is None
-    assert out_of_reach("CI31", "") is None
-    assert out_of_reach("RR73", "") is None
+# ── the classifier ──────────────────────────────────────────────────────────
+
+def test_the_b4_false_decode_is_not_spotted() -> None:
+    v = P.Classifier(HOME).classify(0, "1B0OCH", "CI31")
+    assert not v.spot
+    assert v.rejected == [P.REJECT_BAD_CALL]
+    assert v.suspect == [P.SUSPECT_REACH]       # and its grid lies far off
 
 
-def test_the_tailer_keeps_the_false_decode_out_of_the_sink() -> None:
+def test_a_grid_in_the_message_spots() -> None:
+    v = P.Classifier(HOME).classify(0, "K1ABC", "EN37")
+    assert v.spot and v.grid == "EN37" and v.grid_source == "message"
+    assert v.suspect == [] and v.distance_km < 1000
+
+
+def test_a_later_message_takes_the_grid_sent_within_24_hours() -> None:
+    c = P.Classifier(HOME)
+    c.classify(0, "K1ABC", "EN37")
+    v = c.classify(DAY - 1, "K1ABC", "")
+    assert v.spot and v.grid == "EN37" and v.grid_source == "recent"
+    late = c.classify(DAY + 1, "K1ABC", "")
+    assert not late.spot and late.rejected == [P.REJECT_NO_GRID]
+
+
+def test_no_grid_ever_is_not_spotted() -> None:
+    v = P.Classifier(HOME).classify(0, "K1ABC", "")
+    assert not v.spot and v.rejected == [P.REJECT_NO_GRID]
+
+
+def test_an_invalid_call_teaches_no_grid() -> None:
+    c = P.Classifier(HOME)
+    c.classify(0, "1B0OCH", "EN37")
+    assert c.classify(1, "1B0OCH", "").grid == ""
+
+
+def test_a_grid_beyond_reach_spots_flagged() -> None:
+    v = P.Classifier(HOME).classify(0, "JA1ABC", "PM95")
+    assert v.spot and v.suspect == [P.SUSPECT_REACH] and v.distance_km > 9000
+
+
+def test_no_receiver_grid_spots_nothing() -> None:
+    c = P.Classifier("")
+    assert not c.host_grid_ok
+    v = c.classify(0, "K1ABC", "EN37")
+    assert not v.spot and v.rejected == [P.REJECT_HOST_GRID]
+
+
+# ── heard exchanges ─────────────────────────────────────────────────────────
+
+def d(t, tx, rx, msg):
+    return {"time": t, "tx_call": tx, "rx_call": rx, "message": msg}
+
+
+def test_both_sides_with_an_acknowledgement_is_an_exchange() -> None:
+    ds = [d(0, "K1ABC", "W9XYZ", "W9XYZ K1ABC FN42"),
+          d(15, "W9XYZ", "K1ABC", "K1ABC W9XYZ R+05"),
+          d(30, "N0CALL", "K1ABC", "K1ABC N0CALL EM48")]
+    assert P.heard_exchanges(ds) == {0: "K1ABC<>W9XYZ", 1: "K1ABC<>W9XYZ"}
+
+
+def test_one_side_or_no_acknowledgement_is_no_exchange() -> None:
+    assert P.heard_exchanges([d(0, "K1ABC", "W9XYZ", "W9XYZ K1ABC R+05")]) == {}
+    assert P.heard_exchanges([d(0, "K1ABC", "W9XYZ", "W9XYZ K1ABC FN42"),
+                              d(15, "W9XYZ", "K1ABC", "K1ABC W9XYZ EN37")]) == {}
+    assert P.heard_exchanges([d(0, "K1ABC", "W9XYZ", "W9XYZ K1ABC FN42"),
+                              d(7200, "W9XYZ", "K1ABC", "K1ABC W9XYZ RRR")]) == {}
+
+
+# ── the review of an archive ────────────────────────────────────────────────
+
+def test_review_classifies_sidecars_in_time_order() -> None:
+    side = {"slot_start_utc": "2026-10-19T18:10:30+00:00", "dial_freq_hz": 50260000,
+            "band": "6m", "decodes": [
+                {"snr": -7, "dt": 8.5, "audio_freq_hz": 1200, "message": "MJ3XMF 1B0OCH R CI31"},
+                {"snr": -3, "dt": 1.0, "audio_freq_hz": 1500, "message": "AC0G K1ABC EN37"},
+                {"snr": -2, "dt": 4.0, "audio_freq_hz": 1500, "message": "AC0G K1ABC RRR"}]}
+    rows = classify(sidecar_decodes(side, "6m/20261019/261019_181030.wav"), HOME)
+    assert [r["message"] for r in rows] == ["AC0G K1ABC EN37", "AC0G K1ABC RRR",
+                                            "MJ3XMF 1B0OCH R CI31"]
+    assert [r["spot"] for r in rows] == [True, True, False]
+    assert rows[1]["grid_source"] == "recent"
+    assert rows[0]["frequency_hz"] == 50261500
+    assert summary(rows) == (3, 2, 0, 0)
+    text = to_csv(rows)
+    assert text.splitlines()[0].startswith("utc,band,recording")
+    assert "transmitter callsign not ITU-allocated" in text
+
+
+# ── the daemon ──────────────────────────────────────────────────────────────
+
+def test_the_tailer_spots_only_what_passes() -> None:
+    lines = ["2026/10/19 18:10:30 -7 +8.50 50261200 & MJ3XMF 1B0OCH R CI31",
+             "2026/10/19 18:11:00 -3 +0.20 50260900 & AC0G K1ABC R EN37",
+             "2026/10/19 18:11:15 -3 +0.20 50260900 & AC0G K1ABC RRR",
+             "2026/10/19 18:11:30 -3 +0.20 50260900 & AC0G W9XYZ R+05",
+             "2026/10/19 18:12:00 -9 +0.20 50260900 & AC0G JA1ABC PM95"]
     with tempfile.TemporaryDirectory() as td:
         log = Path(td) / "b4-msk144.log"
         log.write_text("")
         fake = FakeWriter()
         tailer = ChTailer(
             log_path=log, mode="msk144", radiod_id="test-rx888",
-            host_call="AC0G", host_grid="EM38ww",
-            processing_version="0.1.0+abc",
+            host_call="AC0G", host_grid=HOME, processing_version="0.1.0+abc",
             writer_factory=lambda batch_rows: fake)
         tailer.start()
         try:
             with open(log, "a") as f:
-                f.write(FALSE + "\n" + REAL + "\n")
+                f.write("\n".join(lines) + "\n")
             deadline = time.monotonic() + 4.0
-            while time.monotonic() < deadline and not fake.inserts:
+            while time.monotonic() < deadline and len(fake.inserts) < 3:
                 time.sleep(0.1)
         finally:
             tailer.stop(timeout=2.0)
-    assert [r["message"] for r in fake.inserts] == ["AC0G K1ABC R EN37"]
-    assert tailer.rejected_out_of_reach == 1
+    got = {r["message"]: r for r in fake.inserts}
+    assert sorted(got) == ["AC0G JA1ABC PM95", "AC0G K1ABC R EN37", "AC0G K1ABC RRR"]
+    assert got["AC0G K1ABC RRR"]["grid"] == "EN37"
+    assert got["AC0G K1ABC RRR"]["grid_source"] == "recent"
+    assert got["AC0G JA1ABC PM95"]["suspect"] == [P.SUSPECT_REACH]
+    assert got["AC0G K1ABC R EN37"]["suspect"] == []
+    assert tailer.rejected == {P.REJECT_BAD_CALL: 1, P.REJECT_NO_GRID: 1}

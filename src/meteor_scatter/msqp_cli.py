@@ -22,6 +22,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 
 from meteor_scatter import msqp_package as P
+from meteor_scatter.core import review as R
 from meteor_scatter.zenodo import Zenodo, ZenodoError
 
 MIN_SLOTS = 10          # five minutes at 30 s
@@ -267,6 +268,7 @@ def build_package(archive, cfg, callsign, grid, first, last, out_root, version):
 
 def _package(archive, arch_fd, recs, cfg, callsign, grid, first, last, out_root, version):
     valid, lines, per, flagged, bands, skipped = [], [], {}, [], [], []
+    decodes = []
     for band, wav, side_path in recs:
         rel = wav.relative_to(archive.root)
         try:
@@ -278,6 +280,7 @@ def _package(archive, arch_fd, recs, cfg, callsign, grid, first, last, out_root,
             continue
         valid.append((raw, ident, rel))
         lines.extend(side_lines)
+        decodes.extend(R.sidecar_decodes(side, str(rel)))
         day = rel.parts[1]
         per.setdefault(band, {}).setdefault(day, 0)
         per[band][day] += 1
@@ -288,6 +291,7 @@ def _package(archive, arch_fd, recs, cfg, callsign, grid, first, last, out_root,
     if not valid:
         raise PackageRefused("no usable recordings between " f"{first} and {last}; skipped: "
                              + "; ".join(skipped))
+    classified = R.to_csv(R.classify(decodes, grid))
     title_text = P.title(callsign, grid, first, last)
     name = title_text.replace("/", "-")
     out = Path(out_root) / name                  # for reporting; never used for I/O
@@ -330,6 +334,10 @@ def _package(archive, arch_fd, recs, cfg, callsign, grid, first, last, out_root,
                         shutil.copyfileobj(src, dst)
                 z.writestr(str(rel.with_suffix(".json")), raw,
                            compress_type=zipfile.ZIP_STORED)
+            # Every decode with its classification (core.plausible), for an
+            # analyst to filter by confidence.
+            z.writestr("classification.csv", classified,
+                       compress_type=zipfile.ZIP_STORED)
 
     fields = P.description_fields(cfg, callsign, grid, bands, version)
     md = P.record_metadata(title_text, P.description_html(fields), cfg["operator"],
@@ -375,50 +383,58 @@ def _check_instance_matches(instance, reporter, source, *, per_instance: bool) -
             f"instance config")
 
 
-def cmd_package(args) -> int:
+def _resolve_instance(args):
+    """(config, msqp cfg, Archive, callsign, grid) for --instance; PackageRefused
+    names what is missing."""
     from meteor_scatter.config import (PER_INSTANCE_CONFIG_DIR, get_msqp, load_config,
                                        resolve_config_path, resolve_msqp_instance_id,
                                        resolve_radiod_status, resolve_reporter_id)
     from meteor_scatter._reporter_id import unescape_systemd_instance
     from meteor_scatter.core.archive import Archive, instance_dirname
+
+    instance = unescape_systemd_instance(args.instance) if args.instance else None
+    config_path = resolve_config_path(instance=instance, explicit_path=args.config)
+    config = load_config(config_path)
+    cfg = get_msqp(config)
+    blocks = config.get("radiod", [])
+    if isinstance(blocks, dict):
+        blocks = [blocks]
+    # The daemon's rule (config.resolve_reporter_id).  Under sudo the variable is gone,
+    # so the files the unit loads for this instance supply it.
+    reporter, source = resolve_reporter_id(config, instance=args.instance)
+    if source not in (None, "config"):
+        _check_instance_matches(instance, reporter, source,
+                                per_instance=(config_path == PER_INSTANCE_CONFIG_DIR
+                                              / f"{instance}.toml"))
+    radiod_id = ""
+    if len(blocks) == 1 or (blocks and reporter):
+        radiod_id = resolve_radiod_status(blocks[0])
+    elif blocks:
+        names = [resolve_radiod_status(b) for b in blocks]
+        if instance in names:
+            radiod_id = instance
+        else:
+            raise PackageRefused(
+                "the config has several [[radiod]] blocks and no reporter id; pass "
+                f"--instance set to one of: {', '.join(names)}")
+    instance_id = resolve_msqp_instance_id(config, reporter, radiod_id)
+    station = config.get("station", {}) or {}
+    callsign = reporter or station.get("callsign", "") or instance_id
+    grid = station.get("grid_square", "")
+    if not grid:
+        raise PackageRefused("set [station] grid_square in the instance config first")
+    archive = Archive(Path(cfg["archive_dir"]) / instance_dirname(instance_id),
+                      cfg["archive_max_days"], cfg["archive_max_gb"])
+    return config, cfg, archive, callsign, grid
+
+
+def cmd_package(args) -> int:
     from meteor_scatter.core.recorder import _software_version
 
     try:
         first = _parse_day(args.date_from, "--from")
         last = _parse_day(args.date_to, "--to")
-        instance = unescape_systemd_instance(args.instance) if args.instance else None
-        config_path = resolve_config_path(instance=instance, explicit_path=args.config)
-        config = load_config(config_path)
-        cfg = get_msqp(config)
-        blocks = config.get("radiod", [])
-        if isinstance(blocks, dict):
-            blocks = [blocks]
-        # The daemon's rule (config.resolve_reporter_id).  Under sudo the variable is gone,
-        # so the files the unit loads for this instance supply it.
-        reporter, source = resolve_reporter_id(config, instance=args.instance)
-        if source not in (None, "config"):
-            _check_instance_matches(instance, reporter, source,
-                                    per_instance=(config_path == PER_INSTANCE_CONFIG_DIR
-                                                  / f"{instance}.toml"))
-        radiod_id = ""
-        if len(blocks) == 1 or (blocks and reporter):
-            radiod_id = resolve_radiod_status(blocks[0])
-        elif blocks:
-            names = [resolve_radiod_status(b) for b in blocks]
-            if instance in names:
-                radiod_id = instance
-            else:
-                raise PackageRefused(
-                    "the config has several [[radiod]] blocks and no reporter id; pass "
-                    f"--instance set to one of: {', '.join(names)}")
-        instance_id = resolve_msqp_instance_id(config, reporter, radiod_id)
-        station = config.get("station", {}) or {}
-        callsign = reporter or station.get("callsign", "") or instance_id
-        grid = station.get("grid_square", "")
-        if not grid:
-            raise PackageRefused("set [station] grid_square in the instance config first")
-        archive = Archive(Path(cfg["archive_dir"]) / instance_dirname(instance_id),
-                          cfg["archive_max_days"], cfg["archive_max_gb"])
+        config, cfg, archive, callsign, grid = _resolve_instance(args)
         out_root = Path(args.out) if args.out else DEFAULT_OUT_ROOT
         if os.path.realpath(out_root) != os.path.abspath(out_root):
             raise PackageRefused(f"{out_root} passes through a symlink; give the real path")
@@ -879,6 +895,41 @@ def _write_patched(config_path: Path, text: str, load_config) -> int:
     return 0
 
 
+def cmd_suspects(args) -> int:
+    """List the decodes no outlet should take on trust: those not spotted,
+    and those spotted with a suspect flag, each with its recording."""
+    try:
+        first = _parse_day(args.date_from, "--from")
+        last = _parse_day(args.date_to, "--to")
+        if first > last:
+            raise PackageRefused(f"--from {first} falls after --to {last}")
+        _config, _cfg, archive, _callsign, grid = _resolve_instance(args)
+        decodes = []
+        for _band, wav, side_path in archive.recordings(first, last):
+            try:
+                side = json.loads(side_path.read_text())
+            except (OSError, ValueError):
+                continue
+            decodes.extend(R.sidecar_decodes(side, str(wav.relative_to(archive.root))))
+    except (PackageRefused, OSError, ValueError) as e:
+        print(f"msqp suspects: {e}", file=sys.stderr)
+        return 2
+    rows = R.classify(decodes, grid)
+    for r in rows:
+        if r["spot"] and not r["suspect"]:
+            continue
+        what = ("not spotted: " + "; ".join(r["rejected"]) if not r["spot"]
+                else "suspect: " + "; ".join(r["suspect"]))
+        km = "" if r["distance_km"] is None else f" {r['distance_km']} km"
+        print(f"{datetime.fromtimestamp(r['time'], timezone.utc):%Y-%m-%d %H:%M:%S}Z "
+              f"{r['band']} {r['snr_db']:>4} dB  {r['message']}  [{what}{km}]  "
+              f"{r['recording']}")
+    n, spotted, suspect, exchanged = R.summary(rows)
+    print(f"{n} decodes: {spotted} spotted ({suspect} suspect), {n - spotted} not spotted; "
+          f"{exchanged} in an exchange heard both ways")
+    return 0
+
+
 def add_subparsers(sub_msqp: argparse.ArgumentParser, *, common=None) -> None:
     """Register the msqp subcommands.  `common(sub)` adds --config and --log-level."""
     msqp_sub = sub_msqp.add_subparsers(dest="msqp_command")
@@ -906,6 +957,18 @@ def add_subparsers(sub_msqp: argparse.ArgumentParser, *, common=None) -> None:
     if common:
         common(pkg)
 
+    sus = msqp_sub.add_parser(
+        "suspects",
+        help="list the decodes not spotted or spotted with a suspect flag, with recordings")
+    sus.add_argument("--instance", required=True,
+                     help="instance to review (selects /etc/meteor-scatter/<instance>.toml)")
+    sus.add_argument("--from", dest="date_from", required=True, metavar="YYYY-MM-DD",
+                     help="first start day (UTC)")
+    sus.add_argument("--to", dest="date_to", required=True, metavar="YYYY-MM-DD",
+                     help="last start day (UTC)")
+    if common:
+        common(sus)
+
     dr = msqp_sub.add_parser(
         "draft",
         help="leave a package on Zenodo as an unsubmitted draft for you to check and submit")
@@ -925,5 +988,8 @@ def dispatch(args) -> int:
         return cmd_package(args)
     if sub == "draft":
         return cmd_draft(args)
-    print("usage: meteor-scatter msqp {calibrate,package,draft} ...", file=sys.stderr)
+    if sub == "suspects":
+        return cmd_suspects(args)
+    print("usage: meteor-scatter msqp {calibrate,package,suspects,draft} ...",
+          file=sys.stderr)
     return 2

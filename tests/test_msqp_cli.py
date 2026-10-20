@@ -272,7 +272,7 @@ class CalibrateKeepsCommentsTests(unittest.TestCase):
 import json, zipfile
 from datetime import date, datetime, timezone
 from meteor_scatter.core.archive import Archive, instance_dirname
-from meteor_scatter.msqp_cli import build_package, cmd_package, PackageRefused
+from meteor_scatter.msqp_cli import build_package, cmd_package, cmd_suspects, PackageRefused
 
 CFG = {"operator": "Michael Hauan AC0G", "contact_email": "a@b.c", "antenna": "dipole", "comments": ""}
 
@@ -303,7 +303,8 @@ class PackageTests(unittest.TestCase):
         with zipfile.ZipFile(r.zip_path) as z:
             self.assertEqual(sorted(z.namelist()), [
                 "6m/20261213/261213_235930.json", "6m/20261213/261213_235930.wav",
-                "6m/20261214/261214_000030.json", "6m/20261214/261214_000030.wav"])
+                "6m/20261214/261214_000030.json", "6m/20261214/261214_000030.wav",
+                "classification.csv"])
         self.assertEqual(len((r.dir / "ALL.TXT").read_text().splitlines()), 2)
         self.assertTrue((r.dir / "description.md").exists())
         self.assertIn("title", json.loads((r.dir / "metadata.json").read_text())["metadata"])
@@ -343,7 +344,7 @@ class PackageTests(unittest.TestCase):
         self.assertEqual((r.dir / "draft.json").read_text(), '{"id": 7}')
         self.assertEqual(len((r.dir / "ALL.TXT").read_text().splitlines()), 2)
         with zipfile.ZipFile(r2.zip_path) as z:
-            self.assertEqual(len(z.namelist()), 4)
+            self.assertEqual(len(z.namelist()), 5)        # 2 recordings + classification.csv
 
 
 class PackageHardeningTests(unittest.TestCase):
@@ -651,6 +652,19 @@ class CmdPackageTests(unittest.TestCase):
         with redirect_stdout(out), redirect_stderr(err):
             rc = cmd_package(args)
         return rc, out.getvalue(), err.getvalue()
+
+    def test_suspects_lists_what_was_not_spotted_with_its_recording(self):
+        args = argparse.Namespace(instance="AC0G-B4", config=self.cfg, date_from="2026-12-13",
+                                  date_to="2026-12-14", log_level=None)
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            rc = cmd_suspects(args)
+        self.assertEqual(rc, 0, err.getvalue())
+        text = out.getvalue()
+        # _fill's two decodes read "CQ X": no transmitter callsign, no grid.
+        self.assertIn("6m/20261213/261213_235930.wav", text)
+        self.assertIn("not spotted: no transmitter callsign; no transmitter grid", text)
+        self.assertIn("2 decodes: 0 spotted (0 suspect), 2 not spotted", text)
 
     def test_packages_from_the_per_instance_archive(self):
         rc, out, err = self._run()

@@ -33,7 +33,7 @@ from typing import Any, Optional
 
 from callhash import parse_message
 
-from meteor_scatter.core.plausible import out_of_reach
+from meteor_scatter.core.plausible import Classifier
 
 logger = logging.getLogger(__name__)
 
@@ -140,6 +140,7 @@ class ChTailer:
 
     POLL_INTERVAL_SEC = 1.0       # how often to read new lines
     FLUSH_INTERVAL_SEC = 15.0     # max age of an unflushed batch
+    REJECT_REPORT_SEC = 600       # how often to summarise unspotted decodes
     CALLHASH_SAVE_INTERVAL_SEC = 300.0  # persist callhash table at most every 5 min
 
     def __init__(
@@ -170,7 +171,15 @@ class ChTailer:
         self._reporter_id = reporter_id or radiod_id
         self._host_call = host_call
         self._host_grid = host_grid
-        self.rejected_out_of_reach = 0
+        self._classifier = Classifier(host_grid)
+        if not self._classifier.host_grid_ok:
+            logger.warning(
+                "ch_tailer %s: the station grid %r is missing or malformed, so no "
+                "decode gets spotted.  Set [station] grid_square to a 4- or "
+                "6-character Maidenhead locator", mode, host_grid)
+        self.rejected: dict = {}
+        self._rejected_since: dict = {}
+        self._rejected_report = time.monotonic()
         self._processing_version = processing_version
         self._batch_rows = batch_rows
         self._writer_factory = writer_factory or _default_writer_factory
@@ -368,15 +377,26 @@ class ChTailer:
             row = parse_decoder_line(line, mode=self._mode, table=self._callhash)
             if row is None:
                 continue
-            # A grid meteor scatter cannot reach marks a false decode.
-            # Keep it out of the sink, so no upload path ships it; the
-            # archive keeps the recording and its decode regardless.
-            why = out_of_reach(row.get("grid", ""), self._host_grid)
-            if why:
-                self.rejected_out_of_reach += 1
-                logger.info("ch_tailer %s: not spotted, %s: %s",
-                            self._mode, why, row["message"])
+            # A decode with something plainly wrong gets no sink row, so
+            # no upload path ships it; the archive keeps the recording and
+            # its decode regardless.  An unlikely one passes, flagged.
+            v = self._classifier.classify(row["time"].timestamp(),
+                                          row.get("tx_call", ""), row.get("grid", ""))
+            if not v.spot:
+                for why in v.rejected:
+                    self.rejected[why] = self.rejected.get(why, 0) + 1
+                    self._rejected_since[why] = self._rejected_since.get(why, 0) + 1
+                logger.debug("ch_tailer %s: not spotted (%s): %s", self._mode,
+                             "; ".join(v.rejected), row["message"])
                 continue
+            row["grid"] = v.grid
+            row["grid_source"] = v.grid_source
+            row["distance_km"] = v.as_dict()["distance_km"]
+            row["suspect"] = v.suspect
+            if v.suspect:
+                logger.info("ch_tailer %s: spotted, suspect (%s, %s km): %s",
+                            self._mode, "; ".join(v.suspect),
+                            row["distance_km"], row["message"])
             row["timing_authority"] = timing_authority
             row["host_call"] = self._host_call
             row["host_grid"] = self._host_grid
@@ -432,6 +452,16 @@ class ChTailer:
                         "ch_tailer %s: insert failed (%d rows): %s",
                         self._mode, len(rows), e,
                     )
+
+        # One summary line every REJECT_REPORT_SEC, not one per decode.
+        if (self._rejected_since and time.monotonic() - self._rejected_report
+                >= self.REJECT_REPORT_SEC):
+            logger.info("ch_tailer %s: not spotted in the last %d min: %s", self._mode,
+                        self.REJECT_REPORT_SEC // 60,
+                        ", ".join(f"{n} {why}" for why, n in
+                                  sorted(self._rejected_since.items())))
+            self._rejected_since = {}
+            self._rejected_report = time.monotonic()
 
         # Periodic callhash persistence.  CALLHASH_SAVE_INTERVAL_SEC is
         # generous (5 min) to amortise the JSON write across many
