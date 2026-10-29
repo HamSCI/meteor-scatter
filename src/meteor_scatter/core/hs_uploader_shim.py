@@ -11,7 +11,7 @@ Source selection:
 
 * ``SqliteSource`` — reads sigmond's local SQLite sink
   (``/var/lib/sigmond/sink.db`` by default, or ``SIGMOND_SQLITE_PATH``),
-  the queue ``sigmond.hamsci_sink.Writer`` fills.  ``extra_where``
+  the queue ``hs_uploader.sink.Writer`` fills.  ``extra_where``
   filters scope the queue to this daemon's ``radiod_id`` so multi-
   instance is safe by construction.
 * No SQLite sink → fall back to ``FileTreeSource`` reading per-slot
@@ -315,7 +315,7 @@ class HsPskReporterUploader:
 
         1. ``SIGMOND_SQLITE_PATH`` set, OR the default sink
            ``/var/lib/sigmond/sink.db`` exists → ``SqliteSource``
-           (producer-side is ``sigmond.hamsci_sink.Writer``).
+           (producer-side is ``hs_uploader.sink.Writer``).
         2. Else fall through to the per-slot ``FileTreeSource`` — the
            SlotWorker populates that spool when no local SQLite sink
            is configured.
@@ -416,7 +416,7 @@ class HsPskReporterUploader:
                 "POSTed to PSKReporter independently",
             )
 
-        # SQLite path — sigmond.hamsci_sink.Writer is the producer
+        # SQLite path — hs_uploader.sink.Writer is the producer
         # half; this shim is the consumer.  Try construction
         # unconditionally; SqliteSource.from_env returns a no-op source
         # when neither SIGMOND_SQLITE_PATH nor the default file exists.
