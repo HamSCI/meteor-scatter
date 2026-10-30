@@ -82,7 +82,23 @@ if [[ -r "$_ENSURE_UV_SH" ]]; then
     # shellcheck source=/dev/null
     source "$_ENSURE_UV_SH"
 else
+    # Place uv-managed Pythons in a world-readable shared location so
+    # service users can execute the venv interpreter.  Under sudo the
+    # default ~/.local/share/uv/python resolves to /root/.local/..., and
+    # /root is mode 0700, so the venv's python symlink dangles for them.
+    # Same value as sigmond's helper; keep in sync with it.
+    export UV_PYTHON_INSTALL_DIR="${UV_PYTHON_INSTALL_DIR:-/opt/uv/python}"
+
     _ensure_uv() {
+        # uv refuses to install into a missing parent, and the directory
+        # must be world-readable (0755) for service users to traverse it.
+        if [[ ! -d "$UV_PYTHON_INSTALL_DIR" ]]; then
+            if [[ $EUID -eq 0 ]]; then
+                install -d -m 0755 "$UV_PYTHON_INSTALL_DIR" 2>/dev/null || true
+            else
+                sudo install -d -m 0755 "$UV_PYTHON_INSTALL_DIR" 2>/dev/null || true
+            fi
+        fi
         if command -v uv >/dev/null 2>&1; then
             printf '[INFO]  uv %s at %s\n' "$(uv --version 2>/dev/null | awk '{print $2}')" "$(command -v uv)"
             return 0
