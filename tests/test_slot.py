@@ -230,6 +230,31 @@ class Jt9StdoutHarvestTests(unittest.TestCase):
         self.assertEqual(
             SlotWorker._read_proc_stdout(proc).splitlines(), ["hello", "world"])
 
+    def test_usage_text_counts_as_a_failure_not_a_decode(self):
+        """A jt9 that rejects the command line prints its usage and exits 0.
+        That slot is a failure, logged once, never a silent empty decode."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fake = Path(tmpdir) / "fake_jt9"
+            fake.write_text(
+                "#!/usr/bin/env python3\n"
+                "import sys\n"
+                "if '-h' in sys.argv: print(' --msk144'); sys.exit(0)\n"
+                "print(' Usage: jt9 [OPTIONS] file1 [file2 ...]')\n"
+            )
+            fake.chmod(0o755)
+            worker, clock, ring, box = _make_worker(tmpdir, decoder_path=str(fake))
+            clock.anchor(rtp_timestamp=0, utc=900_000_000.0)
+            for i in range(40):
+                ring.push(np.ones(6000, dtype=np.float32), start_offset=i * 6000)
+            box["rtp"] = clock.rtp_of_offset(40 * 6000)
+            with self.assertLogs("meteor_scatter.core.slot", level="ERROR") as logs:
+                worker._tick()
+                worker._reap_all(wait=True)
+            self.assertEqual(worker.decodes_ok, 0)
+            self.assertGreaterEqual(worker.decodes_fail, 1)
+            self.assertEqual(sum("printed its usage" in m for m in logs.output), 1)
+            self.assertEqual(worker._log_fd.getvalue(), "")
+
     def test_end_to_end_fork_reap_harvests_stdout(self):
         """Fork a fake jt9 that prints a decode to stdout; the reap must
         harvest it into the log — the exact path the bug bypassed."""
@@ -237,6 +262,8 @@ class Jt9StdoutHarvestTests(unittest.TestCase):
             fake = Path(tmpdir) / "fake_jt9"
             fake.write_text(
                 "#!/usr/bin/env python3\n"
+                "import sys\n"
+                "if '-h' in sys.argv: print(' --msk144'); sys.exit(0)\n"
                 f"print({self.JT9_LINE!r})\n"
                 f"print({self.FINISHED!r})\n"
             )

@@ -19,25 +19,75 @@ from meteor_scatter.core import decoder
 
 
 class TestResolveBinary(unittest.TestCase):
+    """resolve_jt9_binary takes the first candidate that decodes MSK144."""
 
-    def test_explicit_override_wins_when_present(self):
-        # The bundled jt9 path is a real file we can point at explicitly.
-        bundled = REPO_ROOT / "bin" / "decoders" / "jt9-x86-v27"
-        if not bundled.is_file():
-            self.skipTest("bundled jt9-x86-v27 not present")
-        self.assertEqual(decoder.resolve_jt9_binary(str(bundled)), str(bundled))
+    def setUp(self):
+        import tempfile
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        self.wsjtx = self.tmp / "wsjtx-jt9"
+        self.wsjtx.write_text("")
+        self.override = self.tmp / "override-jt9"
+        self.override.write_text("")
 
-    def test_resolves_to_bundled_or_path(self):
-        # With no override, resolution returns *something* (bundled binary
-        # for this arch, or a bare 'jt9' fallback) — never empty.
-        resolved = decoder.resolve_jt9_binary("")
-        self.assertTrue(resolved)
+    def tearDown(self):
+        self._tmp.cleanup()
 
-    def test_missing_override_falls_back(self):
-        # A non-existent override must not be returned verbatim; it falls
-        # through to bundled/PATH resolution.
-        resolved = decoder.resolve_jt9_binary("/no/such/jt9-binary")
-        self.assertNotEqual(resolved, "/no/such/jt9-binary")
+    def test_explicit_override_wins_when_it_decodes_msk144(self):
+        got = decoder.resolve_jt9_binary(str(self.override), probe=lambda p: True,
+                                         wsjtx_path=str(self.wsjtx))
+        self.assertEqual(got, str(self.override))
+
+    def test_wsjtx_build_beats_the_path_symlink(self):
+        got = decoder.resolve_jt9_binary("", probe=lambda p: True,
+                                         wsjtx_path=str(self.wsjtx))
+        self.assertEqual(got, str(self.wsjtx))
+
+    def test_a_jt9_without_msk144_is_skipped(self):
+        # The 2026-10-26 outage: the override (or the PATH symlink) points at
+        # UberSDR's jt9, which has no --msk144.  The WSJT-X build still decodes.
+        got = decoder.resolve_jt9_binary(str(self.override),
+                                         probe=lambda p: p == str(self.wsjtx),
+                                         wsjtx_path=str(self.wsjtx))
+        self.assertEqual(got, str(self.wsjtx))
+
+    def test_no_msk144_decoder_anywhere_raises(self):
+        with self.assertRaises(decoder.NoMsk144Decoder) as cm:
+            decoder.resolve_jt9_binary(str(self.override), probe=lambda p: False,
+                                       wsjtx_path=str(self.wsjtx))
+        self.assertIn(str(self.wsjtx), str(cm.exception))
+
+    def test_missing_override_is_not_returned(self):
+        got = decoder.resolve_jt9_binary("/no/such/jt9-binary", probe=lambda p: True,
+                                         wsjtx_path=str(self.wsjtx))
+        self.assertEqual(got, str(self.wsjtx))
+
+
+class TestProbe(unittest.TestCase):
+
+    def _run(self, out=b"", err=b"", exc=None):
+        from types import SimpleNamespace
+        def run(argv, **kw):
+            if exc:
+                raise exc
+            return SimpleNamespace(returncode=0, stdout=out, stderr=err)
+        return run
+
+    def test_help_listing_msk144_passes(self):
+        self.assertTrue(decoder.jt9_decodes_msk144(
+            "jt9", run=self._run(b" --msk144\n    MSK144 mode\n")))
+
+    def test_ubersdr_help_fails(self):
+        # UberSDR's jt9 lists --ft2, --ft4, --ft8, --fst4w, and no --msk144.
+        self.assertFalse(decoder.jt9_decodes_msk144(
+            "jt9", run=self._run(b" --ft2\n --ft4\n --fst4w\n --ft8\n")))
+
+    def test_unrunnable_binary_fails(self):
+        self.assertFalse(decoder.jt9_decodes_msk144("jt9", run=self._run(exc=OSError(2, "x"))))
+
+    def test_usage_text_is_recognised(self):
+        self.assertTrue(decoder.is_jt9_usage_text(" Usage: jt9 [OPTIONS] file1 [file2 ...]\n"))
+        self.assertFalse(decoder.is_jt9_usage_text("125900   3 +0.2 1500 & CQ K1ABC FN42\n"))
 
 
 class TestBuildCmd(unittest.TestCase):

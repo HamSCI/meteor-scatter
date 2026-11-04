@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import logging
 import shutil
+import subprocess
 from pathlib import Path
 from typing import Optional
 
@@ -52,25 +53,72 @@ MSK144_SYNC_CHAR = "&"
 # resolve_jt9_binary(); the recorder ships no bundled decoder binaries.
 
 
-def resolve_jt9_binary(explicit: str = "") -> str:
-    """Resolve the jt9 MSK144 decoder.
+# sigmond builds two decoder sets under /usr/local/libexec/sigmond/decoders and
+# points /usr/local/bin/jt9 at one of them (`smd admin decoders --select`).
+# UberSDR's jt9, the default since sigmond b4d12f6 (2026-10-24), has no MSK144:
+# given --msk144 it prints its usage and exits 0, so every station "decoded"
+# every slot and found nothing from Oct 26 on.  So meteor-scatter asks each
+# candidate whether it decodes MSK144, and tries WSJT-X's build ahead of the
+# shared symlink.
+WSJTX_JT9 = "/usr/local/libexec/sigmond/decoders/wsjtx/jt9"
+JT9_PROBE_TIMEOUT_SEC = 10.0
 
-    An explicit config override (``paths.decoder_jt9`` / ``paths.decoder``)
-    wins if it exists; otherwise jt9 is resolved from PATH (/usr/local/bin),
-    where sigmond's from-source wsjtx-decoders build installs it.  The recorder
-    no longer ships pre-compiled jt9 binaries (GPLv3: build from retained
-    source on-host, not redistributed; see sigmond _build_wsjtx_decoders).
-    jt9 3.0.2 decodes MSK144 via ``--msk144``.
+
+class NoMsk144Decoder(RuntimeError):
+    """No jt9 on this host decodes MSK144."""
+
+
+def jt9_decodes_msk144(path: str, run=subprocess.run) -> bool:
+    """True when ``path -h`` lists ``--msk144``.  False on any failure to run it."""
+    try:
+        proc = run([path, "-h"], capture_output=True, timeout=JT9_PROBE_TIMEOUT_SEC)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    text = (proc.stdout or b"") + (proc.stderr or b"")
+    if isinstance(text, bytes):
+        text = text.decode("utf-8", errors="replace")
+    return "--msk144" in text
+
+
+def resolve_jt9_binary(explicit: str = "", *, probe=jt9_decodes_msk144,
+                       wsjtx_path: str = WSJTX_JT9) -> str:
+    """Resolve a jt9 that decodes MSK144, or raise NoMsk144Decoder.
+
+    Candidates, in order: an explicit config override (``paths.decoder_jt9`` /
+    ``paths.decoder``) that exists; sigmond's WSJT-X build at ``wsjtx_path``;
+    jt9 on PATH.  The first that lists ``--msk144`` in its help wins.  The
+    recorder ships no jt9 of its own (GPLv3: built from retained source
+    on-host; see sigmond _build_wsjtx_decoders).
     """
+    candidates: list[str] = []
     explicit = (explicit or "").strip()
     if explicit:
-        p = Path(explicit)
-        if p.is_file() or shutil.which(explicit):
-            return explicit
-        logger.warning(
-            "decoder override %r not found — falling back to PATH jt9", explicit,
-        )
-    return shutil.which("jt9") or "jt9"
+        if Path(explicit).is_file() or shutil.which(explicit):
+            candidates.append(explicit)
+        else:
+            logger.warning("decoder override %r not found", explicit)
+    if Path(wsjtx_path).is_file():
+        candidates.append(wsjtx_path)
+    on_path = shutil.which("jt9")
+    if on_path:
+        candidates.append(on_path)
+
+    tried: list[str] = []
+    for candidate in dict.fromkeys(candidates):
+        if probe(candidate):
+            return candidate
+        tried.append(candidate)
+        logger.warning("jt9 %s does not decode MSK144 (no --msk144 in its help); "
+                       "skipping it", candidate)
+    raise NoMsk144Decoder(
+        "no jt9 on this host decodes MSK144 (tried: "
+        f"{', '.join(tried) or 'none found'}); build WSJT-X's decoders with "
+        "sigmond, or set paths.decoder_jt9")
+
+
+def is_jt9_usage_text(stdout_text: str) -> bool:
+    """True when jt9 printed its usage instead of decoding (an unknown option)."""
+    return "Usage: jt9" in stdout_text
 
 
 def build_jt9_cmd(

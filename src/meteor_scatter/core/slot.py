@@ -158,6 +158,7 @@ class SlotWorker:
         # under CPython GIL; no lock needed for the single-reader case.
         self.decodes_ok = 0
         self.decodes_fail = 0
+        self._jt9_usage_seen = False   # one ERROR per episode, not per slot
         self.slots_empty = 0
 
     def inflight_snapshot(self) -> tuple[int, float]:
@@ -418,10 +419,14 @@ class SlotWorker:
             # jt9 exits 0 on a clean run whether or not it found anything.
             decodes: list = []
             if ret == 0:
-                self.decodes_ok += 1
                 stdout_text = self._read_proc_stdout(proc)
-                decodes = self._materialise_jt9_output(
-                    wav_path, slot_start, stdout_text)
+                if _decoder.is_jt9_usage_text(stdout_text):
+                    self._jt9_usage_fault()
+                else:
+                    self.decodes_ok += 1
+                    self._jt9_usage_seen = False
+                    decodes = self._materialise_jt9_output(
+                        wav_path, slot_start, stdout_text)
                 self._drain_proc_pipes(proc)
             else:
                 self.decodes_fail += 1
@@ -439,6 +444,16 @@ class SlotWorker:
             self._finish_slot(wav_path, slot_start, decodes)
         self._pending_procs = still_pending
 
+    def _jt9_usage_fault(self) -> None:
+        """jt9 printed its usage, so it rejected an option: count a failure, not a decode."""
+        self.decodes_fail += 1
+        if not self._jt9_usage_seen:
+            self._jt9_usage_seen = True
+            logger.error("%s %d Hz: jt9 %s printed its usage instead of decoding; it does "
+                         "not take this command line (no MSK144?); logged once until "
+                         "it decodes again", self._mode.upper(), self._frequency_hz,
+                         self._decoder_path)
+
     def _reap_all(self, wait: bool = False) -> None:
         for proc, wav_path, slot_start, _fork_mono in self._pending_procs:
             decodes: list = []
@@ -447,8 +462,11 @@ class SlotWorker:
                     proc.wait(timeout=5.0)
                     if proc.returncode == 0:
                         stdout_text = self._read_proc_stdout(proc)
-                        decodes = self._materialise_jt9_output(
-                            wav_path, slot_start, stdout_text)
+                        if _decoder.is_jt9_usage_text(stdout_text):
+                            self._jt9_usage_fault()
+                        else:
+                            decodes = self._materialise_jt9_output(
+                                wav_path, slot_start, stdout_text)
                 except subprocess.TimeoutExpired:
                     proc.kill()
             self._drain_proc_pipes(proc)
