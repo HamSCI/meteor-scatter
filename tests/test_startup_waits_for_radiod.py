@@ -125,23 +125,79 @@ def test_ka9q_filter_removed_on_stop():
     assert logging.getLogger("ka9q.control").filters == []
 
 
-def test_wait_keeps_petting_the_watchdog(monkeypatch):
-    clock = [0.0]
-    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+class BlockingRx(FakeRx):
+    """Fails fast once, then blocks (as a silent radiod does), then succeeds."""
 
-    class Ev:
-        def wait(self, t):
-            clock[0] += t
-            return False
+    def __init__(self, block_s):
+        super().__init__(0)
+        self.block_s = block_s
 
-    monkeypatch.setenv("WATCHDOG_USEC", "120000000")  # slices of 60 s
-    rec = object.__new__(MeteorScatterRecorder)
-    rec._stop_event = Ev()
-    sent = []
-    rec._sd_notify = sent.append
-    assert rec._wait(150) is False
-    assert sent.count(b"WATCHDOG=1") >= 2
-    assert clock[0] == 150
+    def provision_channels(self, **kw):
+        self.calls += 1
+        if self.calls == 1:
+            raise RadiodUnavailable("no channels")
+        if self.calls == 2:
+            time.sleep(self.block_s)
+            raise RadiodUnavailable("no channels")
+
+
+def test_watchdog_is_petted_while_provisioning_blocks(monkeypatch):
+    monkeypatch.setenv("WATCHDOG_USEC", "2000000")  # period floor 1 s
+    rec, _ = make(0)
+    rx = BlockingRx(2.5)
+    rec._wait = lambda s: False
+    rec._provision_with_backoff(rx)
+    assert rec.events.count(b"WATCHDOG=1") >= 2
+    assert not [t for t in threading.enumerate() if t.name == "watchdog-pet"]
+
+
+def test_no_watchdog_thread_without_watchdog_usec(monkeypatch):
+    monkeypatch.delenv("WATCHDOG_USEC", raising=False)
+    rec, rx = make(2)
+    rec._provision_with_backoff(rx)
+    assert b"WATCHDOG=1" not in rec.events
+    for bad in ("0", "-5", "junk"):
+        monkeypatch.setenv("WATCHDOG_USEC", bad)
+        rec, rx = make(1)
+        rec._provision_with_backoff(rx)
+        assert b"WATCHDOG=1" not in rec.events
+
+
+def test_watchdog_thread_stopped_after_stop(monkeypatch):
+    monkeypatch.setenv("WATCHDOG_USEC", "2000000")
+    rec, rx = make(99, stop_after=1)
+    with pytest.raises(_StopRequested):
+        rec._provision_with_backoff(rx)
+    assert not [t for t in threading.enumerate() if t.name == "watchdog-pet"]
+
+
+def test_client_receiver_manager_logs_are_quiet_during_the_episode(caplog):
+    from meteor_scatter.core import receiver_manager as rm_mod
+    rml = logging.getLogger(rm_mod.__name__)
+
+    class Noisy(FakeRx):
+        def provision_channels(self, **kw):
+            self.calls += 1
+            rml.info("connecting to radiod at x")
+            rml.warning("verify timed out, retrying")
+            rml.error("could not be verified")
+            if self.calls <= self.fail_times:
+                raise RadiodUnavailable("no channels")
+
+    rec, _ = make(0)
+    rx = Noisy(3)
+    with caplog.at_level(logging.DEBUG):
+        rec._provision_with_backoff(rx)
+        rml.info("after success")
+    recs = caplog.records
+    w = next(i for i, r in enumerate(recs) if r.name.endswith("core.recorder")
+             and r.levelno == logging.WARNING)
+    between = [r for r in recs[w + 1:] if r.name == rm_mod.__name__
+               and r.getMessage() != "after success"]
+    # the last, successful try runs after the filter is removed? no: it runs
+    # inside the episode, so it is quiet too
+    assert between == []
+    assert recs[-1].getMessage() == "after success"
 
 
 def test_stop_during_wait_is_quiet_in_run(caplog):

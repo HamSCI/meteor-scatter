@@ -204,27 +204,53 @@ class _StopRequested(Exception):
     """A stop signal arrived while waiting for radiod at startup."""
 
 
-class _quiet_ka9q:
-    """Drop ka9q's own per-try failure records for a waiting episode.
+class _EpisodeGuard:
+    """For one waiting episode: quiet the per-try log lines, pet the watchdog.
 
-    RadiodControl._connect logs an ERROR with a traceback each time the
-    radiod name will not resolve; the client logs the episode once instead.
+    Per-try records at or below ERROR from ka9q and from the client's
+    receiver manager are dropped, so an outage logs the episode's one
+    WARNING and one INFO and nothing between.  A thread sends WATCHDOG=1
+    every half WATCHDOG_USEC (floor 1 s), because provisioning against a
+    radiod that resolves but stays silent blocks for up to two minutes
+    with no chance to pet from the caller.  A missing, zero or negative
+    WATCHDOG_USEC means no petting.  Call start(), then stop() in a finally.
     """
-
-    LOGGERS = ("ka9q.control", "ka9q.utils")
 
     class _Drop(logging.Filter):
         def filter(self, record):
             return record.levelno > logging.ERROR
 
-    def __init__(self):
+    def __init__(self, notify, logger_names):
+        self._notify = notify
+        self._names = tuple(logger_names)
         self._filter = self._Drop()
-        for name in self.LOGGERS:
-            logging.getLogger(name).addFilter(self._filter)
+        self._stop = threading.Event()
+        self._thread = None
+        try:
+            usec = int(os.environ.get("WATCHDOG_USEC", "0"))
+        except ValueError:
+            usec = 0
+        self._period = max(1.0, usec / 1_000_000 / 2) if usec > 0 else None
 
-    def remove(self):
-        for name in self.LOGGERS:
+    def start(self):
+        for name in self._names:
+            logging.getLogger(name).addFilter(self._filter)
+        if self._period is not None:
+            self._thread = threading.Thread(
+                target=self._pet, name="watchdog-pet", daemon=True)
+            self._thread.start()
+
+    def _pet(self):
+        while not self._stop.wait(self._period):
+            self._notify(b"WATCHDOG=1")
+
+    def stop(self):
+        for name in self._names:
             logging.getLogger(name).removeFilter(self._filter)
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join()
+            self._thread = None
 
 
 class MeteorScatterRecorder:
@@ -732,23 +758,9 @@ class MeteorScatterRecorder:
     def _wait(self, seconds: float) -> bool:
         """Sleep up to ``seconds``; True if a stop signal arrived.
 
-        Waits in slices of half the watchdog interval and sends WATCHDOG=1
-        after each, because systemd enforces WatchdogSec from READY=1 and
-        only _main_loop pets it otherwise.
+        The episode's _EpisodeGuard thread pets the watchdog meanwhile.
         """
-        wd = os.environ.get("WATCHDOG_USEC")
-        try:
-            slice_s = int(wd) / 1_000_000 / 2 if wd else 30.0
-        except ValueError:
-            slice_s = 30.0
-        end = time.monotonic() + seconds
-        while True:
-            left = end - time.monotonic()
-            if left <= 0:
-                return False
-            if self._stop_event.wait(min(left, slice_s)):
-                return True
-            self._sd_notify(b"WATCHDOG=1")
+        return self._stop_event.wait(seconds)
 
     def _provision_with_backoff(self, rx) -> None:
         """provision_channels(), retrying while radiod is unreachable.
@@ -765,7 +777,7 @@ class MeteorScatterRecorder:
         from ka9q import ConnectionError as RadiodConnectionError
         waiting_since = None
         attempt = 0
-        quiet = None
+        guard = None
         try:
             while True:
                 try:
@@ -780,7 +792,12 @@ class MeteorScatterRecorder:
                         logger.debug("teardown after failed try", exc_info=True)
                     if waiting_since is None:
                         waiting_since = time.monotonic()
-                        quiet = _quiet_ka9q()
+                        guard = _EpisodeGuard(
+                            lambda m: self._sd_notify(m),
+                            ("ka9q.control", "ka9q.utils",
+                             ReceiverManager.__module__),
+                        )
+                        guard.start()
                         logger.warning(
                             "radiod %s unreachable (%s); staying up and "
                             "retrying (5 s, doubling to 60 s, without end)",
@@ -805,8 +822,8 @@ class MeteorScatterRecorder:
                     self._sd_notify(b"STATUS=running")
                 return
         finally:
-            if quiet is not None:
-                quiet.remove()
+            if guard is not None:
+                guard.stop()
 
     @staticmethod
     def _sd_notify(message: bytes) -> None:
