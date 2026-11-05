@@ -91,6 +91,15 @@ def _resolve_encoding(enc_str: str) -> int:
     return mapping.get(enc_str.lower(), 2)
 
 
+class RadiodUnavailable(RuntimeError):
+    """radiod's name resolved but no channel could be provisioned.
+
+    A radiod that is restarting, or a router that is rebooting, lands here:
+    the multicast join succeeds without radiod answering, then every verify
+    times out.  The recorder treats it like a failed connect and waits.
+    """
+
+
 class ReceiverManager:
     """All radiod-specific state and lifecycle for one source.
 
@@ -347,7 +356,7 @@ class ReceiverManager:
                 ", ".join(f"{m.upper()} {f} Hz" for m, f in failed),
             )
         if not self._sinks:
-            raise RuntimeError(
+            raise RadiodUnavailable(
                 f"ReceiverManager {self._radiod_id}: no channels could be "
                 f"provisioned on {status} ({len(failed)} verify attempt(s) "
                 f"timed out — is radiod streaming?)"
