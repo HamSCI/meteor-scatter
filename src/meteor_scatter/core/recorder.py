@@ -273,6 +273,8 @@ class MeteorScatterRecorder:
         # iterates this to stop each uploader cleanly.
         self._uploaders: list = []
         self._running = False
+        # Set by the signal handler so a startup wait for radiod ends at once.
+        self._stop_event = threading.Event()
 
         # Aggregate of every ReceiverManager's lifetime entries —
         # populated after ``provision_channels`` and refreshed by the
@@ -413,10 +415,7 @@ class MeteorScatterRecorder:
             spool_spots=spool_spots,
         )
         for rx in self._receivers:
-            rx.provision_channels(
-                **self._provision_kwargs,
-                msqp_runtime=self._msqp_runtimes.get(rx),
-            )
+            self._provision_with_backoff(rx)
             # Gather this manager's lifetime entries for the global
             # keepalive thread.  Each manager's list is stable after
             # provision_channels returns.
@@ -694,8 +693,65 @@ class MeteorScatterRecorder:
         uploader.start()
         self._uploaders.append(uploader)
 
-    def _notify_ready(self) -> None:
-        """Send sd_notify READY=1 if running under systemd."""
+    # Delays between connect attempts while a radiod does not answer; the
+    # last value repeats without end.  AC0G-B2, 2026-10-15 and 2026-11-04:
+    # one failed mDNS lookup ended a client's run with exit 0, and systemd's start
+    # limit (10 in 300 s) locked the unit out until a person noticed.
+    CONNECT_RETRY_DELAYS = (5, 10, 20, 40, 60)
+
+    def _wait(self, seconds: float) -> bool:
+        """Sleep up to ``seconds``; True if a stop signal arrived."""
+        return self._stop_event.wait(seconds)
+
+    def _provision_with_backoff(self, rx) -> None:
+        """provision_channels(), retrying while radiod is unreachable.
+
+        Sends READY=1 and a waiting STATUS before the first wait, so
+        Type=notify's start timeout never fires.  Logs one WARNING when
+        the episode starts and one INFO when it ends.  Retries one
+        receiver at a time, so a later source waits behind an absent
+        earlier one.  A stop signal ends the wait and raises
+        ConnectionError into run()'s normal shutdown path.
+        """
+        from ka9q import ConnectionError as RadiodConnectionError
+        waiting_since = None
+        attempt = 0
+        while True:
+            try:
+                rx.provision_channels(
+                    **self._provision_kwargs,
+                    msqp_runtime=self._msqp_runtimes.get(rx),
+                )
+            except RadiodConnectionError as exc:
+                if waiting_since is None:
+                    waiting_since = time.monotonic()
+                    logger.warning(
+                        "radiod %s unreachable (%s); staying up and retrying "
+                        "(5 s, doubling to 60 s, without end)",
+                        getattr(rx, "_radiod_id", "?"), exc,
+                    )
+                    self._sd_notify(
+                        b"READY=1\nSTATUS=waiting for radiod "
+                        + str(getattr(rx, "_radiod_id", "?")).encode()
+                    )
+                delay = self.CONNECT_RETRY_DELAYS[
+                    min(attempt, len(self.CONNECT_RETRY_DELAYS) - 1)
+                ]
+                attempt += 1
+                if self._wait(delay):
+                    raise
+                continue
+            if waiting_since is not None:
+                logger.info(
+                    "radiod reachable after %.0f s; resuming startup",
+                    time.monotonic() - waiting_since,
+                )
+                self._sd_notify(b"STATUS=running")
+            return
+
+    @staticmethod
+    def _sd_notify(message: bytes) -> None:
+        """Send one datagram to systemd's notify socket, if any."""
         try:
             addr = os.environ.get("NOTIFY_SOCKET")
             if addr:
@@ -705,12 +761,16 @@ class MeteorScatterRecorder:
                     if addr.startswith("@"):
                         addr = "\0" + addr[1:]
                     sock.connect(addr)
-                    sock.sendall(b"READY=1")
+                    sock.sendall(message)
                 finally:
                     sock.close()
-                logger.info("sd_notify READY=1 sent")
         except Exception:
             logger.debug("sd_notify failed (not running under systemd?)")
+
+    def _notify_ready(self) -> None:
+        """Send sd_notify READY=1 if running under systemd."""
+        self._sd_notify(b"READY=1")
+        logger.info("sd_notify READY=1 sent")
 
     def _start_stats_thread(self) -> None:
         self._stats_thread = threading.Thread(
@@ -1005,6 +1065,7 @@ class MeteorScatterRecorder:
     def _on_signal(self, signum, frame) -> None:
         logger.info("Received signal %d, shutting down", signum)
         self._running = False
+        self._stop_event.set()
 
     def _shutdown(self) -> None:
         logger.info("Shutting down...")
