@@ -181,6 +181,7 @@ def test_client_receiver_manager_logs_are_quiet_during_the_episode(caplog):
             rml.info("connecting to radiod at x")
             rml.warning("verify timed out, retrying")
             rml.error("could not be verified")
+            logging.getLogger("ka9q.status_listener").info("StatusListener started")
             if self.calls <= self.fail_times:
                 raise RadiodUnavailable("no channels")
 
@@ -192,7 +193,8 @@ def test_client_receiver_manager_logs_are_quiet_during_the_episode(caplog):
     recs = caplog.records
     w = next(i for i, r in enumerate(recs) if r.name.endswith("core.recorder")
              and r.levelno == logging.WARNING)
-    between = [r for r in recs[w + 1:] if r.name == rm_mod.__name__
+    between = [r for r in recs[w + 1:]
+               if r.name in (rm_mod.__name__, "ka9q.status_listener")
                and r.getMessage() != "after success"]
     # the last, successful try runs after the filter is removed? no: it runs
     # inside the episode, so it is quiet too
