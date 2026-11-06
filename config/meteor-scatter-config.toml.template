@@ -40,11 +40,11 @@ status = "<configure-via-config-init>"
 # MSK144 meteor-scatter monitoring.  Standard WSJT-X dial frequencies (USB):
 #   10 m → 28.145 MHz
 #   6 m  → 50.260 MHz   (requires a receiver/radiod path that covers 6 m)
-# T/R period: a stock WSJT-X MSK144 install transmits on a 30 s T/R sequence
-# (TX at the top of each minute), so we record 30 s T/R-aligned slots and
-# decode each once with `jt9 --msk144 -p 30`.  Set `tr_period_sec` to match
-# the stations you monitor (WSJT-X also offers 5/10/15 s; 15 s is the 2 m VHF
-# meteor-ping convention).
+# T/R period: MSK144's nominal transmit and receive period is 15 s, and the
+# Meteor Scatter QSO Party records 15 s of audio per slot (Rob Suggs, MSQP
+# working group).  The next 15 s holds the other side of a QSO, which gets its
+# own slot.  We record 15 s T/R-aligned slots back to back and decode each once
+# with `jt9 --msk144 -p 15`.  A station that monitors a 30 s schedule can set 30.
 #
 # Bandwidth: MSK144 occupies ~2.4-2.5 kHz (2000 baud MSK), centered on the
 # 1500 Hz audio Tx point → roughly 300-2750 Hz.  The `usb` preset's filter
@@ -55,7 +55,7 @@ status = "<configure-via-config-init>"
 sample_rate   = 12000
 preset        = "usb"
 encoding      = "s16be"
-tr_period_sec = 30
+tr_period_sec = 15
 freqs_hz      = [
   28_145_000,
   50_260_000,

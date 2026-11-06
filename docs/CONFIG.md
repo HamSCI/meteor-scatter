@@ -109,7 +109,7 @@ The only mode block — `config.MODES = ("msk144",)`.
 | `sample_rate` | `12000` | WSJT-X protocol requirement. |
 | `preset` | `"usb"` | radiod preset. Its filter (low +50, high +3k → ~2950 Hz passband) is the full SSB audio width a real WSJT-X station receives on. **Do not narrow it:** MSK144 is ~2.4–2.5 kHz wide (2000 baud MSK) centred on 1500 Hz, and a tighter filter clips the sidebands and kills decodes. |
 | `encoding` | `"s16be"` | Wire encoding requested from radiod. |
-| `tr_period_sec` | `30` (`MSK144_CADENCE_SEC = 30.0`) | The MSK144 T/R sequence length in seconds. This is simultaneously the recorded slot length, the decode cadence, and `jt9 -p`. It **must match the T/R period the stations you monitor use** — a mismatch still decodes (MSK144 frames are self-contained) but the same TX shows up in adjacent slots with a wandering `dt`. Stock WSJT-X defaults MSK144 to 30 s; 5/10/15 s are also offered, and 15 s is the 2 m VHF meteor-ping convention. |
+| `tr_period_sec` | `15` (`MSK144_CADENCE_SEC = 15.0`) | The MSK144 T/R sequence length in seconds. This is simultaneously the recorded slot length, the decode cadence, and `jt9 -p`. It **must match the T/R period the stations you monitor use** — a mismatch still decodes (MSK144 frames are self-contained) but the same TX shows up in adjacent slots with a wandering `dt`. MSK144's nominal period is 15 s, and the Meteor Scatter QSO Party records 15 s per slot; 30 s suits only a station monitoring a 30 s schedule. |
 
 Two optional sub-tables hold the per-band scale for MSQP recordings. Each is keyed by the
 frequency in Hz written as a string, one key for each entry of `freqs_hz`.

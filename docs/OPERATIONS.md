@@ -140,7 +140,7 @@ INFO:meteor_scatter.core.recorder:stats MSK144 rx=<radiod_id>: spots=0 decodes=4
 Read them in this order; each one rules out a layer.
 
 1. **`decodes=N/M` with `N == M` and `M ≈ freqs × 60/tr_period_sec`.**
-   At the default 30 s T/R period and two channels that is `4/4` per
+   At the default 15 s T/R period and two channels that is `8/8` per
    minute. This is the liveness signal — audio is arriving, slots are
    completing, jt9 is running and exiting cleanly. It is also exactly
    what the watchdog counts.
@@ -241,7 +241,7 @@ keep_wav = true
 sudo systemctl restart meteor-scatter@<instance>
 ls /var/lib/meteor-scatter/<radiod_id>/msk144/ | head
 cd /tmp && touch plotspec decdata
-jt9 -Y --msk144 -p 30 -f 1500 -a /tmp /var/lib/meteor-scatter/<radiod_id>/msk144/<slot>.wav
+jt9 -Y --msk144 -p 15 -f 1500 -a /tmp /var/lib/meteor-scatter/<radiod_id>/msk144/<slot>.wav
 cat /tmp/decoded.txt
 ```
 
