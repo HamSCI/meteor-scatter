@@ -46,16 +46,39 @@ class DescriptionTests(unittest.TestCase):
 
 
 class ReadmeIqTests(unittest.TestCase):
+    CFG = {"operator": "M", "contact_email": "a@b.c", "antenna": "d", "comments": ""}
+
+    def test_usb_only_text_is_byte_for_byte_84c529e(self):
+        import hashlib
+        h = lambda t: hashlib.sha256(t.encode()).hexdigest()
+        cfg = dict(self.CFG, operator="Michael Hauan AC0G", antenna="dipole")
+        f = P.description_fields(cfg, "AC0G/B4", "EM38ww", ["6m"], "v1")
+        self.assertEqual(h(P.readme_text("v1")),
+                         "d58b350d05d18f29e7202e96ad9e697aeb94b93edc28b4a85a62d4226046a472")
+        self.assertEqual(h(P.description_text(f)),
+                         "e16ebf6fc58d5092e2d924fef389d904cec62982af68614b400afe0ad5280d38")
+        self.assertEqual(h(P.description_html(f)),
+                         "9a3e386d46def60cc75116c00446120c170f8295e99016d1a0023033bd154d88")
+
     def test_package_readme_explains_iq(self):
-        r = P.readme_text("v1")
-        for want in ("two channels of 32-bit IEEE float", "Channel\n1 is I and channel 2 is Q",
-                     "12 kHz", "iq_center_hz", "meteor-scatter msqp wav", "scale_db",
-                     "int16" if False else "astype(\"<i2\")", "timing block", "gain_chain",
-                     '"usb"', '"iq"', "can hold both kinds"):
+        r = P.readme_text("v1", has_iq=True)
+        self.assertTrue(r.startswith(P.readme_text("v1")))      # the usb text is kept whole
+        for want in ("in-phase part", "quadrature part", "phase and frequency of a ping",
+                     "real part, I, is the USB audio", "little-endian IEEE 32-bit float",
+                     "12 kHz", "iq_center_hz", "meteor-scatter msqp wav",
+                     "https://github.com/HamSCI/meteor-scatter", "<stem>.s16.wav",
+                     "slot_start_utc_exact", "first_sample_rtp", "label_anchor_utc",
+                     "first_sample_offset", "utc(sample i) = label_anchor_utc",
+                     "gain_chain", "scale_db", "wav_gain_db", "channel_reported",
+                     '"usb"', '"iq"', "contradicts the sidecar"):
             self.assertIn(want, r)
+        self.assertLess(r.index("numpy code"), r.index("meteor-scatter msqp wav"))  # numpy leads
+        self.assertLessEqual(max(len(ln) for ln in r.splitlines()), 100)
 
     def test_description_names_format_and_wav_route(self):
-        cfg = {"operator": "M", "contact_email": "a@b.c", "antenna": "d", "comments": ""}
-        text = P.description_text(P.description_fields(cfg, "AC0G", "EM38ww", ["6m"], "v1"))
+        text = P.description_text(P.description_fields(self.CFG, "AC0G", "EM38ww", ["6m"], "v1",
+                                                       has_iq=True))
         for want in ("two-channel IEEE float", "I then Q", "msqp wav", "16-bit"):
             self.assertIn(want, text)
+        plain = P.description_text(P.description_fields(self.CFG, "AC0G", "EM38ww", ["6m"], "v1"))
+        self.assertNotIn("I/Q", plain)

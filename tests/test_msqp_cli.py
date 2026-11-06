@@ -1184,6 +1184,39 @@ class PackageIqTests(unittest.TestCase):
         self.assertEqual(len(lines), 3)
         self.assertTrue(all(" Rx MSK144 " in ln for ln in lines))
 
+    def test_package_text_follows_the_archive_kinds(self):
+        import hashlib
+        h = lambda t: hashlib.sha256(t.encode()).hexdigest()
+        cfg = dict(CFG, operator="Michael Hauan AC0G", antenna="dipole")
+        usb = Archive(self.root / "usb-archive", 90, 2)
+        _fill(usb, self.root)
+        r = build_package(usb, cfg, "AC0G/B4", "EM38ww", date(2026, 12, 13), date(2026, 12, 14),
+                          self.root / "msqp-usb", "v1")
+        # sha256 of what 84c529e wrote for this fixture
+        self.assertEqual(h((r.dir / "README.txt").read_text()),
+                         "d58b350d05d18f29e7202e96ad9e697aeb94b93edc28b4a85a62d4226046a472")
+        self.assertEqual(h((r.dir / "description.md").read_text()),
+                         "e16ebf6fc58d5092e2d924fef389d904cec62982af68614b400afe0ad5280d38")
+        md = json.loads((r.dir / "metadata.json").read_text())["metadata"]["description"]
+        self.assertEqual(h(md),
+                         "9a3e386d46def60cc75116c00446120c170f8295e99016d1a0023033bd154d88")
+        with zipfile.ZipFile(r.zip_path) as z:
+            self.assertEqual(z.read("README.txt").decode(), (r.dir / "README.txt").read_text())
+        m = build_package(self.a, cfg, "AC0G/B4", "EM38ww", date(2026, 12, 13),
+                          date(2026, 12, 14), self.root / "msqp-mix", "v1")
+        self.assertIn("Two kinds of recording", (m.dir / "README.txt").read_text())
+        self.assertIn("I then Q", (m.dir / "description.md").read_text())
+        self.assertIn("I then Q", json.loads((m.dir / "metadata.json").read_text())
+                      ["metadata"]["description"])
+
+    def test_refuses_an_iq_file_under_a_usb_sidecar(self):
+        d = self.a.root / "6m" / "20261213"
+        write_iq_wav(d / "261213_235930.wav", self.iq, 12000, 50260000)   # sidecar says usb
+        r = build_package(self.a, CFG, "AC0G/B4", "EM38ww", date(2026, 12, 13), date(2026, 12, 14),
+                          self.root / "msqp", "v1")
+        self.assertEqual(r.files, 2)
+        self.assertTrue(any("capture 'usb'" in n for n in r.skipped))
+
     def test_refuses_a_16_bit_wav_where_the_sidecar_says_iq(self):
         bad = [w for _b, w, _s in self.a.recordings(date(2026, 12, 13), date(2026, 12, 14))
                if json.loads(w.with_suffix(".json").read_text()).get("capture") == "iq"][0]
@@ -1218,6 +1251,70 @@ class MsqpWavTests(unittest.TestCase):
         with redirect_stderr(err), redirect_stdout(io.StringIO()):
             rc = cmd_wav(argparse.Namespace(slot=str(slot), instance=None, output=str(out)))
         return rc, err.getvalue()
+
+    def _readme_snippet(self, stem):
+        """The numpy block from the README's I/Q text, with <stem> filled in."""
+        import re
+        from meteor_scatter import msqp_package as P
+        text = P.readme_text("v1", has_iq=True)
+        m = re.search(r"numpy code[^\n]*\n(?:[^\n]*\n)*?\n((?:    [^\n]*\n)+)", text)
+        self.assertIsNotNone(m)
+        import textwrap
+        return textwrap.dedent(m.group(1)).replace("<stem>", str(stem))
+
+    def _wav_samples(self, path):
+        raw = Path(path).read_bytes()
+        return np.frombuffer(raw[44:], "<i2")
+
+    def test_readme_snippet_equals_msqp_wav(self):
+        for scale_db, iq in ((12.0, self.iq), (None, self.iq), (-3.5, self.iq),
+                             (None, np.concatenate([self.iq, [complex("nan")], self.iq * 90]).astype(np.complex64))):
+            with self.subTest(scale_db=scale_db, n=iq.size):
+                self.a = Archive(self.root / f"arch{scale_db}{iq.size}", 90, 2)
+                self.iq = iq
+                slot = self._slot(scale_db)
+                out = self.root / "o.wav"
+                rc, err = self._run(slot, out)
+                self.assertEqual(rc, 0, err)
+                ns = {}
+                exec(compile(self._readme_snippet(slot.with_suffix("")), "readme", "exec"), ns)
+                self.assertEqual(ns["pcm"].tolist(), self._wav_samples(out).tolist())
+                self.assertGreater(int(np.abs(ns["pcm"]).max()), 0)
+
+    def test_msqp_wav_refuses_a_symlinked_slot_or_sidecar(self):
+        slot = self._slot(12.0)
+        side = slot.with_suffix(".json")
+        real_w, real_s = self.root / "real.wav", self.root / "real.json"
+        slot.rename(real_w); side.rename(real_s)
+        slot.symlink_to(real_w); side.symlink_to(real_s)
+        rc, err = self._run(slot, self.root / "o1.wav")
+        self.assertEqual(rc, 2); self.assertIn("symlink", err)
+        slot.unlink(); real_w.rename(slot)             # slot real again, sidecar still a link
+        rc, err = self._run(slot, self.root / "o2.wav")
+        self.assertEqual(rc, 2); self.assertIn("symlink", err)
+        self.assertFalse((self.root / "o1.wav").exists() or (self.root / "o2.wav").exists())
+
+    def test_msqp_wav_refuses_a_hard_linked_or_oversized_slot(self):
+        slot = self._slot(12.0)
+        os.link(slot, self.root / "twin.wav")
+        rc, err = self._run(slot, self.root / "o.wav")
+        self.assertEqual(rc, 2); self.assertIn("hard links", err)
+        (self.root / "twin.wav").unlink()
+        with mock.patch("meteor_scatter.msqp_cli.WAV_CAP", 100):
+            rc, err = self._run(slot, self.root / "o.wav")
+        self.assertEqual(rc, 2); self.assertIn("larger than", err)
+
+    def test_msqp_wav_refuses_output_inside_the_archive(self):
+        from meteor_scatter.msqp_cli import derive_wav
+        slot = self._slot(12.0)
+        with self.assertRaisesRegex(ValueError, "inside the archive"):
+            derive_wav(slot, slot.parent / "x.s16.wav", archive_root=self.a.root)
+        out = derive_wav(slot, self.root / "outside.wav", archive_root=self.a.root)
+        self.assertTrue(out.exists())
+        # a path relative to the archive finds the slot too
+        rel = slot.relative_to(self.a.root)
+        out2 = derive_wav(rel, self.root / "o2.wav", archive_root=self.a.root)
+        self.assertEqual(out.read_bytes(), out2.read_bytes())
 
     def test_msqp_wav_matches_usb_path(self):
         slot = self._slot(12.0)

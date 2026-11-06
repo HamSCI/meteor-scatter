@@ -166,6 +166,39 @@ def _open_recording(root_fd: int, parts):
             os.close(fd)
 
 
+HEADER_PEEK = 4096
+WAV_CAP = 512 * 1024 * 1024       # no kept slot comes near this: 15 s of I/Q is 1.4 MB
+SIDECAR_CAP = 4 * 1024 * 1024
+
+
+def _check_kind(side: dict, head: bytes) -> None:
+    """ValueError when the file's header contradicts the sidecar's capture.  The header is read
+    with the chunk walk that read_iq_bytes uses, so the guard and the reader cannot disagree."""
+    from meteor_scatter.core.iq import is_iq_format, wav_layout
+    kind = side.get("capture", "usb")
+    try:
+        fmt_is_iq = is_iq_format(wav_layout(head)[0])
+    except ValueError as e:
+        if kind == "iq":
+            raise ValueError(f"sidecar says capture iq but the file is not two-channel "
+                             f"32-bit float WAV ({e})")
+        return                      # a usb file the walk cannot read is the usb path's business
+    if kind == "iq" and not fmt_is_iq:
+        raise ValueError("sidecar says capture iq but the file is not two-channel 32-bit float")
+    if kind != "iq" and fmt_is_iq:
+        raise ValueError(f"sidecar says capture {kind!r} but the file is two-channel 32-bit "
+                         "float I/Q")
+
+
+def _read_capped(fd: int, cap: int, what: str) -> bytes:
+    """All of an open regular file, ValueError if it holds more than ``cap`` bytes."""
+    with os.fdopen(fd, "rb") as f:
+        data = f.read(cap + 1)
+    if len(data) > cap:
+        raise ValueError(f"{what} is larger than {cap} bytes")
+    return data
+
+
 def _check_recording(root_fd: int, parts):
     """(sidecar dict, ALL.TXT lines, sidecar bytes, wav identity) for one recording, or
     raise ValueError(reason).  The archive belongs to the daemon's account and this may run
@@ -174,7 +207,7 @@ def _check_recording(root_fd: int, parts):
     wav's (st_dev, st_ino) lets the zip pass confirm it reopens the same file."""
     fd, wst = _open_recording(root_fd, parts)
     with os.fdopen(fd, "rb") as f:
-        head = f.read(36)
+        head = f.read(HEADER_PEEK)
     fd, _ = _open_recording(root_fd, parts[:-1] + (Path(parts[-1]).with_suffix(".json").name,))
     with os.fdopen(fd, "rb") as f:
         raw = f.read()
@@ -193,14 +226,7 @@ def _check_recording(root_fd: int, parts):
         msg = d.get("message") if isinstance(d, dict) else None
         if isinstance(msg, str) and msg != "".join(msg.splitlines()):
             raise ValueError("a decode message holds a line break")
-    if side.get("capture", "usb") == "iq":
-        # The sidecar says I/Q: the file must be I/Q, never a 16-bit WAV in its place.
-        ok = (len(head) == 36 and head[:4] == b"RIFF" and head[8:16] == b"WAVEfmt "
-              and struct.unpack_from("<HH", head, 20) == (3, 2)
-              and struct.unpack_from("<H", head, 34)[0] == 32)
-        if not ok:
-            raise ValueError("sidecar says capture iq but the file is not two-channel "
-                             "32-bit float")
+    _check_kind(side, head)
     try:
         lines = [P.all_txt_line(side, d) for d in side["decodes"]]
     except (KeyError, TypeError, ValueError, AttributeError) as e:
@@ -278,6 +304,7 @@ def build_package(archive, cfg, callsign, grid, first, last, out_root, version):
 
 def _package(archive, arch_fd, recs, cfg, callsign, grid, first, last, out_root, version):
     valid, lines, per, flagged, bands, skipped = [], [], {}, [], [], []
+    has_iq = False
     decodes = []
     for band, wav, side_path in recs:
         rel = wav.relative_to(archive.root)
@@ -289,6 +316,8 @@ def _package(archive, arch_fd, recs, cfg, callsign, grid, first, last, out_root,
             skipped.append(f"{rel}: {e}")
             continue
         valid.append((raw, ident, rel))
+        if side.get("capture", "usb") == "iq":
+            has_iq = True
         lines.extend(side_lines)
         decodes.extend(R.sidecar_decodes(side, str(rel)))
         day = rel.parts[1]
@@ -348,17 +377,17 @@ def _package(archive, arch_fd, recs, cfg, callsign, grid, first, last, out_root,
             # analyst to filter by confidence.
             z.writestr("classification.csv", classified,
                        compress_type=zipfile.ZIP_STORED)
-            z.writestr("README.txt", P.readme_text(version),
+            z.writestr("README.txt", P.readme_text(version, has_iq),
                        compress_type=zipfile.ZIP_STORED)
 
-    fields = P.description_fields(cfg, callsign, grid, bands, version)
+    fields = P.description_fields(cfg, callsign, grid, bands, version, has_iq)
     md = P.record_metadata(title_text, P.description_html(fields), cfg["operator"],
                            datetime.now(timezone.utc).date())
     try:
         _write_atomic(pkg_fd, zip_path.name, write_zip)
         _write_atomic(pkg_fd, "ALL.TXT", lambda f: f.write("".join(lines).encode()))
         _write_atomic(pkg_fd, "README.txt",
-                      lambda f: f.write(P.readme_text(version).encode()))
+                      lambda f: f.write(P.readme_text(version, has_iq).encode()))
         _write_atomic(pkg_fd, "description.md",
                       lambda f: f.write(P.description_text(fields).encode()))
         _write_atomic(pkg_fd, "metadata.json",
@@ -469,30 +498,67 @@ def cmd_package(args) -> int:
     return 0
 
 
-def derive_wav(slot: Path, out: Path | None = None) -> Path:
+def _slot_location(slot: Path, archive_root: Path | None):
+    """(directory to open, name parts below it) for a slot path.  Inside the archive root the
+    parts walk down from the root, as `msqp package` does; elsewhere (an unzipped package) the
+    slot's own directory is the root and the one name is the part."""
+    p = Path(os.path.abspath(slot))
+    if archive_root is not None:
+        root = Path(os.path.abspath(archive_root))
+        if not p.exists() and not Path(slot).is_absolute() and (root / slot).exists():
+            p = root / slot
+        try:
+            return root, p.relative_to(root).parts
+        except ValueError:
+            pass
+    return p.parent, (p.name,)
+
+
+def derive_wav(slot: Path, out: Path | None = None, archive_root: Path | None = None) -> Path:
     """Write the 12 kHz 16-bit mono WAV that the usb path writes for this kept I/Q slot.
 
     The audio is iq_to_usb_audio (radiod's USB output); the gain is the sidecar's scale_db,
-    or the slot's peak normalisation where that is null, as the usb path applies it.  Raises
-    ValueError for a usb-capture recording, which is 16-bit audio already, or a missing sidecar.
+    or the slot's peak normalisation where that is null, as the usb path applies it.  The slot
+    and its sidecar open as `msqp package` opens them: from a directory fd, O_NOFOLLOW per
+    component, regular and singly linked files only, read from the descriptor under a size cap.
+    Raises ValueError for a usb-capture recording, which is 16-bit audio already, a missing
+    sidecar, an unsafe file, or an output path inside the archive.
     """
-    import numpy as np  # noqa: F401
-    from meteor_scatter.core.iq import iq_to_usb_audio, read_iq_wav
+    from meteor_scatter.core.iq import iq_to_usb_audio, read_iq_bytes
     from meteor_scatter.core.wav import write_wav
 
-    slot = Path(slot)
-    side_path = slot.with_suffix(".json")
+    root, parts = _slot_location(Path(slot), archive_root)
+    if len(parts) < 1 or parts[-1] in ("", ".", ".."):
+        raise ValueError(f"{slot} is not a file name")
+    root_fd = _open_sub(str(root), None)
     try:
-        side = json.loads(side_path.read_text())
-    except (OSError, ValueError) as e:
-        raise ValueError(f"cannot read the sidecar {side_path} ({e.__class__.__name__})")
+        wfd, _ = _open_recording(root_fd, tuple(parts))
+        wav_bytes = _read_capped(wfd, WAV_CAP, str(slot))
+        side_name = Path(parts[-1]).with_suffix(".json").name
+        try:
+            sfd, _ = _open_recording(root_fd, tuple(parts[:-1]) + (side_name,))
+        except _Missing:
+            raise ValueError(f"the sidecar {side_name} is missing beside {parts[-1]}")
+        side_bytes = _read_capped(sfd, SIDECAR_CAP, side_name)
+    finally:
+        os.close(root_fd)
+    try:
+        side = json.loads(side_bytes.decode())
+    except ValueError as e:
+        raise ValueError(f"cannot read the sidecar {side_name} ({e.__class__.__name__})")
     if not isinstance(side, dict):
-        raise ValueError(f"{side_path} is not a sidecar")
+        raise ValueError(f"{side_name} is not a sidecar")
     if side.get("capture", "usb") != "iq":
         raise ValueError(f"{slot} is a usb-capture recording: it is 16-bit audio already")
-    iq, rate = read_iq_wav(slot)
-    out = Path(out) if out else Path(slot.stem + ".s16.wav")
-    if out.resolve() == slot.resolve():
+    iq, rate = read_iq_bytes(wav_bytes)
+    out = Path(out) if out else Path(Path(parts[-1]).stem + ".s16.wav")
+    if archive_root is not None:
+        real_out = Path(os.path.realpath(out.parent)) / out.name
+        real_root = Path(os.path.realpath(archive_root))
+        if real_root == real_out.parent or real_root in real_out.parents:
+            raise ValueError(f"{out} lies inside the archive {archive_root}; give an output "
+                             "path outside it")
+    if os.path.realpath(out) == os.path.realpath(Path(root, *parts)):
         raise ValueError("the output would overwrite the I/Q file")
     write_wav(out, iq_to_usb_audio(iq), rate, int(side.get("iq_center_hz") or 0),
               scale_db=side.get("scale_db"))
@@ -500,12 +566,13 @@ def derive_wav(slot: Path, out: Path | None = None) -> Path:
 
 
 def cmd_wav(args) -> int:
-    slot = Path(args.slot)
     try:
-        if not slot.exists() and args.instance:
+        archive_root = None
+        if args.instance:
             _c, _cfg, archive, _cs, _g = _resolve_instance(args)
-            slot = archive.root / args.slot
-        out = derive_wav(slot, Path(args.output) if args.output else None)
+            archive_root = archive.root
+        out = derive_wav(Path(args.slot), Path(args.output) if args.output else None,
+                         archive_root)
     except (PackageRefused, OSError, ValueError) as e:
         print(f"msqp wav: {e}", file=sys.stderr)
         return 2
@@ -1107,7 +1174,8 @@ def add_subparsers(sub_msqp: argparse.ArgumentParser, *, common=None) -> None:
         description="Write the WAV the usb capture path would have kept for this slot: the "
                     "I/Q's real part (radiod's USB audio), scaled by the sidecar's scale_db, or "
                     "peak-normalised where scale_db is null, as 16-bit PCM.  The sidecar "
-                    "(<slot>.json) must sit beside the slot.")
+                    "(<slot>.json) must sit beside the slot.  The slot and sidecar open without following "
+                    "links.  With --instance, the output may not lie inside the archive.")
     wv.add_argument("slot", help="kept slot (<stem>.wav holding I/Q); with --instance, a path "
                                  "relative to that instance's archive also works")
     wv.add_argument("--instance", default=None,

@@ -86,30 +86,46 @@ def write_iq_wav(path: Path, iq: np.ndarray, sample_rate: int, frequency_hz: int
         raise
 
 
-def read_iq_wav(path: Path) -> tuple[np.ndarray, int]:
-    """(complex64 I/Q, sample rate) from a file write_iq_wav made.
-
-    Raises ValueError when the file is not a two-channel 32-bit IEEE float WAV.
-    """
-    raw = Path(path).read_bytes()
-    if raw[:4] != b"RIFF" or raw[8:12] != b"WAVE":
+def wav_layout(buf: bytes) -> tuple[tuple, int, int]:
+    """((tag, channels, rate, byte_rate, align, bits), data offset, data size) from the start of a
+    WAV, found by walking its chunks.  ``buf`` needs to reach the data chunk's header only.
+    ValueError when it is no WAV or the fmt chunk does not come before the data chunk."""
+    if buf[:4] != b"RIFF" or buf[8:12] != b"WAVE":
         raise ValueError("not a RIFF/WAVE file")
-    pos, fmt, data = 12, None, None
-    while pos + 8 <= len(raw):
-        cid, size = raw[pos:pos + 4], struct.unpack_from("<I", raw, pos + 4)[0]
-        body = raw[pos + 8:pos + 8 + size]
+    pos, fmt = 12, None
+    while pos + 8 <= len(buf):
+        cid, size = buf[pos:pos + 4], struct.unpack_from("<I", buf, pos + 4)[0]
         if cid == b"fmt ":
-            fmt = struct.unpack_from("<HHIIHH", body, 0)
+            if size < 16 or pos + 8 + 16 > len(buf):
+                raise ValueError("fmt chunk is short")
+            fmt = struct.unpack_from("<HHIIHH", buf, pos + 8)
         elif cid == b"data":
-            data = body
-            break
+            if fmt is None:
+                raise ValueError("WAV has no fmt chunk before its data")
+            return fmt, pos + 8, size
         pos += 8 + size + (size & 1)
-    if fmt is None or data is None:
-        raise ValueError("WAV lacks a fmt or data chunk")
-    tag, channels, rate, _byte_rate, _align, bits = fmt
-    if (tag, channels, bits) != (3, 2, 32):
-        raise ValueError(f"not two-channel 32-bit float I/Q (format {tag}, {channels} channel(s), "
-                         f"{bits} bit)")
-    n = len(data) // 8
-    flat = np.frombuffer(data[:n * 8], dtype="<f4")
-    return np.ascontiguousarray(flat).view("<c8").astype(np.complex64), int(rate)
+    raise ValueError("WAV lacks a fmt or data chunk")
+
+
+def is_iq_format(fmt: tuple) -> bool:
+    """True for IEEE float (tag 3), two channels, 32 bits: the I/Q file's format."""
+    return (fmt[0], fmt[1], fmt[5]) == (3, 2, 32)
+
+
+def read_iq_bytes(raw: bytes) -> tuple[np.ndarray, int]:
+    """(complex64 I/Q, sample rate) from the bytes of a file write_iq_wav made.
+
+    ValueError when the bytes are not a two-channel 32-bit float WAV.
+    """
+    fmt, off, size = wav_layout(raw)
+    if not is_iq_format(fmt):
+        raise ValueError(f"not two-channel 32-bit float I/Q (format {fmt[0]}, {fmt[1]} "
+                         f"channel(s), {fmt[5]} bit)")
+    n = min(size, len(raw) - off) // 8
+    flat = np.frombuffer(raw, dtype="<f4", count=2 * n, offset=off)
+    return np.ascontiguousarray(flat).view("<c8").astype(np.complex64), int(fmt[2])
+
+
+def read_iq_wav(path: Path) -> tuple[np.ndarray, int]:
+    """read_iq_bytes of a file."""
+    return read_iq_bytes(Path(path).read_bytes())
