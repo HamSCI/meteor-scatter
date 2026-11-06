@@ -939,7 +939,7 @@ TOTALS_DEFAULT_DAYS = 14
 
 
 def _file_size(path: Path) -> int:
-    try:
+    try:  # a recording whose sidecar is missing or unreadable adds 0 bytes, not an error
         return path.stat().st_size
     except OSError:
         return 0
@@ -965,7 +965,7 @@ def cmd_totals(args) -> int:
     except (PackageRefused, OSError, ValueError) as e:
         print(f"msqp totals: {e}", file=sys.stderr)
         return 2
-    days = [{"band": b, "day": d, "slots": n, "bytes": nb}
+    days = [{"band": b, "day": datetime.strptime(d, "%Y%m%d").date().isoformat(), "slots": n, "bytes": nb}
             for (b, d), (n, nb) in sorted(cells.items(), key=lambda kv: (kv[0][1], kv[0][0]))]
     total_slots = sum(r["slots"] for r in days)
     total_bytes = sum(r["bytes"] for r in days)
@@ -980,8 +980,10 @@ def cmd_totals(args) -> int:
         print(f"no kept recordings from {first} to {last}")
         return 0
     for r in days:
-        print(f"{r['band']} {r['day']}: {r['slots']} slots, {r['bytes']} bytes")
-    print(f"total: {total_slots} slots, {total_bytes} bytes")
+        print(f"{r['band']} {r['day']}: {r['slots']} {'slot' if r['slots'] == 1 else 'slots'}, "
+              f"{r['bytes']} bytes")
+    print(f"total: {total_slots} {'slot' if total_slots == 1 else 'slots'}, "
+          f"{total_bytes} bytes")
     print(f"projected package {total_bytes / 1e9:.2f} GB, {fraction * 100:.1f}% of Zenodo's "
           f"{ZENODO_LIMIT_BYTES // 10**9} GB record limit")
     return 0
@@ -1032,7 +1034,8 @@ def add_subparsers(sub_msqp: argparse.ArgumentParser, *, common=None) -> None:
         description="Count the kept recordings per band and UTC day.  Bytes cover each "
                     "recording's WAV plus its JSON sidecar.  The projected package size is "
                     "their sum, uncompressed, since WAV noise barely compresses.  Default "
-                    "span: the last 14 days, ending today (UTC).")
+                    "span: the last 14 days, ending today (UTC).  Rows appear only for "
+                    "band-days that hold recordings; a day without any gets no row.")
     tot.add_argument("--instance", required=True,
                      help="instance to total (selects /etc/meteor-scatter/<instance>.toml)")
     tot.add_argument("--first", default=None, metavar="YYYY-MM-DD",

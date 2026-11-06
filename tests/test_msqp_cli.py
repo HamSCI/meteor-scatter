@@ -1068,10 +1068,10 @@ class CmdTotalsTests(unittest.TestCase):
         self._two_bands()
         rc, out, err = self._totals()
         self.assertEqual(rc, 0, err)
-        self.assertIn("6m 20261212: 2 slots, 2200 bytes", out)
-        self.assertIn("6m 20261213: 1 slots, 2050 bytes", out)
-        self.assertIn("10m 20261213: 1 slots, 520 bytes", out)
-        self.assertIn("10m 20261214: 1 slots, 730 bytes", out)
+        self.assertIn("6m 2026-12-12: 2 slots, 2200 bytes", out)
+        self.assertIn("6m 2026-12-13: 1 slot, 2050 bytes", out)
+        self.assertIn("10m 2026-12-13: 1 slot, 520 bytes", out)
+        self.assertIn("10m 2026-12-14: 1 slot, 730 bytes", out)
         self.assertIn("total: 5 slots, 5500 bytes", out)
         self.assertIn("of Zenodo's 50 GB record limit", out)
 
@@ -1084,7 +1084,9 @@ class CmdTotalsTests(unittest.TestCase):
         self.assertEqual(j["total_bytes"], 5500)
         self.assertEqual(j["zenodo_limit_bytes"], 50_000_000_000)
         self.assertAlmostEqual(j["zenodo_fraction"], 5500 / 50e9)
-        self.assertEqual(len(j["days"]), 4)
+        self.assertEqual([(r["day"], r["band"], r["slots"], r["bytes"]) for r in j["days"]],
+                         [("2026-12-12", "6m", 2, 2200), ("2026-12-13", "10m", 1, 520),
+                          ("2026-12-13", "6m", 1, 2050), ("2026-12-14", "10m", 1, 730)])
         self.assertEqual({"band", "day", "slots", "bytes"}, set(j["days"][0]))
 
     def test_totals_respects_the_span(self):
@@ -1099,3 +1101,22 @@ class CmdTotalsTests(unittest.TestCase):
         self.assertIn("no kept recordings", out)
         rc, out, _ = self._totals(json=True)
         self.assertEqual(json.loads(out)["total_slots"], 0)
+
+    def test_totals_skips_a_day_without_recordings(self):
+        self._put("6m", "20261212", "261212_000000", 100, 10)
+        self._put("6m", "20261214", "261214_000000", 100, 10)
+        rc, out, _ = self._totals(json=True)
+        self.assertEqual([r["day"] for r in json.loads(out)["days"]], ["2026-12-12", "2026-12-14"])
+
+    def test_totals_default_span_is_the_last_14_days(self):
+        now = datetime(2026, 12, 20, 12, tzinfo=timezone.utc).timestamp()
+        self._put("6m", "20261207", "261207_000000", 100, 10)   # day -13: counted
+        self._put("6m", "20261206", "261206_000000", 100, 10)   # day -14: not counted
+        self._put("6m", "20261220", "261220_000000", 100, 10)   # today: counted
+        self._put("6m", "20261221", "261221_000000", 100, 10)   # tomorrow: not counted
+        with mock.patch("meteor_scatter.msqp_cli._now", return_value=now):
+            rc, out, err = self._totals(first=None, last=None, json=True)
+        self.assertEqual(rc, 0, err)
+        j = json.loads(out)
+        self.assertEqual([r["day"] for r in j["days"]], ["2026-12-07", "2026-12-20"])
+        self.assertEqual((j["first"], j["last"]), ("2026-12-07", "2026-12-20"))
