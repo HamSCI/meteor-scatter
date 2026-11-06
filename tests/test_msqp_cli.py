@@ -1304,6 +1304,27 @@ class MsqpWavTests(unittest.TestCase):
             rc, err = self._run(slot, self.root / "o.wav")
         self.assertEqual(rc, 2); self.assertIn("larger than", err)
 
+    def test_msqp_wav_refuses_a_symlink_at_the_output_name(self):
+        slot = self._slot(12.0)
+        victim = self.root / "victim.txt"
+        victim.write_bytes(b"precious")
+        out = self.root / "o.wav"
+        out.symlink_to(victim)
+        rc, err = self._run(slot, out)
+        self.assertEqual(rc, 2); self.assertIn("symlink", err)
+        self.assertEqual(victim.read_bytes(), b"precious")
+        self.assertTrue(out.is_symlink())
+        self.assertEqual([p.name for p in self.root.iterdir() if p.name.endswith(".part")], [])
+
+    def test_msqp_wav_replaces_a_regular_output_and_leaves_no_part_file(self):
+        slot = self._slot(12.0)
+        out = self.root / "o.wav"
+        out.write_bytes(b"old")
+        rc, err = self._run(slot, out)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(out.read_bytes(), self._expected(12.0))
+        self.assertEqual([p.name for p in self.root.iterdir() if p.name.endswith(".part")], [])
+
     def test_msqp_wav_refuses_output_inside_the_archive(self):
         from meteor_scatter.msqp_cli import derive_wav
         slot = self._slot(12.0)

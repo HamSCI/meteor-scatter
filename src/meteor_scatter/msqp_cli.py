@@ -552,16 +552,33 @@ def derive_wav(slot: Path, out: Path | None = None, archive_root: Path | None = 
         raise ValueError(f"{slot} is a usb-capture recording: it is 16-bit audio already")
     iq, rate = read_iq_bytes(wav_bytes)
     out = Path(out) if out else Path(Path(parts[-1]).stem + ".s16.wav")
+    if os.path.islink(out):
+        raise ValueError(f"{out} is a symlink; refusing to write through it")
+    real_out = Path(os.path.realpath(out))          # the whole path, last component included
     if archive_root is not None:
-        real_out = Path(os.path.realpath(out.parent)) / out.name
         real_root = Path(os.path.realpath(archive_root))
-        if real_root == real_out.parent or real_root in real_out.parents:
+        if real_root in real_out.parents:
             raise ValueError(f"{out} lies inside the archive {archive_root}; give an output "
                              "path outside it")
-    if os.path.realpath(out) == os.path.realpath(Path(root, *parts)):
+    if real_out == Path(os.path.realpath(Path(root, *parts))):
         raise ValueError("the output would overwrite the I/Q file")
-    write_wav(out, iq_to_usb_audio(iq), rate, int(side.get("iq_center_hz") or 0),
-              scale_db=side.get("scale_db"))
+    import tempfile
+    out.parent.mkdir(parents=True, exist_ok=True)
+    # mkstemp creates the temp file O_CREAT|O_EXCL|O_NOFOLLOW; os.replace then swaps the name
+    # itself, never the file a link might point at.
+    tfd, tmp = tempfile.mkstemp(prefix=f".{out.name}.", suffix=".part", dir=out.parent)
+    os.close(tfd)
+    try:
+        write_wav(Path(tmp), iq_to_usb_audio(iq), rate, int(side.get("iq_center_hz") or 0),
+                  scale_db=side.get("scale_db"))
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, out)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
     return out
 
 
