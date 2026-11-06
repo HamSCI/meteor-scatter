@@ -86,6 +86,19 @@ def inflight_from(pending_procs, now_mono: float) -> tuple[int, float]:
     return len(ages), (max(ages) if ages else 0.0)
 
 
+TIMING_NOTES = [
+    "utc(sample i of this recording) = label_anchor_utc + (first_sample_offset + i) / sample_rate; "
+    "this reproduces the label the slot was cut by, to one sample.",
+    "label_anchor_utc is the UTC of anchor_rtp as radiod's RTP-to-UTC mapping stood when the slot "
+    "was cut; anchor.utc is the same RTP sample's UTC at the original pin, so "
+    "label_anchor_utc - anchor.utc is the slide since the stream started.",
+    "first_sample_rtp = (anchor_rtp + first_sample_offset) mod 2**32, the RTP header's wrapped "
+    "timestamp of sample 0.",
+    "slot_start_utc_exact is the requested slot boundary; it lies within half a sample of the "
+    "UTC of sample 0.",
+]
+
+
 def sweep_spool(spool_dir: Path, max_age_sec: float, now: Optional[float] = None) -> int:
     """Remove ``*.wav``, ``*.iq.wav`` and ``*.part`` older than ``max_age_sec`` from the spool.
 
@@ -261,16 +274,22 @@ class SlotWorker:
         # This is what lets the grid FOLLOW radiod's RTP↔UTC slide: anchor_rtp
         # never moves (so ring offsets stay valid), but its UTC — and thus the
         # RTP offset of each clean cadence boundary — tracks radiod every tick.
+        anchor_rtp_seen = getattr(self._clock, "_anchor_rtp", None)
         anchor_utc_now = self._get_anchor_utc_now()
         if anchor_utc_now is None:
             return
 
         cadence_samples = self._clock.cadence_samples
         settle_samples = self._clock.settle_samples
-        harvested: list[tuple[int, float]] = []
+        harvested: list[tuple[int, float, Optional[dict]]] = []
         try:
             with self._clock_lock:
                 if not self._clock.anchored:
+                    return
+                # anchor_utc_now was computed above, outside the lock, for whichever anchor_rtp
+                # was current then.  A re-anchor in between would pair that UTC with the new
+                # anchor_rtp, so the harvest waits for the next tick.
+                if self._clock.rtp_of_offset(0) != anchor_rtp_seen:
                     return
                 latest_off = self._clock.offset_of_rtp(latest_rtp)
                 # Seed the next boundary at the first clean cadence multiple at/after
@@ -289,7 +308,18 @@ class SlotWorker:
                     )
                     if latest_off < start_off + cadence_samples + settle_samples:
                         break
-                    harvested.append((start_off, self._next_boundary_utc))
+                    # Everything the sidecar's timing block says comes from this one snapshot,
+                    # taken with the clock locked: the anchor, its RTP, its re-pinned UTC and
+                    # the slot's offset belong to one reference space.
+                    snapshot = None
+                    if self._get_anchor is not None:
+                        snapshot = {
+                            "anchor": self._get_anchor(),
+                            "anchor_rtp": int(self._clock.rtp_of_offset(0)),
+                            "label_anchor_utc": float(anchor_utc_now),
+                            "first_sample_offset": int(start_off),
+                        }
+                    harvested.append((start_off, self._next_boundary_utc, snapshot))
                     self._next_boundary_utc += self._cadence_sec
         except SlotClockDesyncError as exc:
             logger.error(
@@ -301,20 +331,23 @@ class SlotWorker:
                 self._on_desync()
             return
 
-        for start_off, start_utc in harvested:
+        for start_off, start_utc, snapshot in harvested:
             samples = self._ring.extract_by_offset(start_off, cadence_samples)
             if samples is None:
                 self.slots_empty += 1
-                logger.warning(
-                    "%s %d Hz: slot at %.1f — insufficient samples, skipping",
-                    self._mode.upper(), self._frequency_hz, start_utc,
-                )
+                self._episode(
+                    "insufficient", 1,
+                    f"slot at {start_utc:.1f} has insufficient samples, skipping; logged once "
+                    "until the slots are complete again",
+                    "slots complete again")
                 continue
-            wav_path = self._write_spool_wav(samples, start_utc, start_off)
+            self._episode("insufficient", 0, "", "slots complete again")
+            wav_path = self._write_spool_wav(samples, start_utc, start_off, snapshot)
             self._fork_decoder(wav_path, start_utc)
 
     def _write_spool_wav(self, samples, slot_start_utc: float,
-                         start_off: Optional[int] = None) -> Path:
+                         start_off: Optional[int] = None,
+                         snapshot: Optional[dict] = None) -> Path:
         # MSK144 slot boundaries are integer seconds (:00/:15/:30/:45), so
         # the filename label is exact.  We name the WAV with a 4-digit-year
         # WSJT-X-style stamp (YYYYMMDD_HHMMSS_<freqkhz>.wav); jt9 tolerates
@@ -338,7 +371,7 @@ class SlotWorker:
             + "; logged once until the slots are clean again",
             "non-finite samples cleared")
         if self._get_anchor is not None:
-            self._slot_timing[wav_path] = self._timing_block(slot_start_utc, start_off)
+            self._slot_timing[wav_path] = self._timing_block(slot_start_utc, snapshot)
 
         audio = samples
         if self._capture == "iq":
@@ -404,26 +437,34 @@ class SlotWorker:
             del self._episodes[key]
             logger.info("%s: %s after %d slots (%d samples in all)", who, end_text, st[0], st[1])
 
-    def _timing_block(self, slot_start_utc: float, start_off: Optional[int]) -> dict:
-        """The sidecar's ``timing`` block for the slot being cut now.
+    def _timing_block(self, slot_start_utc: float, snapshot: Optional[dict]) -> dict:
+        """The sidecar's ``timing`` block for one slot, from the snapshot taken at harvest.
 
-        Built from the anchor that labels this slot (the stream's AnchorUTC), never from a fresh
-        authority.json read.  ``first_sample_rtp`` is the wrapped 32-bit RTP timestamp of the
-        slot's first sample.
+        The snapshot (anchor, anchor_rtp, label_anchor_utc, first_sample_offset) was read with the
+        clock locked, so a re-anchor or restore after the harvest cannot mix reference spaces
+        into the block.  Nothing here reads the clock or the stream again.  Without a snapshot
+        (no anchor provider, as in a bare worker) the block holds the exact start and the sample
+        rate, and the rest is null.
         """
-        rtp = None
-        if start_off is not None:
-            with self._clock_lock:
-                if self._clock.anchored:
-                    rtp = int(self._clock.rtp_of_offset(start_off))
-        anchor = self._get_anchor() if self._get_anchor is not None else None
         block = {
             "slot_start_utc_exact": float(slot_start_utc),
-            "first_sample_rtp": rtp,
+            "first_sample_rtp": None,
+            "first_sample_offset": None,
+            "anchor_rtp": None,
+            "label_anchor_utc": None,
             "sample_rate": int(self._ring.sample_rate),
             "anchor": None,
             "timing_authority_applied": None,
+            "notes": TIMING_NOTES,
         }
+        if snapshot is None:
+            return block
+        anchor_rtp, off = snapshot["anchor_rtp"], snapshot["first_sample_offset"]
+        block["anchor_rtp"] = anchor_rtp
+        block["first_sample_offset"] = off
+        block["first_sample_rtp"] = (anchor_rtp + off) & 0xFFFFFFFF
+        block["label_anchor_utc"] = snapshot["label_anchor_utc"]
+        anchor = snapshot["anchor"]
         if anchor is not None:
             block["anchor"] = {"utc": anchor.utc, "source": anchor.source,
                                "rtp_referenced": anchor.rtp_referenced,

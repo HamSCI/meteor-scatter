@@ -104,6 +104,7 @@ def build_sidecar(*, reporter_id, freq_hz, slot_start_utc, sample_rate, stats: W
         "software_version": version,
         "timing": timing if timing is not None else {
             "slot_start_utc_exact": float(slot_start_utc), "first_sample_rtp": None,
+            "first_sample_offset": None, "anchor_rtp": None, "label_anchor_utc": None,
             "sample_rate": int(sample_rate), "anchor": None, "timing_authority_applied": None},
         "gain_chain": gain_chain(capture),
     }

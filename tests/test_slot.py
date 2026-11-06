@@ -828,22 +828,29 @@ class SpoolSweepTests(unittest.TestCase):
 
 
 class SidecarTimingTests(unittest.TestCase):
+    """The timing block comes from the harvest snapshot.  Fixture: the anchor pinned at ANCHOR_RTP,
+    the label mapping (anchor_utc_now) 0.5 ms past the original pin (a slide), the slot boundary
+    T0 7.5 s after the label anchor, so the first sample is offset 90000 and T0 = label_anchor_utc
+    + 90000/12000."""
     ANCHOR_RTP = 0xFFFFF000          # the first slot's RTP timestamp wraps past 2**32
     T0 = 1797206370.0
+    LABEL_ANCHOR_UTC = T0 - 7.5
+    PIN_UTC = LABEL_ANCHOR_UTC - 0.0005
+    OFF = 90000
 
     @staticmethod
-    def _anchor():
+    def _anchor(utc, source="rtp_to_utc+authority", tier="T3"):
         import types
         from datetime import datetime, timezone
         from hamsci_dsp.timing import AnchorUTC
         snap = types.SimpleNamespace(
-            governor_radiod="bee1.local", t_level_active="T3", sigma_ns=12345.0,
+            governor_radiod="bee1.local", t_level_active=tier, sigma_ns=12345.0,
             utc_published=datetime(2026, 12, 13, 23, 59, 0, tzinfo=timezone.utc),
             host_clock={"verdict": "ok"})
-        return AnchorUTC(utc=1797206000.25, source="rtp_to_utc+authority", offset_seconds=1.5e-6,
+        return AnchorUTC(utc=utc, source=source, offset_seconds=1.5e-6,
                          offset_ns=1500, snapshot=snap, rtp_referenced=True)
 
-    def _kept(self, td, capture):
+    def _worker(self, td, capture, during_extract=None):
         from meteor_scatter.core.archive import Archive
         from meteor_scatter.core.frontend import FrontendLog, FrontendReading
         from meteor_scatter.core.msqp import MsqpChannel
@@ -855,24 +862,61 @@ class SidecarTimingTests(unittest.TestCase):
         ch = MsqpChannel(Archive(Path(td) / "arch", 90, 2), fe, 28145000, "AC0G/B4", 11.0,
                          NoiseWatch(None), "test", preset="iq" if capture == "iq" else "usb",
                          capture=capture)
-        anchor = self._anchor()
+        self.anchor = self._anchor(self.PIN_UTC)
+        self.cur_anchor = {"a": self.anchor}
         w, clock, ring, box = _make_worker(td, decoder_path=jt9, msqp=ch, capture=capture,
-                                           get_anchor=lambda: anchor, client_radiod="rx.local")
-        clock.anchor(self.ANCHOR_RTP, 1797206000.25)
-        samples = _iq_slot() if capture == "iq" else np.full(15 * SR, 0.01, dtype=np.float32)
-        _run_slot_at(w, samples, self.T0, start_off=180000)
-        kept = Path(td) / "arch" / "10m" / "20261213" / "261213_235930.json"
-        return json.loads(kept.read_text()), anchor
+                                           get_anchor=lambda: self.cur_anchor["a"],
+                                           client_radiod="rx.local")
+        clock.anchor(self.ANCHOR_RTP, self.PIN_UTC)
+        box["anchor_utc"] = self.LABEL_ANCHOR_UTC
+        n = 330000
+        if capture == "iq":
+            ring.push(_iq_slot(1)[:SR].repeat(28)[:n].astype(np.complex64), 0)
+        else:
+            ring.push(np.full(n, 0.01, dtype=np.float32), 0)
+        box["rtp"] = (self.ANCHOR_RTP + self.OFF + 180000 + 18000 + 10) & 0xFFFFFFFF
+        if during_extract is not None:
+            real = ring.extract_by_offset
 
-    def _check(self, side, anchor):
+            def hook(*a, **k):
+                during_extract(clock, box)
+                return real(*a, **k)
+            ring.extract_by_offset = hook
+        return w, clock
+
+    def _run(self, td, capture, during_extract=None):
+        w, clock = self._worker(td, capture, during_extract)
+        w._tick()
+        for _ in range(200):
+            w._reap_finished()
+            if not w._pending_procs:
+                break
+            time.sleep(0.05)
+        kept = Path(td) / "arch" / "10m" / "20261213" / "261213_235930.json"
+        return json.loads(kept.read_text())
+
+    def _check(self, side):
         t = side["timing"]
+        sr = t["sample_rate"]
+        self.assertEqual(sr, SR)
         self.assertEqual(t["slot_start_utc_exact"], self.T0)
-        self.assertEqual(t["first_sample_rtp"], (self.ANCHOR_RTP + 180000) & 0xFFFFFFFF)
-        self.assertEqual(t["sample_rate"], SR)
-        self.assertEqual(t["anchor"], {"utc": 1797206000.25, "source": "rtp_to_utc+authority",
+        self.assertEqual(t["anchor_rtp"], self.ANCHOR_RTP)
+        self.assertEqual(t["first_sample_offset"], self.OFF)
+        self.assertEqual(t["first_sample_rtp"], (self.ANCHOR_RTP + self.OFF) & 0xFFFFFFFF)
+        self.assertEqual(t["label_anchor_utc"], self.LABEL_ANCHOR_UTC)
+        # the relation the notes state: sample 0's UTC reproduces the slot start to a sample
+        utc0 = t["label_anchor_utc"] + t["first_sample_offset"] / sr
+        self.assertLessEqual(abs(utc0 - t["slot_start_utc_exact"]), 0.5 / sr)
+        self.assertEqual(utc0, self.T0)
+        # the slide since the original pin
+        self.assertAlmostEqual(t["label_anchor_utc"] - t["anchor"]["utc"], 0.0005, places=6)
+        self.assertEqual(t["anchor"], {"utc": self.PIN_UTC, "source": "rtp_to_utc+authority",
                                        "rtp_referenced": True, "offset_ns": 1500})
+        self.assertTrue(any("label_anchor_utc + (first_sample_offset + i)" in n
+                            for n in t["notes"]))
+        self.assertTrue(any("within half a sample" in n for n in t["notes"]))
         applied = t["timing_authority_applied"]
-        want = anchor.timing_authority_applied("rx.local")
+        want = self.anchor.timing_authority_applied("rx.local")
         for k in ("source", "tier", "sigma_ns", "radiod_id", "rtp_to_utc_offset_ns",
                   "anchor_source", "anchor_utc", "host_clock_verdict", "authority_utc_published"):
             self.assertEqual(applied[k], want[k], k)
@@ -890,17 +934,27 @@ class SidecarTimingTests(unittest.TestCase):
                          ["frontend", "channel_reported", "scale_db", "wav_gain_db"])
         self.assertIn("channel_requested", side)
 
+    def test_a_reanchor_after_harvest_does_not_change_the_slots_timing(self):
+        def reanchor(clock, box):
+            # A stream restore between harvest and sidecar: new anchor RTP, new anchor object.
+            clock.anchor(0x12345678, self.T0 + 1000.0)
+            self.cur_anchor["a"] = self._anchor(self.T0 + 1000.0, source="wallclock_fallback",
+                                                tier="T4")
+            box["anchor_utc"] = self.T0 + 1000.0
+        with tempfile.TemporaryDirectory() as td:
+            self._check(self._run(td, "iq", during_extract=reanchor))
+
     def test_iq_sidecar_carries_the_injected_timing(self):
         with tempfile.TemporaryDirectory() as td:
-            side, anchor = self._kept(td, "iq")
-            self._check(side, anchor)
+            side = self._run(td, "iq")
+            self._check(side)
             self.assertIn("no gain of its own", side["gain_chain"]["stored_recording"])
             self.assertEqual(side["gain_chain"]["stored_recording_gain_db"], 0.0)
 
     def test_usb_sidecar_carries_the_injected_timing(self):
         with tempfile.TemporaryDirectory() as td:
-            side, anchor = self._kept(td, "usb")
-            self._check(side, anchor)
+            side = self._run(td, "usb")
+            self._check(side)
             self.assertNotIn("capture", side)
             self.assertIn("wav_gain_db", side["gain_chain"]["stored_recording"])
 
@@ -914,6 +968,29 @@ class SidecarTimingTests(unittest.TestCase):
             self.assertEqual(t["sample_rate"], SR)
             self.assertIsNone(t["anchor"])
             self.assertIsNone(t["timing_authority_applied"])
+            self.assertIsNone(t["first_sample_offset"])
+
+
+class InsufficientSamplesEpisodeTests(unittest.TestCase):
+    def test_empty_slots_log_once_then_clear(self):
+        with tempfile.TemporaryDirectory() as td:
+            w, clock, ring, box = _make_worker(td)
+            box["anchor_utc"] = 1797206370.0 - 7.5
+            clock.anchor(1000, 1797206370.0 - 7.5)
+            # latest_rtp far enough that three slots are due, but the ring is empty
+            box["rtp"] = 1000 + 7 * 15 * SR
+            with self.assertLogs("meteor_scatter.core.slot", "INFO") as cm:
+                w._tick()
+            warns = [r for r in cm.records if "insufficient" in r.getMessage()]
+            self.assertEqual(len(warns), 1)
+            self.assertGreaterEqual(w.slots_empty, 3)
+            # the ring catches up: the next harvested slot is complete, one recovery line
+            for k in range(30):                       # in chunks: one oversize chunk would evict itself
+                ring.push(np.full(60000, 0.01, dtype=np.float32), k * 60000)
+            box["rtp"] = 1000 + 9 * 15 * SR
+            with self.assertLogs("meteor_scatter.core.slot", "INFO") as cm:
+                w._tick()
+            self.assertEqual(len([r for r in cm.records if "complete again" in r.getMessage()]), 1)
 
 
 if __name__ == "__main__":

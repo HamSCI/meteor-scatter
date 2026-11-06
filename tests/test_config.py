@@ -309,6 +309,51 @@ class TestIqSampleRate(unittest.TestCase):
         self.assertIn("capture", first_mode_error([{"msk144": {"capture": "lsb"}}]))
 
 
+class DaemonRefusesBadModeConfigTests(unittest.TestCase):
+    """cli._handle_daemon exits EX_CONFIG 78 (no systemd restart loop) on a config the daemon
+    cannot run with, before it builds a recorder."""
+
+    def _run(self, msk144_toml):
+        import argparse
+        import tempfile
+        from unittest import mock
+        from meteor_scatter import cli
+        with tempfile.TemporaryDirectory() as td:
+            cfg = Path(td) / "c.toml"
+            cfg.write_text('[[radiod]]\nstatus = "rx.local"\n[radiod.msk144]\n'
+                           'freqs_hz = [50260000]\n' + msk144_toml)
+            args = argparse.Namespace(instance=None, config=str(cfg), radiod_id=None)
+            with mock.patch("meteor_scatter.core.recorder.MeteorScatterRecorder") as rec, \
+                    mock.patch.object(cli, "_install_sighup_handler"):
+                try:
+                    cli._handle_daemon(args)
+                    code = None
+                except SystemExit as e:
+                    code = e.code
+            return code, rec
+
+    def test_iq_at_the_wrong_rate_exits_78_with_a_clear_message(self):
+        with self.assertLogs("meteor_scatter.daemon", "ERROR") as cm:
+            code, rec = self._run('capture = "iq"\nsample_rate = 48000\n')
+        self.assertEqual(code, 78)
+        rec.assert_not_called()
+        msg = cm.output[0]
+        self.assertIn("sample_rate", msg)
+        self.assertIn("12000", msg)
+        self.assertIn("EX_CONFIG 78", msg)
+
+    def test_bad_capture_exits_78(self):
+        with self.assertLogs("meteor_scatter.daemon", "ERROR"):
+            code, rec = self._run('capture = "lsb"\n')
+        self.assertEqual(code, 78)
+        rec.assert_not_called()
+
+    def test_good_iq_config_starts_the_recorder(self):
+        code, rec = self._run('capture = "iq"\nsample_rate = 12000\n')
+        self.assertIsNone(code)
+        rec.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()
 
