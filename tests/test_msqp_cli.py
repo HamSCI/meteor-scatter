@@ -272,7 +272,7 @@ class CalibrateKeepsCommentsTests(unittest.TestCase):
 import json, zipfile
 from datetime import date, datetime, timezone
 from meteor_scatter.core.archive import Archive, instance_dirname
-from meteor_scatter.msqp_cli import build_package, cmd_package, cmd_suspects, PackageRefused
+from meteor_scatter.msqp_cli import build_package, cmd_package, cmd_suspects, cmd_totals, PackageRefused
 
 CFG = {"operator": "Michael Hauan AC0G", "contact_email": "a@b.c", "antenna": "dipole", "comments": ""}
 
@@ -1021,3 +1021,81 @@ class CmdDraftTests(unittest.TestCase):
         self.assertEqual((a.msqp_command, a.package, a.instance), ("draft", "/x/pkg", "AC0G-B4"))
         with mock.patch.object(msqp_cli, "cmd_draft", lambda args: 7):
             self.assertEqual(msqp_cli.dispatch(a), 7)
+
+
+class CmdTotalsTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.archive_dir = self.root / "archive"
+        self.cfg = self.root / "ms.toml"
+        self.cfg.write_text(PKG_CONFIG.format(archive=self.archive_dir))
+        self.a = Archive(self.archive_dir / instance_dirname("AC0G/B4"), 90, 2)
+        (self.root / "env").mkdir()
+        self.patches = [mock.patch("meteor_scatter.config.COORDINATION_ENV", self.root / "c.env"),
+                        mock.patch("meteor_scatter.config.INSTANCE_ENV_DIR", self.root / "env")]
+        for p in self.patches:
+            p.start()
+
+    def tearDown(self):
+        for p in reversed(self.patches):
+            p.stop()
+        self.tmp.cleanup()
+
+    def _put(self, band, day, stem, wav_bytes, side_bytes):
+        d = self.a.root / band / day
+        d.mkdir(parents=True, exist_ok=True)
+        (d / f"{stem}.wav").write_bytes(b"\0" * wav_bytes)
+        (d / f"{stem}.json").write_bytes(b"{" + b" " * (side_bytes - 2) + b"}")
+
+    def _totals(self, **kw):
+        ns = dict(instance="AC0G-B4", config=self.cfg, first="2026-12-12", last="2026-12-14",
+                  json=False, log_level=None)
+        ns.update(kw)
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            rc = cmd_totals(argparse.Namespace(**ns))
+        return rc, out.getvalue(), err.getvalue()
+
+    def _two_bands(self):
+        self._put("6m", "20261212", "261212_000000", 1000, 100)
+        self._put("6m", "20261212", "261212_000030", 1000, 100)
+        self._put("6m", "20261213", "261213_000000", 2000, 50)
+        self._put("10m", "20261213", "261213_000000", 500, 20)
+        self._put("10m", "20261214", "261214_000000", 700, 30)
+
+    def test_totals_counts_slots_and_bytes(self):
+        self._two_bands()
+        rc, out, err = self._totals()
+        self.assertEqual(rc, 0, err)
+        self.assertIn("6m 20261212: 2 slots, 2200 bytes", out)
+        self.assertIn("6m 20261213: 1 slots, 2050 bytes", out)
+        self.assertIn("10m 20261213: 1 slots, 520 bytes", out)
+        self.assertIn("10m 20261214: 1 slots, 730 bytes", out)
+        self.assertIn("total: 5 slots, 5500 bytes", out)
+        self.assertIn("of Zenodo's 50 GB record limit", out)
+
+    def test_totals_json_shape(self):
+        self._two_bands()
+        rc, out, err = self._totals(json=True)
+        self.assertEqual(rc, 0, err)
+        j = json.loads(out)
+        self.assertEqual(j["total_slots"], 5)
+        self.assertEqual(j["total_bytes"], 5500)
+        self.assertEqual(j["zenodo_limit_bytes"], 50_000_000_000)
+        self.assertAlmostEqual(j["zenodo_fraction"], 5500 / 50e9)
+        self.assertEqual(len(j["days"]), 4)
+        self.assertEqual({"band", "day", "slots", "bytes"}, set(j["days"][0]))
+
+    def test_totals_respects_the_span(self):
+        self._two_bands()
+        rc, out, _ = self._totals(first="2026-12-13", last="2026-12-13", json=True)
+        self.assertEqual(json.loads(out)["total_slots"], 2)
+
+    def test_totals_empty_archive(self):
+        self.a.root.mkdir(parents=True)
+        rc, out, err = self._totals()
+        self.assertEqual(rc, 0, err)
+        self.assertIn("no kept recordings", out)
+        rc, out, _ = self._totals(json=True)
+        self.assertEqual(json.loads(out)["total_slots"], 0)

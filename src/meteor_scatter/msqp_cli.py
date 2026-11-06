@@ -18,7 +18,7 @@ import sys
 import tomllib
 import zipfile
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from meteor_scatter import msqp_package as P
@@ -934,6 +934,59 @@ def cmd_suspects(args) -> int:
     return 0
 
 
+ZENODO_LIMIT_BYTES = 50_000_000_000
+TOTALS_DEFAULT_DAYS = 14
+
+
+def _file_size(path: Path) -> int:
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
+
+
+def cmd_totals(args) -> int:
+    """Count the kept recordings per band and UTC day, with their bytes (WAV plus JSON
+    sidecar), and set the total against Zenodo's per-record limit."""
+    try:
+        today = datetime.fromtimestamp(_now(), timezone.utc).date()
+        last = _parse_day(args.last, "--last") if args.last else today
+        first = (_parse_day(args.first, "--first") if args.first
+                 else last - timedelta(days=TOTALS_DEFAULT_DAYS - 1))
+        if first > last:
+            raise PackageRefused(f"--first {first} falls after --last {last}")
+        _config, _cfg, archive, _callsign, _grid = _resolve_instance(args)
+        cells: dict[tuple[str, str], list[int]] = {}
+        for band, wav, side in archive.recordings(first, last):
+            day = wav.parent.name
+            c = cells.setdefault((band, day), [0, 0])
+            c[0] += 1
+            c[1] += _file_size(wav) + _file_size(side)
+    except (PackageRefused, OSError, ValueError) as e:
+        print(f"msqp totals: {e}", file=sys.stderr)
+        return 2
+    days = [{"band": b, "day": d, "slots": n, "bytes": nb}
+            for (b, d), (n, nb) in sorted(cells.items(), key=lambda kv: (kv[0][1], kv[0][0]))]
+    total_slots = sum(r["slots"] for r in days)
+    total_bytes = sum(r["bytes"] for r in days)
+    fraction = total_bytes / ZENODO_LIMIT_BYTES
+    if args.json:
+        print(json.dumps({"first": first.isoformat(), "last": last.isoformat(), "days": days,
+                          "total_slots": total_slots, "total_bytes": total_bytes,
+                          "zenodo_limit_bytes": ZENODO_LIMIT_BYTES,
+                          "zenodo_fraction": fraction}, indent=1))
+        return 0
+    if not days:
+        print(f"no kept recordings from {first} to {last}")
+        return 0
+    for r in days:
+        print(f"{r['band']} {r['day']}: {r['slots']} slots, {r['bytes']} bytes")
+    print(f"total: {total_slots} slots, {total_bytes} bytes")
+    print(f"projected package {total_bytes / 1e9:.2f} GB, {fraction * 100:.1f}% of Zenodo's "
+          f"{ZENODO_LIMIT_BYTES // 10**9} GB record limit")
+    return 0
+
+
 def add_subparsers(sub_msqp: argparse.ArgumentParser, *, common=None) -> None:
     """Register the msqp subcommands.  `common(sub)` adds --config and --log-level."""
     msqp_sub = sub_msqp.add_subparsers(dest="msqp_command")
@@ -973,6 +1026,23 @@ def add_subparsers(sub_msqp: argparse.ArgumentParser, *, common=None) -> None:
     if common:
         common(sus)
 
+    tot = msqp_sub.add_parser(
+        "totals",
+        help="count kept recordings per band and UTC day against Zenodo's 50 GB record limit",
+        description="Count the kept recordings per band and UTC day.  Bytes cover each "
+                    "recording's WAV plus its JSON sidecar.  The projected package size is "
+                    "their sum, uncompressed, since WAV noise barely compresses.  Default "
+                    "span: the last 14 days, ending today (UTC).")
+    tot.add_argument("--instance", required=True,
+                     help="instance to total (selects /etc/meteor-scatter/<instance>.toml)")
+    tot.add_argument("--first", default=None, metavar="YYYY-MM-DD",
+                     help="first start day (UTC); default 13 days before --last")
+    tot.add_argument("--last", default=None, metavar="YYYY-MM-DD",
+                     help="last start day (UTC); default today")
+    tot.add_argument("--json", action="store_true", help="print JSON")
+    if common:
+        common(tot)
+
     dr = msqp_sub.add_parser(
         "draft",
         help="leave a package on Zenodo as an unsubmitted draft for you to check and submit")
@@ -994,6 +1064,8 @@ def dispatch(args) -> int:
         return cmd_draft(args)
     if sub == "suspects":
         return cmd_suspects(args)
-    print("usage: meteor-scatter msqp {calibrate,package,suspects,draft} ...",
+    if sub == "totals":
+        return cmd_totals(args)
+    print("usage: meteor-scatter msqp {calibrate,package,suspects,totals,draft} ...",
           file=sys.stderr)
     return 2
