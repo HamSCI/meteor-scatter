@@ -43,3 +43,19 @@ class DescriptionTests(unittest.TestCase):
         self.assertEqual(md["access"]["record"], "public")
         self.assertEqual(md["metadata"]["rights"], [{"id": "cc-by-4.0"}])
         self.assertNotIn("submit", str(md).lower())
+
+
+class ReadmeIqTests(unittest.TestCase):
+    def test_package_readme_explains_iq(self):
+        r = P.readme_text("v1")
+        for want in ("two channels of 32-bit IEEE float", "Channel\n1 is I and channel 2 is Q",
+                     "12 kHz", "iq_center_hz", "meteor-scatter msqp wav", "scale_db",
+                     "int16" if False else "astype(\"<i2\")", "timing block", "gain_chain",
+                     '"usb"', '"iq"', "can hold both kinds"):
+            self.assertIn(want, r)
+
+    def test_description_names_format_and_wav_route(self):
+        cfg = {"operator": "M", "contact_email": "a@b.c", "antenna": "d", "comments": ""}
+        text = P.description_text(P.description_fields(cfg, "AC0G", "EM38ww", ["6m"], "v1"))
+        for want in ("two-channel IEEE float", "I then Q", "msqp wav", "16-bit"):
+            self.assertIn(want, text)

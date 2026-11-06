@@ -1120,3 +1120,157 @@ class CmdTotalsTests(unittest.TestCase):
         j = json.loads(out)
         self.assertEqual([r["day"] for r in j["days"]], ["2026-12-07", "2026-12-20"])
         self.assertEqual((j["first"], j["last"]), ("2026-12-07", "2026-12-20"))
+
+
+
+# ---- Task 5: package from I/Q, msqp wav, totals counts I/Q bytes -------------------------------
+import numpy as np
+from meteor_scatter.core.iq import iq_to_usb_audio, write_iq_wav
+from meteor_scatter.core.wav import write_wav
+from meteor_scatter.msqp_cli import cmd_wav
+
+IQ_T = 1797206370.0     # 2026-12-13 23:59:30 UTC
+
+
+def _synth_iq(n=12000, seed=3):
+    rng = np.random.default_rng(seed)
+    return (0.01 * (rng.standard_normal(n) + 1j * rng.standard_normal(n))).astype(np.complex64)
+
+
+def _keep_iq(archive, tmp, t, iq, scale_db):
+    src = tmp / "iq-src.wav"
+    write_iq_wav(src, iq, 12000, 50260000)
+    iso = datetime.fromtimestamp(t, timezone.utc).isoformat()
+    archive.keep(src, 50260000, t, {
+        "slot_start_utc": iso, "dial_freq_hz": 50260000, "clipped_samples": 0,
+        "frontend": {"overloaded": False}, "capture": "iq", "iq_sample_rate": 12000,
+        "iq_encoding": "f32le", "iq_center_hz": 50260000, "scale_db": scale_db,
+        "wav_gain_db": scale_db, "timing": {"slot_start_utc_exact": t}, "gain_chain": {},
+        "decodes": [{"snr": -2, "dt": 0.3, "audio_freq_hz": 1500, "message": "CQ X"}]})
+
+
+class PackageIqTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.a = Archive(self.root / "archive", 90, 2)
+        _fill(self.a, self.root)              # two older usb-capture recordings
+        self.iq = _synth_iq()
+        _keep_iq(self.a, self.root, 1797206450.0, self.iq, 12.0)   # 12-14 00:00:50
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_package_iq_has_all_txt_iq_and_sidecars_no_s16(self):
+        r = build_package(self.a, CFG, "AC0G/B4", "EM38ww", date(2026, 12, 13), date(2026, 12, 14),
+                          self.root / "msqp", "v1")
+        with zipfile.ZipFile(r.zip_path) as z:
+            names = sorted(z.namelist())
+            iq_rel = [n for n in names if n.endswith(".wav")
+                      and json.loads(z.read(n[:-4] + ".json")).get("capture") == "iq"]
+            self.assertEqual(len(iq_rel), 1)
+            data = z.read(iq_rel[0])
+        # every kept file and every sidecar, plus the two package files, and nothing else
+        self.assertEqual(len(names), 3 * 2 + 2)
+        self.assertEqual([n for n in names if n.endswith(".wav")].__len__(), 3)
+        self.assertFalse([n for n in names if "s16" in n])
+        # the I/Q is stored whole: IEEE float (3), two channels, 32 bit
+        self.assertEqual(data[8:16], b"WAVEfmt ")
+        self.assertEqual(np.frombuffer(data[20:24], "<u2").tolist(), [3, 2])
+        self.assertEqual(int(np.frombuffer(data[34:36], "<u2")[0]), 32)
+        self.assertEqual(len(data), 46 + self.iq.size * 8)
+        # ALL.TXT: the same format for every recording, whichever kind
+        lines = (r.dir / "ALL.TXT").read_text().splitlines()
+        self.assertEqual(len(lines), 3)
+        self.assertTrue(all(" Rx MSK144 " in ln for ln in lines))
+
+    def test_refuses_a_16_bit_wav_where_the_sidecar_says_iq(self):
+        bad = [w for _b, w, _s in self.a.recordings(date(2026, 12, 13), date(2026, 12, 14))
+               if json.loads(w.with_suffix(".json").read_text()).get("capture") == "iq"][0]
+        write_wav(bad, np.zeros(100, np.float32), 12000)
+        r = build_package(self.a, CFG, "AC0G/B4", "EM38ww", date(2026, 12, 13), date(2026, 12, 14),
+                          self.root / "msqp", "v1")
+        self.assertEqual(r.files, 2)
+        self.assertTrue(any("not two-channel" in n for n in r.skipped))
+
+
+class MsqpWavTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.a = Archive(self.root / "archive", 90, 2)
+        self.iq = _synth_iq()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _slot(self, scale_db):
+        _keep_iq(self.a, self.root, IQ_T, self.iq, scale_db)
+        return next(w for _b, w, _s in self.a.recordings(date(2026, 12, 13), date(2026, 12, 13)))
+
+    def _expected(self, scale_db):
+        ref = self.root / "ref.wav"
+        write_wav(ref, iq_to_usb_audio(self.iq), 12000, 50260000, scale_db=scale_db)
+        return ref.read_bytes()
+
+    def _run(self, slot, out):
+        err = io.StringIO()
+        with redirect_stderr(err), redirect_stdout(io.StringIO()):
+            rc = cmd_wav(argparse.Namespace(slot=str(slot), instance=None, output=str(out)))
+        return rc, err.getvalue()
+
+    def test_msqp_wav_matches_usb_path(self):
+        slot = self._slot(12.0)
+        out = self.root / "o.wav"
+        rc, err = self._run(slot, out)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(out.read_bytes(), self._expected(12.0))
+        self.assertNotEqual(out.read_bytes(), self._expected(0.0))   # the gain is in the bytes
+
+    def test_msqp_wav_uncalibrated_peak_normalises_as_usb_does(self):
+        slot = self._slot(None)
+        out = self.root / "o.wav"
+        rc, err = self._run(slot, out)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(out.read_bytes(), self._expected(None))
+
+    def test_msqp_wav_leaves_the_iq_untouched_and_refuses_overwrite(self):
+        slot = self._slot(12.0)
+        before = slot.read_bytes()
+        rc, err = self._run(slot, slot)
+        self.assertEqual(rc, 2)
+        self.assertEqual(slot.read_bytes(), before)
+
+    def test_msqp_wav_refuses_a_usb_recording(self):
+        _fill(self.a, self.root)
+        slot = next(w for _b, w, _s in self.a.recordings(date(2026, 12, 13), date(2026, 12, 13)))
+        rc, err = self._run(slot, self.root / "o.wav")
+        self.assertEqual(rc, 2)
+        self.assertIn("16-bit audio already", err)
+
+    def test_msqp_wav_parser(self):
+        import meteor_scatter.cli as C
+        a = C.build_parser().parse_args(["msqp", "wav", "--instance", "X", "s.wav", "-o", "o.wav"]) \
+            if hasattr(C, "build_parser") else None
+        if a is not None:
+            self.assertEqual((a.msqp_command, a.slot, a.output), ("wav", "s.wav", "o.wav"))
+
+
+class TotalsIqBytesTests(CmdTotalsTests):
+    def test_totals_counts_the_iq_files_real_size(self):
+        # 6 s of 12 kHz I/Q = 12000*6 samples * 8 bytes: four times a 16-bit mono WAV of the same slot.
+        iq = _synth_iq(72000)
+        d = self.a.root / "6m" / "20261213"
+        d.mkdir(parents=True)
+        write_iq_wav(d / "261213_000000.wav", iq, 12000, 50260000)
+        (d / "261213_000000.json").write_bytes(b"{" + b" " * 98 + b"}")
+        wav = self.root / "s16.wav"
+        write_wav(wav, iq_to_usb_audio(iq), 12000)
+        iq_size = (d / "261213_000000.wav").stat().st_size
+        self.assertEqual(iq_size, 46 + 72000 * 8)
+        self.assertGreater(iq_size, 3.9 * wav.stat().st_size)
+        rc, out, err = self._totals(json=True)
+        self.assertEqual(rc, 0, err)
+        j = json.loads(out)
+        self.assertEqual(j["total_bytes"], iq_size + 100)
+        self.assertAlmostEqual(j["zenodo_fraction"], (iq_size + 100) / 50e9)

@@ -40,10 +40,13 @@ def all_txt_line(sidecar: dict, decode: dict) -> str:
 
 
 def description_fields(cfg: dict, callsign: str, grid: str, bands: list, version: str):
-    comment = ("Receive-only monitor.  Channel AGC off; each WAV carries one fixed gain, recorded "
-               "with the RX888 front-end gain in the .json sidecar beside it (front-end steps given "
-               "as sample windows; radiod already rescales the samples at each step, so do not "
-               "correct twice; README.txt explains).  "
+    comment = ("Receive-only monitor.  Channel AGC off.  Newer recordings are two-channel IEEE float "
+               "I/Q (I then Q, 12 kHz) with no gain applied; older ones are 16-bit mono WAVs with "
+               "one fixed gain.  `meteor-scatter msqp wav` makes a 16-bit WAV from any I/Q "
+               "recording.  The .json sidecar beside each recording holds its timing and every "
+               "gain stage, with the RX888 front-end steps given as sample windows; radiod "
+               "already rescales the samples at each step, so do not correct twice "
+               "(README.txt explains).  "
                f"Software: meteor-scatter {version}.")
     if cfg.get("comments"):
         comment = f"{cfg['comments']}  {comment}"
@@ -87,12 +90,17 @@ Files
 <band>/<YYYYMMDD>/<YYMMDD_HHMMSS>.wav
     One slot (15 s, unless the station set another period) in which jt9
     decoded at least one MSK144 message, named for the slot's start (UTC).
-    Slots without a decode are not kept.
+    Slots without a decode are not kept.  The file comes in one of two kinds,
+    and the sidecar's "capture" field says which:
+      "usb" (or no capture field): an ordinary 12 kHz 16-bit mono WAV.
+      "iq": a 12 kHz I/Q recording.  See "The I/Q files" below.
+    One package can hold both kinds.  Each recording is packaged as it was kept.
 <band>/<YYYYMMDD>/<YYMMDD_HHMMSS>.json
-    The sidecar: the recording's gain, noise floor, front-end state and decodes.
+    The sidecar: the recording's capture kind, timing, gain, noise floor,
+    front-end state and decodes.
 ALL.TXT
-    Every decode in WSJT-X's ALL.TXT layout.  Each line's time gives the
-    recording's start (its WAV name), and dt the decode's offset into it.
+    Every decode in WSJT-X's ALL.TXT layout, the same for both kinds of
+    recording.  Each line's time gives the recording's start (its file name), and dt the decode's offset into it.
     WSJT-X live stamps an MSK144 line with the clock time of the decode instead.
 classification.csv
     Every decode with its verdict, by the rules the station's daemon applies
@@ -104,11 +112,45 @@ classification.csv
     from what it has heard before; this file does not, so a decode carrying
     one can read "no transmitter callsign" here though the station spotted it.
 
+The I/Q files
+-------------
+An I/Q file is a WAV with two channels of 32-bit IEEE float samples.  Channel
+1 is I and channel 2 is Q.  The rate is 12 kHz.  The sidecar's iq_center_hz
+gives the centre frequency, and iq_filter_hz the passband edges, in Hz above
+it.  The file holds radiod's samples as they came: no gain, no normalisation.
+The filter keeps only the upper sideband, so the real part of I + jQ is the USB
+audio a receiver would give.
+
+To get a WAV like everyone else's, run:
+
+    meteor-scatter msqp wav <stem>.wav -o <stem>.s16.wav
+
+(the sidecar must sit beside the file).  Or do it by hand in numpy:
+
+    import numpy as np
+    x = np.fromfile("<stem>.wav", dtype="<f4", offset=46)   # 46-byte header
+    iq = x.reshape(-1, 2)                                   # columns: I, Q
+    gain = 10 ** (sidecar["scale_db"] / 20)            # scale_db is null if uncalibrated
+    pcm = np.clip(np.round(iq[:, 0] * gain * 32768), -32768, 32767).astype("<i2")
+
+That gives the recording the usb capture would have kept, for a calibrated
+band.  Where scale_db is null, the command peak-normalises the slot instead.
+
+The sidecar lets an analyst do three things.  The timing block says which
+sample is which instant: the exact slot start, the first sample's RTP
+timestamp, the anchor that ties RTP time to UTC, and the sample rate.  The
+gain_chain block lists every gain stage from antenna to file, each with the key
+that records it.  The front-end steps say where the receiver changed gain.  With
+those, an analyst can place a ping in UTC and set its level against the noise
+floor in absolute terms.
+
 Gain
 ----
 The channel runs with its AGC off at 0 dB gain; the sidecar's channel_requested
-and channel_reported show what was asked and what radiod confirmed.  Each WAV
-carries one fixed gain, wav_gain_db, for the whole file.  The noise floor
+and channel_reported show what was asked and what radiod confirmed.  Each usb
+WAV carries one fixed gain, wav_gain_db, for the whole file.  An I/Q file
+carries no gain of its own, and wav_gain_db there describes only the audio made
+for the decoder.  The noise floor
 (noise_floor_dbfs) is measured before that gain.
 
 The RX888 front end has an AGC of its own, shared by every channel on the

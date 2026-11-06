@@ -84,3 +84,32 @@ def write_iq_wav(path: Path, iq: np.ndarray, sample_rate: int, frequency_hz: int
         except OSError:
             pass
         raise
+
+
+def read_iq_wav(path: Path) -> tuple[np.ndarray, int]:
+    """(complex64 I/Q, sample rate) from a file write_iq_wav made.
+
+    Raises ValueError when the file is not a two-channel 32-bit IEEE float WAV.
+    """
+    raw = Path(path).read_bytes()
+    if raw[:4] != b"RIFF" or raw[8:12] != b"WAVE":
+        raise ValueError("not a RIFF/WAVE file")
+    pos, fmt, data = 12, None, None
+    while pos + 8 <= len(raw):
+        cid, size = raw[pos:pos + 4], struct.unpack_from("<I", raw, pos + 4)[0]
+        body = raw[pos + 8:pos + 8 + size]
+        if cid == b"fmt ":
+            fmt = struct.unpack_from("<HHIIHH", body, 0)
+        elif cid == b"data":
+            data = body
+            break
+        pos += 8 + size + (size & 1)
+    if fmt is None or data is None:
+        raise ValueError("WAV lacks a fmt or data chunk")
+    tag, channels, rate, _byte_rate, _align, bits = fmt
+    if (tag, channels, bits) != (3, 2, 32):
+        raise ValueError(f"not two-channel 32-bit float I/Q (format {tag}, {channels} channel(s), "
+                         f"{bits} bit)")
+    n = len(data) // 8
+    flat = np.frombuffer(data[:n * 8], dtype="<f4")
+    return np.ascontiguousarray(flat).view("<c8").astype(np.complex64), int(rate)

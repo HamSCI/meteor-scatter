@@ -14,6 +14,7 @@ import json
 import os
 import re
 import stat
+import struct
 import sys
 import tomllib
 import zipfile
@@ -172,7 +173,8 @@ def _check_recording(root_fd: int, parts):
     from the archive's root fd.  The sidecar is parsed from the bytes read there, and the
     wav's (st_dev, st_ino) lets the zip pass confirm it reopens the same file."""
     fd, wst = _open_recording(root_fd, parts)
-    os.close(fd)
+    with os.fdopen(fd, "rb") as f:
+        head = f.read(36)
     fd, _ = _open_recording(root_fd, parts[:-1] + (Path(parts[-1]).with_suffix(".json").name,))
     with os.fdopen(fd, "rb") as f:
         raw = f.read()
@@ -191,6 +193,14 @@ def _check_recording(root_fd: int, parts):
         msg = d.get("message") if isinstance(d, dict) else None
         if isinstance(msg, str) and msg != "".join(msg.splitlines()):
             raise ValueError("a decode message holds a line break")
+    if side.get("capture", "usb") == "iq":
+        # The sidecar says I/Q: the file must be I/Q, never a 16-bit WAV in its place.
+        ok = (len(head) == 36 and head[:4] == b"RIFF" and head[8:16] == b"WAVEfmt "
+              and struct.unpack_from("<HH", head, 20) == (3, 2)
+              and struct.unpack_from("<H", head, 34)[0] == 32)
+        if not ok:
+            raise ValueError("sidecar says capture iq but the file is not two-channel "
+                             "32-bit float")
     try:
         lines = [P.all_txt_line(side, d) for d in side["decodes"]]
     except (KeyError, TypeError, ValueError, AttributeError) as e:
@@ -456,6 +466,50 @@ def cmd_package(args) -> int:
     for rel in r.flagged:
         print(f"flagged (clipped or overloaded): {rel}")
     print(f"package: {r.dir}")
+    return 0
+
+
+def derive_wav(slot: Path, out: Path | None = None) -> Path:
+    """Write the 12 kHz 16-bit mono WAV that the usb path writes for this kept I/Q slot.
+
+    The audio is iq_to_usb_audio (radiod's USB output); the gain is the sidecar's scale_db,
+    or the slot's peak normalisation where that is null, as the usb path applies it.  Raises
+    ValueError for a usb-capture recording, which is 16-bit audio already, or a missing sidecar.
+    """
+    import numpy as np  # noqa: F401
+    from meteor_scatter.core.iq import iq_to_usb_audio, read_iq_wav
+    from meteor_scatter.core.wav import write_wav
+
+    slot = Path(slot)
+    side_path = slot.with_suffix(".json")
+    try:
+        side = json.loads(side_path.read_text())
+    except (OSError, ValueError) as e:
+        raise ValueError(f"cannot read the sidecar {side_path} ({e.__class__.__name__})")
+    if not isinstance(side, dict):
+        raise ValueError(f"{side_path} is not a sidecar")
+    if side.get("capture", "usb") != "iq":
+        raise ValueError(f"{slot} is a usb-capture recording: it is 16-bit audio already")
+    iq, rate = read_iq_wav(slot)
+    out = Path(out) if out else Path(slot.stem + ".s16.wav")
+    if out.resolve() == slot.resolve():
+        raise ValueError("the output would overwrite the I/Q file")
+    write_wav(out, iq_to_usb_audio(iq), rate, int(side.get("iq_center_hz") or 0),
+              scale_db=side.get("scale_db"))
+    return out
+
+
+def cmd_wav(args) -> int:
+    slot = Path(args.slot)
+    try:
+        if not slot.exists() and args.instance:
+            _c, _cfg, archive, _cs, _g = _resolve_instance(args)
+            slot = archive.root / args.slot
+        out = derive_wav(slot, Path(args.output) if args.output else None)
+    except (PackageRefused, OSError, ValueError) as e:
+        print(f"msqp wav: {e}", file=sys.stderr)
+        return 2
+    print(f"wrote {out}")
     return 0
 
 
@@ -946,7 +1000,7 @@ def _file_size(path: Path) -> int:
 
 
 def cmd_totals(args) -> int:
-    """Count the kept recordings per band and UTC day, with their bytes (WAV plus JSON
+    """Count the kept recordings per band and UTC day, with their bytes (kept file plus JSON
     sidecar), and set the total against Zenodo's per-record limit."""
     try:
         today = datetime.fromtimestamp(_now(), timezone.utc).date()
@@ -1032,8 +1086,9 @@ def add_subparsers(sub_msqp: argparse.ArgumentParser, *, common=None) -> None:
         "totals",
         help="count kept recordings per band and UTC day against Zenodo's 50 GB record limit",
         description="Count the kept recordings per band and UTC day.  Bytes cover each "
-                    "recording's WAV plus its JSON sidecar.  The projected package size is "
-                    "their sum, uncompressed, since WAV noise barely compresses.  Default "
+                    "recording's kept file (a 16-bit WAV, or two-channel float I/Q, about four times "
+                    "as large) plus its JSON sidecar.  The projected package size is "
+                    "their sum, uncompressed, since noise barely compresses.  Default "
                     "span: the last 14 days, ending today (UTC).  Rows appear only for "
                     "band-days that hold recordings; a day without any gets no row.")
     tot.add_argument("--instance", required=True,
@@ -1045,6 +1100,23 @@ def add_subparsers(sub_msqp: argparse.ArgumentParser, *, common=None) -> None:
     tot.add_argument("--json", action="store_true", help="print JSON")
     if common:
         common(tot)
+
+    wv = msqp_sub.add_parser(
+        "wav",
+        help="derive the 12 kHz 16-bit mono WAV from a kept I/Q slot",
+        description="Write the WAV the usb capture path would have kept for this slot: the "
+                    "I/Q's real part (radiod's USB audio), scaled by the sidecar's scale_db, or "
+                    "peak-normalised where scale_db is null, as 16-bit PCM.  The sidecar "
+                    "(<slot>.json) must sit beside the slot.")
+    wv.add_argument("slot", help="kept slot (<stem>.wav holding I/Q); with --instance, a path "
+                                 "relative to that instance's archive also works")
+    wv.add_argument("--instance", default=None,
+                    help="instance whose archive holds the slot (selects "
+                         "/etc/meteor-scatter/<instance>.toml)")
+    wv.add_argument("-o", "--output", default=None,
+                    help="output file (default <stem>.s16.wav in the current directory)")
+    if common:
+        common(wv)
 
     dr = msqp_sub.add_parser(
         "draft",
@@ -1069,6 +1141,8 @@ def dispatch(args) -> int:
         return cmd_suspects(args)
     if sub == "totals":
         return cmd_totals(args)
-    print("usage: meteor-scatter msqp {calibrate,package,suspects,totals,draft} ...",
+    if sub == "wav":
+        return cmd_wav(args)
+    print("usage: meteor-scatter msqp {calibrate,package,suspects,totals,wav,draft} ...",
           file=sys.stderr)
     return 2
