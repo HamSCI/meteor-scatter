@@ -29,18 +29,23 @@ class TestResolveBinary(unittest.TestCase):
         self.wsjtx.write_text("")
         self.override = self.tmp / "override-jt9"
         self.override.write_text("")
+        self.ubersdr = self.tmp / "ubersdr-jt9"
+        self.ubersdr.write_text("")
+        self.no_ubersdr = str(self.tmp / "absent-ubersdr-jt9")
 
     def tearDown(self):
         self._tmp.cleanup()
 
     def test_explicit_override_wins_when_it_decodes_msk144(self):
         got = decoder.resolve_jt9_binary(str(self.override), probe=lambda p: True,
-                                         wsjtx_path=str(self.wsjtx))
+                                         wsjtx_path=str(self.wsjtx),
+                                         ubersdr_path=self.no_ubersdr)
         self.assertEqual(got, str(self.override))
 
     def test_wsjtx_build_beats_the_path_symlink(self):
         got = decoder.resolve_jt9_binary("", probe=lambda p: True,
-                                         wsjtx_path=str(self.wsjtx))
+                                         wsjtx_path=str(self.wsjtx),
+                                         ubersdr_path=self.no_ubersdr)
         self.assertEqual(got, str(self.wsjtx))
 
     def test_a_jt9_without_msk144_is_skipped(self):
@@ -48,18 +53,39 @@ class TestResolveBinary(unittest.TestCase):
         # UberSDR's jt9, which has no --msk144.  The WSJT-X build still decodes.
         got = decoder.resolve_jt9_binary(str(self.override),
                                          probe=lambda p: p == str(self.wsjtx),
-                                         wsjtx_path=str(self.wsjtx))
+                                         wsjtx_path=str(self.wsjtx),
+                                         ubersdr_path=self.no_ubersdr)
         self.assertEqual(got, str(self.wsjtx))
 
     def test_no_msk144_decoder_anywhere_raises(self):
         with self.assertRaises(decoder.NoMsk144Decoder) as cm:
             decoder.resolve_jt9_binary(str(self.override), probe=lambda p: False,
-                                       wsjtx_path=str(self.wsjtx))
+                                       wsjtx_path=str(self.wsjtx),
+                                         ubersdr_path=self.no_ubersdr)
         self.assertIn(str(self.wsjtx), str(cm.exception))
 
     def test_missing_override_is_not_returned(self):
         got = decoder.resolve_jt9_binary("/no/such/jt9-binary", probe=lambda p: True,
-                                         wsjtx_path=str(self.wsjtx))
+                                         wsjtx_path=str(self.wsjtx),
+                                         ubersdr_path=self.no_ubersdr)
+        self.assertEqual(got, str(self.wsjtx))
+
+    def test_prefers_ubersdr_when_it_decodes_msk144(self):
+        got = decoder.resolve_jt9_binary("", probe=lambda p: True,
+                                         wsjtx_path=str(self.wsjtx),
+                                         ubersdr_path=str(self.ubersdr))
+        self.assertEqual(got, str(self.ubersdr))
+
+    def test_explicit_override_still_beats_ubersdr(self):
+        got = decoder.resolve_jt9_binary(str(self.override), probe=lambda p: True,
+                                         wsjtx_path=str(self.wsjtx),
+                                         ubersdr_path=str(self.ubersdr))
+        self.assertEqual(got, str(self.override))
+
+    def test_falls_back_when_ubersdr_lacks_msk144(self):
+        got = decoder.resolve_jt9_binary("", probe=lambda p: p != str(self.ubersdr),
+                                         wsjtx_path=str(self.wsjtx),
+                                         ubersdr_path=str(self.ubersdr))
         self.assertEqual(got, str(self.wsjtx))
 
 
@@ -95,8 +121,9 @@ class TestBuildCmd(unittest.TestCase):
     def test_cmd_has_msk144_and_period(self):
         cmd = decoder.build_jt9_cmd("jt9", Path("/wd"), Path("/wd/slot.wav"))
         self.assertIn("--msk144", cmd)
-        # -Y emits unresolved compound-call hashes as <NNNNNNN> so the
-        # callhash table can resolve them (parity with wspr's FST4W path).
+        # -Y selects FST4W with hash22 output in jt9; --msk144 after it wins
+        # (last mode named), so it does nothing for MSK144.  Kept in the argv
+        # on purpose; an unresolved MSK144 hash prints as <...>.
         self.assertIn("-Y", cmd)
         # -p 15 (the WSJT-X Guide's MSK144 period), -f 1500 (audio offset),
         # -F 200 and -d 3 (the Guide's tolerance and depth; jt9's own

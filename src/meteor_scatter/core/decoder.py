@@ -58,8 +58,10 @@ MSK144_SYNC_CHAR = "&"
 # UberSDR's jt9, the default since sigmond b4d12f6 (2026-10-24), has no MSK144:
 # given --msk144 it prints its usage and exits 0, so every station "decoded"
 # every slot and found nothing from Oct 26 on.  So meteor-scatter asks each
-# candidate whether it decodes MSK144, and tries WSJT-X's build ahead of the
-# shared symlink.
+# candidate whether it decodes MSK144.  Order: UberSDR's build first (a newer
+# one decodes MSK144 byte for byte like WSJT-X 3.2.0-rc1; today's lacks it and
+# fails the probe), then WSJT-X's 3.0.2 build, then the shared symlink.
+UBERSDR_JT9 = "/usr/local/libexec/sigmond/decoders/ubersdr/jt9"
 WSJTX_JT9 = "/usr/local/libexec/sigmond/decoders/wsjtx/jt9"
 JT9_PROBE_TIMEOUT_SEC = 10.0
 
@@ -81,12 +83,13 @@ def jt9_decodes_msk144(path: str, run=subprocess.run) -> bool:
 
 
 def resolve_jt9_binary(explicit: str = "", *, probe=jt9_decodes_msk144,
-                       wsjtx_path: str = WSJTX_JT9) -> str:
+                       wsjtx_path: str = WSJTX_JT9,
+                       ubersdr_path: str = UBERSDR_JT9) -> str:
     """Resolve a jt9 that decodes MSK144, or raise NoMsk144Decoder.
 
     Candidates, in order: an explicit config override (``paths.decoder_jt9`` /
-    ``paths.decoder``) that exists; sigmond's WSJT-X build at ``wsjtx_path``;
-    jt9 on PATH.  The first that lists ``--msk144`` in its help wins.  The
+    ``paths.decoder``) that exists; sigmond's UberSDR build at
+    ``ubersdr_path``; sigmond's WSJT-X build at ``wsjtx_path``; jt9 on PATH.  The first that lists ``--msk144`` in its help wins.  The
     recorder ships no jt9 of its own (GPLv3: built from retained source
     on-host; see sigmond _build_wsjtx_decoders).
     """
@@ -97,6 +100,8 @@ def resolve_jt9_binary(explicit: str = "", *, probe=jt9_decodes_msk144,
             candidates.append(explicit)
         else:
             logger.warning("decoder override %r not found", explicit)
+    if Path(ubersdr_path).is_file():
+        candidates.append(ubersdr_path)
     if Path(wsjtx_path).is_file():
         candidates.append(wsjtx_path)
     on_path = shutil.which("jt9")
@@ -134,13 +139,11 @@ def build_jt9_cmd(
     timer.out land there); run the process with ``cwd=workdir`` and
     pre-touch ``plotspec``/``decdata`` sentinels (jt9 opens them).
 
-    ``-Y`` makes jt9 emit unresolved compound-callsign hashes as the
-    numeric ``<NNNNNNN>`` form (22-bit) instead of the opaque ``<...>``.
-    The shared callhash table (see ``ch_tailer`` → ``callhash.parse_message``)
-    resolves those back to plaintext from accumulated ``<call>``
-    announcements — the same mechanism wspr-recorder uses for FST4W.
-    Without it, a hashed call the decoder couldn't resolve in-slot would
-    surface as ``<...>`` and the spot would lose its call.
+    ``-Y`` is jt9's "FST4W mode, print hash22 values" switch.  ``--msk144``
+    follows it, and the last mode named wins, so ``-Y`` has no effect on
+    MSK144 decoding.  An unresolved MSK144 hashed call prints as ``<...>``.
+    The argv keeps ``-Y`` anyway; removing it changes nothing.
+    ``ch_tailer`` still resolves ``<call>`` sightings through callhash.
     """
     return [
         jt9_path,

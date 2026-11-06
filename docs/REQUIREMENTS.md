@@ -59,7 +59,7 @@ documentation drift (§12).
   monitoring channels, one spot per decoded ping.
 - Decode with the **suite-standard `jt9` binary** (`jt9 --msk144`), not a
   re-implemented decoder — reuse, not reinvention.
-- Recover **compound callsigns** from `jt9 -Y` hashes via the shared
+- Recover **compound callsigns** from `<call>` sightings via the shared
   `callhash` table, cross-pollinating with FT8/WSPR sightings.
 - Emit spots to the **local SQLite sink** (`msk144.spots`) as the durable
   artefact, and onward to a reporting service (PSKReporter direct, per the
@@ -156,8 +156,8 @@ target) · `hf-timestd` (§18 timing-authority producer, optional) · sigmond
   against a **real** MSK144 decode; the parser is deliberately tolerant
   (HHMM/HHMMSS, optional sync token) pending live confirmation. *(gap —
   `MTS-F-090`.)*
-- `MTS-F-014` `[DOC]` ✅ SHALL invoke jt9 with `-Y` so unresolved compound calls
-  emit as numeric `<NNNNNNN>` hashes for `callhash` resolution.
+- `MTS-F-014` `[DOC]` ✅ SHALL invoke jt9 with `-Y` (no effect on MSK144: the last
+  mode named, `--msk144`, wins; an unresolved hash prints `<...>`).
 
 ### 6.3 Spot construction & callhash resolution
 - `MTS-F-020` `[CODE]` ✅ `ch_tailer` SHALL tail `<log_dir>/<radiod_id>-msk144.log`,

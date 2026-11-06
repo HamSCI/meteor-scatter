@@ -28,13 +28,14 @@ suite — see `/opt/git/sigmond/sigmond/CLAUDE.md` (orchestrator) and
 
 Unresolved compound calls are recovered via the shared **`callhash`**
 library — the same mechanism `psk-recorder` and `wspr-recorder` use.
-`jt9` is invoked with **`-Y`** ([core/decoder.py](src/meteor_scatter/core/decoder.py))
-so it emits the 22-bit hash as `<NNNNNNN>` instead of the opaque `<...>`;
 `ch_tailer` runs each decoded line through `CallHashTable.observe()` +
-`callhash.parse_message(line, table=...)`, substituting the hash back to
+`callhash.parse_message(line, table=...)`, substituting a hash back to
 plaintext from accumulated `<call>` sightings (and refusing to guess on
-ambiguous/colliding slots). A call learned on FT8 or WSPR resolves an
-MSK144 hash and vice-versa.
+ambiguous/colliding slots). callhash still resolves `<call>` sightings.
+jt9 won't emit `<NNNNNNN>` for MSK144: `-Y` ([core/decoder.py](src/meteor_scatter/core/decoder.py))
+selects FST4W with hash22 output, and `--msk144` after it wins (the last
+mode named), so an unresolved MSK144 hash prints as `<...>`. The argv keeps
+`-Y`; it changes nothing.
 
 ## Authors
 

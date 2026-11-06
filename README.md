@@ -40,10 +40,10 @@ Two details that are easy to assume wrong:
   number is the slot length, the decode cadence and `jt9 -p`.
 
 Compound callsigns are recovered through the shared [callhash][callhash]
-library: `jt9 -Y` emits an unresolved compound call as a numeric 22-bit
-`<NNNNNNN>` hash, and the cross-mode table substitutes the plaintext back
-from accumulated sightings — so a call learned on FT8 or WSPR resolves an
-MSK144 hash and vice-versa.
+library: the cross-mode table substitutes plaintext back for `<call>`
+sightings.  jt9 does not emit numeric `<NNNNNNN>` hashes for MSK144 (`-Y`
+selects FST4W, and `--msk144` after it wins), so an unresolved MSK144 hash
+prints as `<...>`.
 
 One `meteor-scatter@<instance>.service` per radiod; each instance handles
 every MSK144 frequency configured on that radiod.

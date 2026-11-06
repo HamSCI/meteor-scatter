@@ -221,7 +221,9 @@ backend.
 ### `core/decoder.py` — jt9 resolution, argv and parsing
 
 `resolve_jt9_binary()` prefers an explicit `paths.decoder_jt9` /
-`paths.decoder` override that exists, else `shutil.which("jt9")`. **No
+`paths.decoder` override that exists, then sigmond's UberSDR jt9, then its
+WSJT-X jt9, then `shutil.which("jt9")`; the first whose `-h` lists
+`--msk144` wins. **No
 decoder binaries are bundled in this repo** — jt9 3.0.2 is built from
 pinned WSJT-X source on the host by sigmond's `_build_wsjtx_decoders`
 and installed to `/usr/local/bin/jt9` (GPLv3: build from retained source
@@ -233,10 +235,10 @@ on-host rather than redistribute a modified binary).
 jt9 -Y --msk144 -p <tr_period_sec> -f 1500 -a <workdir> <wav>
 ```
 
-`-Y` is the callhash hinge: it makes jt9 emit an unresolved compound
-callsign as the numeric 22-bit `<NNNNNNN>` form instead of the opaque
-`<...>`, which is what lets the shared table substitute the plaintext
-back later. Without it the spot would simply lose its call.
+`-Y` is jt9's "FST4W mode, print hash22 values" switch. `--msk144` comes
+after it and the last mode named wins, so `-Y` has no effect on MSK144
+decoding; an unresolved MSK144 hash prints as `<...>`. The argv keeps `-Y`
+because removing it changes nothing.
 
 `parse_decoded_txt_line()` is deliberately tolerant (HHMM vs HHMMSS time
 column; sync char present as its own token or absent) and returns

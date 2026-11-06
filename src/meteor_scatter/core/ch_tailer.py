@@ -58,8 +58,9 @@ def parse_decoder_line(
     ``YYYY/MM/DD`` structure before parsing.
 
     ``table`` is the shared :class:`callhash.CallHashTable`; when given,
-    compound-callsign hashes (``<NNNNNNN>`` from jt9 ``-Y``, or
-    already-resolved ``<CALL>`` brackets) are substituted back to
+    compound-callsign hashes (numeric ``<NNNNNNN>`` forms, or
+    already-resolved ``<CALL>`` brackets; jt9 does not emit the numeric
+    form for MSK144, where an unresolved hash prints ``<...>``) are substituted back to
     plaintext so we don't ship a spot whose call we actually know.
 
     Returns ``None`` on unrecognised structure (header line, blank,
