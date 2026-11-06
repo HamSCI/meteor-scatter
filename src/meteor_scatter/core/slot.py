@@ -47,7 +47,7 @@ from ka9q import SlotClock, SlotClockDesyncError
 
 from meteor_scatter.core import decoder as _decoder
 from meteor_scatter.core.ring import Ring
-from meteor_scatter.core.wav import WavStats, write_wav
+from meteor_scatter.core.wav import WavStats, write_wav, write_wav_f32
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +110,8 @@ class SlotWorker:
         # Resolve the jt9 binary once (arch-specific bundled binary, or an
         # explicit override).  An empty decoder_path means "auto-resolve".
         self._decoder_path = _decoder.resolve_jt9_binary(decoder_path)
+        # F32 audio only for a jt9 that reads it (our port); 16-bit otherwise.
+        self._audio_f32 = _decoder.jt9_reads_f32(self._decoder_path)
         # Epoch-aligned, RTP-referenced slot timing (shared ka9q.SlotClock).
         # The clock is anchored by ChannelSink.on_samples off the GPS-true RTP
         # timestamp; this worker only harvests completed slots and extracts
@@ -275,7 +277,8 @@ class SlotWorker:
         filename = time.strftime("%Y%m%d_%H%M%S", slot_time) + f"_{freq_khz}.wav"
         wav_path = self._spool_dir / filename
 
-        stats = write_wav(
+        writer = write_wav_f32 if self._audio_f32 else write_wav
+        stats = writer(
             path=wav_path,
             samples=samples,
             sample_rate=self._ring.sample_rate,

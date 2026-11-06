@@ -7,7 +7,7 @@ from pathlib import Path
 
 import numpy as np
 
-from meteor_scatter.core.wav import write_wav, quiet_floor_dbfs, WavStats
+from meteor_scatter.core.wav import write_wav, write_wav_f32, quiet_floor_dbfs, WavStats
 
 
 class WavWriterTests(unittest.TestCase):
@@ -145,3 +145,52 @@ class FixedScaleTests(unittest.TestCase):
 
     def test_quiet_floor_of_silence_is_none(self):
         self.assertIsNone(quiet_floor_dbfs(np.zeros(12000, np.float32), 12000))
+
+
+class F32WavTests(unittest.TestCase):
+
+    def _sine(self, dbfs, n=12000 * 15):
+        t = np.arange(n) / 12000.0
+        return (10.0 ** (dbfs / 20.0) * np.sin(2 * np.pi * 1500.0 * t)).astype(np.float32)
+
+    def test_f32_wav_header(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "f.wav"
+            write_wav_f32(path, self._sine(-20, 12000), 12000)
+            d = path.read_bytes()
+            self.assertEqual(d[:4], b"RIFF")
+            self.assertEqual(d[8:16], b"WAVEfmt ")
+            fmt_size, tag, ch, sr, byte_rate, align, bits = struct.unpack_from("<IHHIIHH", d, 16)
+            self.assertEqual((tag, ch, sr, bits), (3, 1, 12000, 32))
+            self.assertEqual((byte_rate, align), (12000 * 4, 4))
+            self.assertEqual(d[16 + 4 + fmt_size:16 + 8 + fmt_size], b"data")
+            data_size = struct.unpack_from("<I", d, 20 + fmt_size + 4)[0]
+            self.assertEqual(data_size, 12000 * 4)
+            self.assertEqual(len(d), 8 + 4 + 8 + fmt_size + 8 + data_size)
+            self.assertEqual(struct.unpack_from("<I", d, 4)[0], len(d) - 8)
+
+    def test_f32_audio_keeps_gain(self):
+        # -135 dBFS: 16-bit rounding would destroy it; F32 keeps it, scaled by the same gain.
+        x = self._sine(-135)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            p16 = Path(tmpdir) / "s.wav"
+            p32 = Path(tmpdir) / "f.wav"
+            st16 = write_wav(p16, x, 12000)
+            st32 = write_wav_f32(p32, x, 12000)
+            self.assertEqual(st32.gain_db, st16.gain_db)
+            self.assertEqual(st32.clipped_samples, 0)
+            self.assertEqual(st32.noise_dbfs, st16.noise_dbfs)
+            d = p32.read_bytes()
+            got = np.frombuffer(d[-x.size * 4:], dtype="<f4")
+            want = (x.astype(np.float64) * 10.0 ** (st16.gain_db / 20.0)).astype(np.float32)
+            np.testing.assert_array_equal(got, want)
+
+    def test_f32_fixed_gain_does_not_clip(self):
+        x = np.full(100, 0.5, dtype=np.float32)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "f.wav"
+            st = write_wav_f32(path, x, 12000, scale_db=12.0)
+            got = np.frombuffer(path.read_bytes()[-400:], dtype="<f4")
+            self.assertGreater(float(got[0]), 1.0)
+            self.assertEqual(st.clipped_samples, 0)
+            self.assertEqual(st.gain_db, 12.0)

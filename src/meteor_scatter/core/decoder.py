@@ -82,6 +82,21 @@ def jt9_decodes_msk144(path: str, run=subprocess.run) -> bool:
     return "--msk144" in text
 
 
+def jt9_reads_f32(path: str, run=subprocess.run) -> bool:
+    """True when ``path -h`` lists ``--msk-shmsg``: only our UberSDR port, which reads a
+    32-bit float WAV for MSK144.  WSJT-X 3.0.2's jt9 lacks the option and refuses float
+    input.  False on any failure to run it.
+    """
+    try:
+        proc = run([path, "-h"], capture_output=True, timeout=JT9_PROBE_TIMEOUT_SEC)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    text = (proc.stdout or b"") + (proc.stderr or b"")
+    if isinstance(text, bytes):
+        text = text.decode("utf-8", errors="replace")
+    return "--msk-shmsg" in text
+
+
 def resolve_jt9_binary(explicit: str = "", *, probe=jt9_decodes_msk144,
                        wsjtx_path: str = WSJTX_JT9,
                        ubersdr_path: str = UBERSDR_JT9) -> str:

@@ -204,3 +204,23 @@ class TestNormalizeLogLine(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestJt9ReadsF32(unittest.TestCase):
+    """jt9_reads_f32 is true only for the port, which lists --msk-shmsg."""
+
+    @staticmethod
+    def _run_with(text):
+        import subprocess
+        return lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, stdout=text.encode(), stderr=b"")
+
+    def test_jt9_reads_f32_probe(self):
+        port = "Usage: jt9 [OPTIONS]\n  --msk144\n  --msk-shmsg <key>\n"
+        wsjtx_302 = "Usage: jt9 [OPTIONS]\n  --msk144\n  -p, --tr-period <n>\n"
+        self.assertTrue(decoder.jt9_reads_f32("jt9", run=self._run_with(port)))
+        self.assertFalse(decoder.jt9_reads_f32("jt9", run=self._run_with(wsjtx_302)))
+
+    def test_probe_false_when_jt9_will_not_run(self):
+        def boom(*a, **k):
+            raise OSError("no such file")
+        self.assertFalse(decoder.jt9_reads_f32("jt9", run=boom))

@@ -19,7 +19,11 @@ _FULL_SCALE = 32767.0
 
 @dataclass(frozen=True)
 class WavStats:
-    """What write_wav did to one slot.  ``gain_db``: int16 = sample x 32767 x 10^(gain_db/20)."""
+    """What write_wav (or write_wav_f32) did to one slot.
+
+    ``gain_db``: int16 = sample x 32767 x 10^(gain_db/20); F32 = sample x 10^(gain_db/20).
+    ``clipped_samples`` counts 16-bit clipping, so it is always 0 for F32.
+    """
     gain_db: float
     clipped_samples: int
     noise_dbfs: Optional[float]
@@ -92,6 +96,60 @@ def write_wav(
         _set_xattrs(path, sample_rate, frequency_hz)
 
     return WavStats(gain_db=gain_db, clipped_samples=clipped,
+                    noise_dbfs=quiet_floor_dbfs(samples, sample_rate))
+
+
+def write_wav_f32(
+    path: Path,
+    samples: np.ndarray,
+    sample_rate: int,
+    frequency_hz: int = 0,
+    scale_db: Optional[float] = None,
+) -> WavStats:
+    """Write the slot as a mono 32-bit float WAV, with the gain write_wav would apply.
+
+    Same gain choice as write_wav: ``scale_db``, or peak-normalize to -1 dBFS.  The samples
+    are the float64 product ``samples x 10^(gain_db/20)`` cast to float32: no rounding to
+    16 bits and no clipping, so ``clipped_samples`` is always 0.  Full scale is 1.0 (a
+    16-bit sample s is s/32768), which is how UberSDR's jt9 reads float input.
+
+    Format follows wspr-recorder's float WAV writer: IEEE float (tag 3), 18-byte fmt chunk
+    with cbSize 0, 46-byte header.
+    """
+    gain_db = scale_db if scale_db is not None else _peak_norm_gain_db(samples)
+    scaled = (samples.astype(np.float64) * 10.0 ** (gain_db / 20.0)).astype("<f4")
+    data_bytes = scaled.tobytes()
+    data_size = len(data_bytes)
+
+    header = struct.pack(
+        "<4sI4s"      # RIFF header
+        "4sIHHIIHHH"  # fmt chunk (18 bytes, cbSize 0)
+        "4sI",        # data chunk header
+        b"RIFF",
+        38 + data_size,
+        b"WAVE",
+        b"fmt ",
+        18,
+        3,                # IEEE float
+        1,                # mono
+        sample_rate,
+        sample_rate * 4,
+        4,
+        32,
+        0,
+        b"data",
+        data_size,
+    )
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "wb") as f:
+        f.write(header)
+        f.write(data_bytes)
+
+    if frequency_hz:
+        _set_xattrs(path, sample_rate, frequency_hz)
+
+    return WavStats(gain_db=gain_db, clipped_samples=0,
                     noise_dbfs=quiet_floor_dbfs(samples, sample_rate))
 
 

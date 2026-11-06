@@ -439,3 +439,41 @@ class ArchiveDecisionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _fake_jt9(tmpdir, help_text):
+    fake = Path(tmpdir) / "fake_jt9"
+    fake.write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys\n"
+        "if '-h' in sys.argv:\n"
+        f"    print({help_text!r})\n"
+    )
+    fake.chmod(0o755)
+    return str(fake)
+
+
+class AudioFormatTests(unittest.TestCase):
+    """The spool WAV is F32 only for a jt9 that reads it."""
+
+    def _fmt_bits(self, wav):
+        import struct
+        d = wav.read_bytes()
+        tag, _ch, _sr, _br, _al, bits = struct.unpack_from("<HHIIHH", d, 20)
+        return tag, bits
+
+    def test_f32_for_the_port(self):
+        with tempfile.TemporaryDirectory() as td:
+            jt9 = _fake_jt9(td, "jt9 --msk144 --msk-shmsg")
+            w, *_ = _make_worker(td, decoder_path=jt9)
+            self.assertTrue(w._audio_f32)
+            wav = w._write_spool_wav(np.full(SR, 0.01, dtype=np.float32), 900_000_000.0)
+            self.assertEqual(self._fmt_bits(wav), (3, 32))
+
+    def test_falls_back_to_s16_for_302(self):
+        with tempfile.TemporaryDirectory() as td:
+            jt9 = _fake_jt9(td, "jt9 --msk144 -p")
+            w, *_ = _make_worker(td, decoder_path=jt9)
+            self.assertFalse(w._audio_f32)
+            wav = w._write_spool_wav(np.full(SR, 0.01, dtype=np.float32), 900_000_000.0)
+            self.assertEqual(self._fmt_bits(wav), (1, 16))
