@@ -74,6 +74,7 @@ class ChannelSink:
         spool_spots: bool = False,
         tr_period_sec: float = MSK144_CADENCE_SEC,
         capture: str = "usb",
+        client_radiod: Optional[str] = None,
     ):
         self._mode = mode
         self._capture = capture
@@ -123,6 +124,8 @@ class ChannelSink:
             spool_spots=spool_spots,
             on_desync=self._reset_timing,
             capture=capture,
+            get_anchor=lambda: self._anchor,
+            client_radiod=client_radiod,
         )
 
         self._total_delivered: int = 0

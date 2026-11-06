@@ -287,6 +287,28 @@ class KeepWavRetirementTests(unittest.TestCase):
         self.assertNotIn("keep_wav", cfg["paths"])
 
 
+class TestIqSampleRate(unittest.TestCase):
+    def test_iq_needs_12000(self):
+        from meteor_scatter.config import first_mode_error
+        block = {"msk144": {"freqs_hz": [28145000], "capture": "iq", "sample_rate": 48000}}
+        with self.assertRaises(ValueError) as cm:
+            get_mode_params(block, "msk144")
+        self.assertIn("12000", str(cm.exception))
+        self.assertIn("48000", str(cm.exception))
+        self.assertIn("sample_rate", first_mode_error([block]))
+
+    def test_iq_at_12000_and_usb_at_anything_pass(self):
+        from meteor_scatter.config import first_mode_error
+        ok = {"msk144": {"freqs_hz": [28145000], "capture": "iq", "sample_rate": 12000}}
+        usb = {"msk144": {"freqs_hz": [28145000], "sample_rate": 48000}}
+        self.assertEqual(get_mode_params(ok, "msk144")["sample_rate"], 12000)
+        self.assertIsNone(first_mode_error([ok, usb]))
+
+    def test_first_mode_error_names_a_bad_capture(self):
+        from meteor_scatter.config import first_mode_error
+        self.assertIn("capture", first_mode_error([{"msk144": {"capture": "lsb"}}]))
+
+
 if __name__ == "__main__":
     unittest.main()
 

@@ -28,7 +28,8 @@ SR = 12000
 
 
 def _make_worker(tmpdir, *, mode="msk144", cadence=15.0, ring=None,
-                 msqp=None, decoder_path="", capture="usb"):
+                 msqp=None, decoder_path="", capture="usb", get_anchor=None,
+                 client_radiod=None):
     """Construct a SlotWorker wired to a SlotClock + ring + latest-rtp box."""
     if ring is None:
         ring = Ring(max_seconds=60, sample_rate=SR,
@@ -57,6 +58,8 @@ def _make_worker(tmpdir, *, mode="msk144", cadence=15.0, ring=None,
         get_anchor_utc_now=_anchor_utc_now,
         msqp=msqp,
         capture=capture,
+        get_anchor=get_anchor,
+        client_radiod=client_radiod,
     )
     return worker, clock, ring, box
 
@@ -543,6 +546,17 @@ def _run_slot(w, iq, t0=1797206370.0):
     return wav
 
 
+def _run_slot_at(w, samples, t0, start_off=None):
+    wav = w._write_spool_wav(samples, t0, start_off)
+    w._fork_decoder(wav, t0)
+    for _ in range(200):
+        w._reap_finished()
+        if not w._pending_procs:
+            break
+        time.sleep(0.05)
+    return wav
+
+
 class IqCaptureTests(unittest.TestCase):
     def test_capture_default_usb(self):
         with tempfile.TemporaryDirectory() as td:
@@ -669,6 +683,237 @@ class IqCaptureTests(unittest.TestCase):
             audio = _read_f32_data(wav, 1)
             gain = 10.0 ** (w._slot_stats[wav].gain_db / 20.0)
             np.testing.assert_allclose(audio, iq.real * gain, rtol=1e-6)
+
+
+class EpisodeLoggingTests(unittest.TestCase):
+    def test_ten_nan_slots_log_one_warning_and_one_recovery(self):
+        with tempfile.TemporaryDirectory() as td:
+            w, *_ = _make_worker(td, capture="iq")
+            with self.assertLogs("meteor_scatter.core.slot", "INFO") as cm:
+                for i in range(10):
+                    iq = _iq_slot(1)
+                    iq[3] = complex(np.nan, 0.0)
+                    w._write_spool_wav(iq, 900_000_000.0 + 15 * i)
+                w._write_spool_wav(_iq_slot(1), 900_000_000.0 + 150)      # a clean slot
+                w._write_spool_wav(_iq_slot(1), 900_000_000.0 + 165)      # and another: silent
+            lines = [(r.levelname, r.getMessage()) for r in cm.records
+                     if "non-finite" in r.getMessage()]
+            self.assertEqual([l for l, _ in lines], ["WARNING", "INFO"])
+            self.assertIn("10 slots", lines[1][1])
+            self.assertIn("10 samples", lines[1][1])
+
+    def test_failed_iq_writes_log_once_then_recover(self):
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as td:
+            w, *_ = _make_worker(td, capture="iq")
+            with self.assertLogs("meteor_scatter.core.slot", "INFO") as cm:
+                with mock.patch("meteor_scatter.core.iq._commit", side_effect=OSError("full")):
+                    for i in range(4):
+                        w._write_spool_wav(_iq_slot(1), 900_000_000.0 + 15 * i)
+                w._write_spool_wav(_iq_slot(1), 900_000_000.0 + 90)
+            lines = [(r.levelname, r.getMessage()) for r in cm.records
+                     if "I/Q" in r.getMessage() and "format" not in r.getMessage()]
+            self.assertEqual([l for l, _ in lines], ["WARNING", "INFO"])
+            self.assertIn("4 slots", lines[1][1])
+
+
+class IqWriteFailureTests(unittest.TestCase):
+    def test_failed_iq_write_decodes_and_archives_nothing(self):
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as td:
+            w, ch = _iq_worker(td)
+            with mock.patch("meteor_scatter.core.iq._commit", side_effect=OSError("full")):
+                with self.assertLogs("meteor_scatter.core.slot", "WARNING"):
+                    wav = _run_slot(w, _iq_slot())
+            self.assertEqual(w.decodes_ok, 1)                       # jt9 still ran
+            self.assertEqual(list((Path(td) / "arch").rglob("*")), [])
+            self.assertEqual(list(wav.parent.glob("*.wav*")), [])    # no audio, no I/Q, no .part
+            self.assertEqual(list(wav.parent.glob("*.part")), [])
+            self.assertEqual(ch.archive_failures, 0)                # not even an archive attempt
+
+    def test_audio_writer_failure_leaves_no_iq_behind(self):
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as td:
+            w, ch = _iq_worker(td)
+            with mock.patch("meteor_scatter.core.slot.write_wav_f32", side_effect=OSError("x")):
+                with self.assertRaises(OSError):
+                    w._write_spool_wav(_iq_slot(1), 1797206370.0)
+            spool = Path(td) / "msk144"
+            self.assertEqual([p for p in spool.glob("*") if p.is_file()], [])
+
+
+class IqExitPathTests(unittest.TestCase):
+    """Whatever ends a slot (jt9 exit code, a hung jt9, shutdown), no spool file stays and
+    nothing is archived."""
+
+    def _setup(self, td):
+        w, ch = _iq_worker(td)
+        wav = w._write_spool_wav(_iq_slot(2), 1797206370.0)
+        self.assertTrue(wav.exists() and wav.with_suffix(".iq.wav").exists())
+        return w, wav
+
+    def _assert_clean(self, td, wav):
+        self.assertEqual([p for p in wav.parent.glob("*") if p.is_file()], [])
+        self.assertEqual(list((Path(td) / "arch").rglob("*")), [])
+
+    def test_jt9_nonzero_exit(self):
+        with tempfile.TemporaryDirectory() as td:
+            w, wav = self._setup(td)
+            proc = mock.MagicMock()
+            proc.poll.return_value = 3
+            proc.stderr.read.return_value = b"boom"
+            w._pending_procs = [(proc, wav, 1797206370.0, 0.0)]
+            with self.assertLogs("meteor_scatter.core.slot", "WARNING"):
+                w._reap_finished()
+            self.assertEqual(w.decodes_fail, 1)
+            self._assert_clean(td, wav)
+
+    def test_jt9_timeout_kill(self):
+        with tempfile.TemporaryDirectory() as td:
+            w, wav = self._setup(td)
+            proc = mock.MagicMock()
+            proc.poll.return_value = None
+            w._pending_procs = [(proc, wav, 1797206370.0, time.monotonic() - 1000)]
+            with self.assertLogs("meteor_scatter.core.slot", "WARNING"):
+                w._reap_finished()
+            proc.kill.assert_called()
+            self._assert_clean(td, wav)
+
+    def test_stop_with_a_decode_in_flight(self):
+        import subprocess
+        with tempfile.TemporaryDirectory() as td:
+            w, wav = self._setup(td)
+            proc = mock.MagicMock()
+            proc.wait.side_effect = subprocess.TimeoutExpired("jt9", 5)
+            w._pending_procs = [(proc, wav, 1797206370.0, 0.0)]
+            w.stop()
+            self._assert_clean(td, wav)
+
+    def test_stop_after_a_decode_finishes_archives_it(self):
+        # The contrast: a decode that completes during shutdown IS kept, and the audio goes.
+        with tempfile.TemporaryDirectory() as td:
+            w, wav = self._setup(td)
+            proc = mock.MagicMock()
+            proc.returncode = 0
+            proc.stdout.read.return_value = b"000000  -5  0.2 1500 & CQ AC0G EM38\n"
+            proc.stderr.read.return_value = b""
+            w._pending_procs = [(proc, wav, 1797206370.0, 0.0)]
+            w.stop()
+            self.assertEqual(len(list((Path(td) / "arch").rglob("*.wav"))), 1)
+            self.assertEqual([p for p in wav.parent.glob("*") if p.is_file()], [])
+
+
+class SpoolSweepTests(unittest.TestCase):
+    def test_sweep_removes_old_slot_files_only(self):
+        import os
+        from meteor_scatter.core.slot import sweep_spool
+        with tempfile.TemporaryDirectory() as td:
+            spool = Path(td)
+            (spool / "work_28145").mkdir()
+            (spool / "work_28145" / "keep.wav").write_bytes(b"x")
+            names = ["a.wav", "b.iq.wav", "c.iq.wav.part", "d.wav", "e.txt"]
+            for n in names:
+                (spool / n).write_bytes(b"x")
+            old = time.time() - 100
+            for n in ("a.wav", "b.iq.wav", "c.iq.wav.part", "e.txt"):
+                os.utime(spool / n, (old, old))
+            self.assertEqual(sweep_spool(spool, 30.0), 3)
+            left = sorted(p.name for p in spool.iterdir())
+            self.assertEqual(left, ["d.wav", "e.txt", "work_28145"])
+            self.assertTrue((spool / "work_28145" / "keep.wav").exists())
+
+    def test_sweep_of_a_missing_dir_is_zero(self):
+        from meteor_scatter.core.slot import sweep_spool
+        self.assertEqual(sweep_spool(Path("/nonexistent/spool"), 30.0), 0)
+
+
+class SidecarTimingTests(unittest.TestCase):
+    ANCHOR_RTP = 0xFFFFF000          # the first slot's RTP timestamp wraps past 2**32
+    T0 = 1797206370.0
+
+    @staticmethod
+    def _anchor():
+        import types
+        from datetime import datetime, timezone
+        from hamsci_dsp.timing import AnchorUTC
+        snap = types.SimpleNamespace(
+            governor_radiod="bee1.local", t_level_active="T3", sigma_ns=12345.0,
+            utc_published=datetime(2026, 12, 13, 23, 59, 0, tzinfo=timezone.utc),
+            host_clock={"verdict": "ok"})
+        return AnchorUTC(utc=1797206000.25, source="rtp_to_utc+authority", offset_seconds=1.5e-6,
+                         offset_ns=1500, snapshot=snap, rtp_referenced=True)
+
+    def _kept(self, td, capture):
+        from meteor_scatter.core.archive import Archive
+        from meteor_scatter.core.frontend import FrontendLog, FrontendReading
+        from meteor_scatter.core.msqp import MsqpChannel
+        from meteor_scatter.core.noise_watch import NoiseWatch
+        jt9 = _decoding_jt9(td, "jt9 --msk144 --msk-shmsg")
+        fe = FrontendLog()
+        fe.add(FrontendReading(self.T0 - 1, 10.0, 0.0, True, -23.5, 0))
+        fe.add(FrontendReading(self.T0 + 5, 7.0, 3.0, True, -23.5, 0))     # a step inside the slot
+        ch = MsqpChannel(Archive(Path(td) / "arch", 90, 2), fe, 28145000, "AC0G/B4", 11.0,
+                         NoiseWatch(None), "test", preset="iq" if capture == "iq" else "usb",
+                         capture=capture)
+        anchor = self._anchor()
+        w, clock, ring, box = _make_worker(td, decoder_path=jt9, msqp=ch, capture=capture,
+                                           get_anchor=lambda: anchor, client_radiod="rx.local")
+        clock.anchor(self.ANCHOR_RTP, 1797206000.25)
+        samples = _iq_slot() if capture == "iq" else np.full(15 * SR, 0.01, dtype=np.float32)
+        _run_slot_at(w, samples, self.T0, start_off=180000)
+        kept = Path(td) / "arch" / "10m" / "20261213" / "261213_235930.json"
+        return json.loads(kept.read_text()), anchor
+
+    def _check(self, side, anchor):
+        t = side["timing"]
+        self.assertEqual(t["slot_start_utc_exact"], self.T0)
+        self.assertEqual(t["first_sample_rtp"], (self.ANCHOR_RTP + 180000) & 0xFFFFFFFF)
+        self.assertEqual(t["sample_rate"], SR)
+        self.assertEqual(t["anchor"], {"utc": 1797206000.25, "source": "rtp_to_utc+authority",
+                                       "rtp_referenced": True, "offset_ns": 1500})
+        applied = t["timing_authority_applied"]
+        want = anchor.timing_authority_applied("rx.local")
+        for k in ("source", "tier", "sigma_ns", "radiod_id", "rtp_to_utc_offset_ns",
+                  "anchor_source", "anchor_utc", "host_clock_verdict", "authority_utc_published"):
+            self.assertEqual(applied[k], want[k], k)
+        self.assertEqual((applied["tier"], applied["sigma_ns"], applied["radiod_id"]),
+                         ("T3", 12345.0, "rx.local"))
+        self.assertIsNotNone(applied["snapshot_age_s"])
+        # the gain stages
+        self.assertEqual(side["scale_db"], 11.0)
+        self.assertEqual(side["frontend"]["start"]["rf_gain"], 10.0)
+        self.assertEqual(side["frontend"]["steps"][0]["to_db"], 7.0)
+        chain = side["gain_chain"]
+        for stage in chain["order"]:
+            self.assertIn(stage["key"], side)
+        self.assertEqual([st["key"] for st in chain["order"]],
+                         ["frontend", "channel_reported", "scale_db", "wav_gain_db"])
+        self.assertIn("channel_requested", side)
+
+    def test_iq_sidecar_carries_the_injected_timing(self):
+        with tempfile.TemporaryDirectory() as td:
+            side, anchor = self._kept(td, "iq")
+            self._check(side, anchor)
+            self.assertIn("no gain of its own", side["gain_chain"]["stored_recording"])
+            self.assertEqual(side["gain_chain"]["stored_recording_gain_db"], 0.0)
+
+    def test_usb_sidecar_carries_the_injected_timing(self):
+        with tempfile.TemporaryDirectory() as td:
+            side, anchor = self._kept(td, "usb")
+            self._check(side, anchor)
+            self.assertNotIn("capture", side)
+            self.assertIn("wav_gain_db", side["gain_chain"]["stored_recording"])
+
+    def test_sidecar_without_an_anchor_still_has_the_exact_start(self):
+        with tempfile.TemporaryDirectory() as td:
+            w, ch = _iq_worker(td)
+            _run_slot(w, _iq_slot())
+            kept = Path(td) / "arch" / "10m" / "20261213" / "261213_235930.json"
+            t = json.loads(kept.read_text())["timing"]
+            self.assertEqual(t["slot_start_utc_exact"], 1797206370.0)
+            self.assertEqual(t["sample_rate"], SR)
+            self.assertIsNone(t["anchor"])
+            self.assertIsNone(t["timing_authority_applied"])
 
 
 if __name__ == "__main__":

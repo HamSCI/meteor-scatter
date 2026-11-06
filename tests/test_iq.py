@@ -113,5 +113,76 @@ class IqRingTests(unittest.TestCase):
         self.assertEqual(ring.extract_by_offset(0, SR).dtype, np.float32)
 
 
+class IqWriteAtomicTests(unittest.TestCase):
+    def test_success_leaves_no_part_file(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "x.iq.wav"
+            write_iq_wav(p, np.ones(10, dtype=np.complex64), SR)
+            self.assertEqual(sorted(f.name for f in Path(td).iterdir()), ["x.iq.wav"])
+
+    def test_failed_write_leaves_nothing(self):
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "x.iq.wav"
+            with mock.patch("meteor_scatter.core.iq._commit", side_effect=OSError("disk full")):
+                with self.assertRaises(OSError):
+                    write_iq_wav(p, np.ones(10, dtype=np.complex64), SR)
+            self.assertEqual(list(Path(td).iterdir()), [])        # no file, no .part
+
+    def test_a_reader_never_sees_a_half_written_file(self):
+        # The data lands in <name>.part; the final name appears only at the rename.
+        from unittest import mock
+        seen = []
+        real = os_replace = __import__("os").replace
+
+        def spy(src, dst):
+            seen.append((Path(src).name, Path(dst).exists()))
+            return real(src, dst)
+        with tempfile.TemporaryDirectory() as td:
+            with mock.patch("os.replace", side_effect=spy):
+                write_iq_wav(Path(td) / "x.iq.wav", np.ones(10, dtype=np.complex64), SR)
+        self.assertEqual(seen, [("x.iq.wav.part", False)])
+
+    def test_frequency_xattr_is_carried(self):
+        import os
+        with tempfile.TemporaryDirectory() as td:
+            probe = Path(td) / "probe"
+            probe.write_bytes(b"")
+            try:
+                os.setxattr(str(probe), "user.t", b"1")
+            except OSError:
+                self.skipTest("filesystem has no user xattrs")
+            p = Path(td) / "x.iq.wav"
+            write_iq_wav(p, np.ones(10, dtype=np.complex64), SR, frequency_hz=50260000)
+            self.assertEqual(os.getxattr(str(p), "user.frequency"), b"50260000")
+
+
+class RingDtypeFaultTests(unittest.TestCase):
+    def test_audio_into_an_iq_ring_is_refused_not_cast(self):
+        ring = Ring(max_seconds=30, sample_rate=SR, dtype=np.complex64)
+        with self.assertLogs("meteor_scatter.core.ring", "ERROR") as cm:
+            for i in range(5):
+                ring.push(np.ones(SR, dtype=np.float32), i * SR)
+        self.assertEqual(len(cm.records), 1)                      # once, not per batch
+        self.assertEqual(ring.total_samples, 0)                   # nothing stored
+        self.assertIsNone(ring.head_offset())
+        self.assertEqual(ring.dtype_faults, 5)
+
+    def test_complex_into_an_audio_ring_is_refused_too(self):
+        ring = Ring(max_seconds=30, sample_rate=SR)
+        with self.assertLogs("meteor_scatter.core.ring", "ERROR"):
+            ring.push(np.ones(SR, dtype=np.complex64), 0)
+        self.assertEqual(ring.total_samples, 0)
+
+    def test_fault_clears_with_one_info_line(self):
+        ring = Ring(max_seconds=30, sample_rate=SR, dtype=np.complex64)
+        with self.assertLogs("meteor_scatter.core.ring", "INFO") as cm:
+            ring.push(np.ones(SR, dtype=np.float32), 0)
+            ring.push(np.ones(SR, dtype=np.complex64), SR)
+            ring.push(np.ones(SR, dtype=np.complex64), 2 * SR)
+        self.assertEqual([r.levelname for r in cm.records], ["ERROR", "INFO"])
+        self.assertEqual(ring.total_samples, 2 * SR)
+
+
 if __name__ == "__main__":
     unittest.main()

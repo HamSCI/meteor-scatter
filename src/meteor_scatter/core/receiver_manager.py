@@ -312,6 +312,12 @@ class ReceiverManager:
             encoding_str = "f32"
             encoding_int = _resolve_encoding("f32")
 
+            # Whatever a crash left in the spool is no slot's any more.
+            from meteor_scatter.core.slot import sweep_spool
+            swept = sweep_spool(self._spool_root / mode, 2 * tr_period_sec)
+            logger.info("ReceiverManager %s: spool sweep removed %d stale file(s) from %s",
+                        self._radiod_id, swept, self._spool_root / mode)
+
             log_path = self._log_dir / f"{self._radiod_id}-{mode}.log"
             if mode not in self._log_fds:
                 log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -341,6 +347,7 @@ class ReceiverManager:
                     spool_spots=spool_spots,
                     tr_period_sec=tr_period_sec,
                     capture=capture,
+                    client_radiod=self._radiod_id,
                 )
                 if self._provision_one_with_retry(
                         sink, multi_by_group, deadline):

@@ -352,6 +352,7 @@ def _handle_daemon(args):
         resolve_radiod_block,
         resolve_reporter_id,
         RADIOD_STATUS_PLACEHOLDER,
+        first_mode_error,
         is_placeholder_status,
     )
     from meteor_scatter.core.recorder import MeteorScatterRecorder
@@ -467,6 +468,14 @@ def _handle_daemon(args):
             "without restart (EX_CONFIG 78).",
             RADIOD_STATUS_PLACEHOLDER,
         )
+        sys.exit(78)
+
+    # A config value the daemon cannot run with (capture, or the I/Q sample rate) is a config
+    # error, not a transient: exit EX_CONFIG so systemd does not restart-loop.
+    mode_error = first_mode_error(blocks)
+    if mode_error:
+        logger.error("%s. Fix [radiod.msk144] in %s. Exiting without restart (EX_CONFIG 78).",
+                     mode_error, config_path)
         sys.exit(78)
 
     recorder = MeteorScatterRecorder(config, blocks, reporter_id=reporter_id)

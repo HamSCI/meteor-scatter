@@ -37,9 +37,40 @@ def channel_requested(preset: str, capture: str = "usb") -> dict:
     return req
 
 
+def gain_chain(capture: str) -> dict:
+    """The sidecar's note on every gain stage between the antenna and the stored samples, in order,
+    each with the sidecar key that records it."""
+    iq = capture == "iq"
+    return {
+        "order": [
+            {"stage": "RX888 front end, antenna to ADC", "key": "frontend",
+             "says": "RF gain and attenuation in dB and the front-end AGC state, at the slot's "
+                     "start and end, with every change inside the slot as a window of sample "
+                     "indices (steps), and the ADC overload count; shared by every channel"},
+            {"stage": "radiod channel", "key": "channel_reported",
+             "also": "channel_requested",
+             "says": "channel gain in dB and AGC on/off, as this client requested and as radiod "
+                     "reported for this SSRC; requested is AGC off, 0 dB"},
+            {"stage": "calibration", "key": "scale_db",
+             "says": "the band's fixed gain from `msqp calibrate` in dB, null when uncalibrated "
+                     "(then the audio is peak-normalised per slot)"},
+            {"stage": "gain on the decoder's audio", "key": "wav_gain_db",
+             "says": "dB applied by meteor-scatter to the audio it wrote for jt9: scale_db when "
+                     "calibrated, else the slot's peak normalisation"},
+        ],
+        "stored_recording": (
+            "the stored I/Q carries no gain of its own: radiod's f32 scale, no gain, no "
+            "normalisation; wav_gain_db describes only the audio made for jt9, which is not kept"
+            if iq else
+            "the stored audio carries wav_gain_db"),
+        "stored_recording_gain_db": 0.0 if iq else None,
+    }
+
+
 def build_sidecar(*, reporter_id, freq_hz, slot_start_utc, sample_rate, stats: WavStats,
                   scale_db, decodes, frontend: dict, version, preset: str = "usb",
-                  reported: Optional[dict] = None, capture: str = "usb") -> dict:
+                  reported: Optional[dict] = None, capture: str = "usb",
+                  timing: Optional[dict] = None) -> dict:
     """One recording's sidecar.  noise_floor_dbfs is dB re radiod's f32 full scale (1.0),
     measured before wav_gain_db; the floor in the WAV is noise_floor_dbfs + wav_gain_db.
     channel_reported holds radiod's latest status report for the channel's SSRC, or None
@@ -49,7 +80,11 @@ def build_sidecar(*, reporter_id, freq_hz, slot_start_utc, sample_rate, stats: W
     capture and the iq_* fields.  wav_gain_db, clipped_samples and noise_floor_dbfs then describe
     the audio made for jt9; the kept I/Q has no gain and no normalisation.  nonfinite_samples
     appears when the slot held NaN or inf: the audio had them replaced by 0, the I/Q file keeps
-    them as received."""
+    them as received.
+
+    timing: the slot's timing block (SlotWorker._timing_block).  Without one the block still
+    appears, with the exact slot start and the sample rate and the rest null.  gain_chain lists
+    every gain stage in order, with the key that records each."""
     side = {
         "reporter_id": reporter_id,
         "band": band_label(freq_hz),
@@ -57,6 +92,7 @@ def build_sidecar(*, reporter_id, freq_hz, slot_start_utc, sample_rate, stats: W
         "slot_start_utc": datetime.fromtimestamp(slot_start_utc, timezone.utc).isoformat(),
         "sample_rate": int(sample_rate),
         "scale": "uncalibrated" if scale_db is None else "calibrated",
+        "scale_db": scale_db,
         "wav_gain_db": stats.gain_db,
         "clipped_samples": stats.clipped_samples,
         "noise_floor_dbfs": stats.noise_dbfs,
@@ -66,6 +102,10 @@ def build_sidecar(*, reporter_id, freq_hz, slot_start_utc, sample_rate, stats: W
         "decodes": decodes,
         "frontend": frontend,
         "software_version": version,
+        "timing": timing if timing is not None else {
+            "slot_start_utc_exact": float(slot_start_utc), "first_sample_rtp": None,
+            "sample_rate": int(sample_rate), "anchor": None, "timing_authority_applied": None},
+        "gain_chain": gain_chain(capture),
     }
     if stats.nonfinite_samples:
         side["nonfinite_samples"] = int(stats.nonfinite_samples)
@@ -155,7 +195,7 @@ class MsqpChannel:
             logger.info("%s: noise log resumed", band_label(self.freq_hz))
 
     def on_decoded(self, wav_path: Path, slot_start_utc: float, sample_rate: int,
-                   stats: WavStats, decodes: list) -> bool:
+                   stats: WavStats, decodes: list, timing: Optional[dict] = None) -> bool:
         """Keep one decoded recording.  True when it moved into the archive; False leaves
         wav_path for the caller to delete.  Any failure counts, warns once on the change and
         logs once on recovery: a persistent fault never writes a line per slot."""
@@ -166,7 +206,7 @@ class MsqpChannel:
                                  slot_start_utc=slot_start_utc, sample_rate=sample_rate,
                                  stats=stats, scale_db=self.scale_db, decodes=decodes,
                                  frontend=frontend, version=self._version, preset=self.preset,
-                                 capture=self.capture,
+                                 capture=self.capture, timing=timing,
                                  reported=self._frontend.channel_reported(self.ssrc))
             self._archive.keep(wav_path, self.freq_hz, slot_start_utc, side)
         except Exception as e:  # noqa: BLE001 — archiving must never cost a decode

@@ -235,5 +235,70 @@ class IqChannelRequestTests(unittest.TestCase):
         self.assertNotEqual(usb, iq)
 
 
+class IqProvisioningTests(unittest.TestCase):
+    """provision_channels end to end with a fake radiod: capture = "iq" must reach radiod as the
+    iq preset with the +50/+3000 edges, whatever the config's `preset` says, and the sink's ring
+    must hold complex samples."""
+
+    def _provision(self, td, block):
+        import types
+        from unittest import mock
+        import numpy as np
+        jt9 = Path(td) / "jt9"
+        jt9.write_text("#!/usr/bin/env python3\nprint('jt9 --msk144 --msk-shmsg')\n")
+        jt9.chmod(0o755)
+        spool = Path(td) / "spool"
+        rx = ReceiverManager(
+            config={"paths": {}, "station": {}, "processing": {}}, radiod_block=block,
+            spool_root=spool, log_dir=Path(td) / "log", radiod_lifetime_frames=0)
+        stale = spool / "rx.local" / "msk144"
+        stale.mkdir(parents=True)
+        import os, time
+        for name in ("old.wav", "old.iq.wav", "old.iq.wav.part"):
+            (stale / name).write_bytes(b"x")
+            os.utime(stale / name, (time.time() - 3600,) * 2)
+        (stale / "fresh.wav").write_bytes(b"x")
+        ctl = mock.MagicMock()
+        ctl.ensure_channel.return_value = mock.MagicMock(multicast_address="239.1.2.3", port=5004,
+                                                         ssrc=77)
+        multi = mock.MagicMock()
+        multi.add_channel.return_value = mock.MagicMock(ssrc=77)
+        with mock.patch("ka9q.RadiodControl", return_value=ctl), \
+                mock.patch("ka9q.MultiStream", return_value=multi), \
+                mock.patch("ka9q.status_listener.StatusListener", side_effect=RuntimeError):
+            rx.provision_channels(decoder=str(jt9), decoder_kind="jt9", spool_spots=False)
+        return rx, ctl, multi, stale
+
+    def test_iq_capture_asks_radiod_for_the_iq_preset_and_edges(self):
+        import numpy as np
+        block = {"status": "rx.local",
+                 "msk144": {"freqs_hz": [50260000], "preset": "usb", "capture": "iq"}}
+        with tempfile.TemporaryDirectory() as td:
+            rx, ctl, multi, stale = self._provision(td, block)
+            self.assertEqual(len(rx.sinks), 1)
+            sink = rx.sinks[0]
+            self.assertEqual(sink.preset, "iq")
+            self.assertEqual(sink.capture, "iq")
+            for kw in (ctl.ensure_channel.call_args.kwargs, multi.add_channel.call_args.kwargs):
+                self.assertEqual(kw["preset"], "iq")
+                self.assertEqual((kw["low_edge"], kw["high_edge"]), (50.0, 3000.0))
+                self.assertEqual((kw["agc_enable"], kw["gain"], kw["sample_rate"]), (0, 0.0, 12000))
+            self.assertEqual(sink._ring._dtype, np.dtype(np.complex64))
+            # the startup sweep: old slot files gone, the fresh one kept
+            self.assertEqual(sorted(p.name for p in stale.iterdir() if p.is_file()), ["fresh.wav"])
+
+    def test_usb_capture_is_todays_request(self):
+        import numpy as np
+        block = {"status": "rx.local", "msk144": {"freqs_hz": [50260000]}}
+        with tempfile.TemporaryDirectory() as td:
+            rx, ctl, multi, stale = self._provision(td, block)
+            sink = rx.sinks[0]
+            self.assertEqual((sink.preset, sink.capture), ("usb", "usb"))
+            for kw in (ctl.ensure_channel.call_args.kwargs, multi.add_channel.call_args.kwargs):
+                self.assertEqual(kw["preset"], "usb")
+                self.assertNotIn("low_edge", kw)
+            self.assertEqual(sink._ring._dtype, np.dtype(np.float32))
+
+
 if __name__ == "__main__":
     unittest.main()

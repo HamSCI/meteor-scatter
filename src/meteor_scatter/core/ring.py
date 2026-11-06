@@ -41,6 +41,10 @@ class Ring:
         # offset (from the SlotClock anchor) of this chunk's first sample.
         self._chunks: deque[tuple[np.ndarray, int]] = deque()
         self._total_samples = 0
+        # A batch whose dtype is not the ring's is a fault (an iq channel delivering audio, say).
+        # It is dropped, never cast; ERROR once when it starts, INFO once when it clears.
+        self._dtype_fault = False
+        self.dtype_faults = 0
 
     def push(self, samples: np.ndarray, start_offset: int) -> None:
         """Append a batch tagged with the absolute offset of its first sample."""
@@ -48,7 +52,18 @@ class Ring:
         if n == 0:
             return
         if samples.dtype != self._dtype:
-            samples = samples.astype(self._dtype)
+            self.dtype_faults += 1
+            if not self._dtype_fault:
+                self._dtype_fault = True
+                logger.error(
+                    "ring expects %s samples but a channel delivered %s: dropping them, not "
+                    "casting (is the channel on the wrong preset?); logged once until it "
+                    "delivers %s again", self._dtype, samples.dtype, self._dtype)
+            return
+        if self._dtype_fault:
+            self._dtype_fault = False
+            logger.info("ring: %s samples again; the dtype fault cleared after %d dropped batches",
+                        self._dtype, self.dtype_faults)
         with self._lock:
             self._chunks.append((samples, int(start_offset)))
             self._total_samples += n

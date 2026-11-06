@@ -258,6 +258,7 @@ DEFAULT_ENCODING = "s16be"
 CAPTURE_MODES = ("usb", "iq")
 DEFAULT_CAPTURE = "usb"
 # capture = "iq" asks radiod for the `usb` preset's passband, in Hz relative to the dial frequency.
+IQ_SAMPLE_RATE = 12000      # the I/Q channel's rate; jt9's MSK144 path expects 12 kHz audio
 IQ_LOW_EDGE_HZ = 50.0
 IQ_HIGH_EDGE_HZ = 3000.0
 
@@ -348,17 +349,25 @@ def get_freqs(radiod_block: dict, mode: str = "msk144") -> list[int]:
 def get_mode_params(radiod_block: dict, mode: str) -> dict:
     """Extract sample_rate, preset, encoding, tr_period_sec, capture for a mode.
 
-    Raises ValueError for a ``capture`` other than "usb" or "iq".
+    Raises ValueError for a ``capture`` other than "usb" or "iq", and for capture = "iq" with a
+    ``sample_rate`` other than 12000.
     """
     mode_block = radiod_block.get(mode, {})
+    capture = _capture(mode_block)
+    sample_rate = int(mode_block.get("sample_rate", DEFAULT_SAMPLE_RATE))
+    if capture == "iq" and sample_rate != IQ_SAMPLE_RATE:
+        raise ValueError(
+            f"radiod.{mode}.sample_rate must be {IQ_SAMPLE_RATE} with capture = \"iq\"; "
+            f"got {sample_rate}"
+        )
     return {
-        "sample_rate": int(mode_block.get("sample_rate", DEFAULT_SAMPLE_RATE)),
+        "sample_rate": sample_rate,
         "preset": mode_block.get("preset", DEFAULT_PRESET),
         "encoding": mode_block.get("encoding", DEFAULT_ENCODING),
         "tr_period_sec": float(
             mode_block.get("tr_period_sec", MSK144_CADENCE_SEC)
         ),
-        "capture": _capture(mode_block),
+        "capture": capture,
     }
 
 
@@ -369,6 +378,18 @@ def _capture(mode_block: dict) -> str:
             f"radiod.msk144.capture must be one of {CAPTURE_MODES}; got {capture!r}"
         )
     return capture
+
+
+def first_mode_error(blocks) -> Optional[str]:
+    """The first config error get_mode_params finds across the radiod blocks, or None.  The
+    daemon refuses to start on one (EX_CONFIG 78), as it does for the unconfigured sentinel."""
+    for block in blocks:
+        for mode in MODES:
+            try:
+                get_mode_params(block, mode)
+            except ValueError as e:
+                return str(e)
+    return None
 
 
 # Unconfigured-radiod sentinel — sigmond bring-up seeds a fresh recorder

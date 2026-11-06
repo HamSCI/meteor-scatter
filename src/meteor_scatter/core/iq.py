@@ -6,19 +6,21 @@ the I/Q is one-sided and its real part is the USB audio.
 """
 from __future__ import annotations
 
+import os
 import struct
 from pathlib import Path
 
 import numpy as np
 
 from meteor_scatter.config import IQ_HIGH_EDGE_HZ, IQ_LOW_EDGE_HZ  # noqa: F401  (re-exported)
+from meteor_scatter.core.wav import _set_xattrs
 
 # Gain from the one-sided I/Q to the audio a USB demodulator gives.  radiod's mono linear
 # demodulator outputs gain * Re(iq) and its `iq` preset outputs gain * iq with the same gain
 # (ka9q-radio src/linear.c, the "I channel only" and "simplest case" branches), so at the same
 # channel gain the audio is exactly Re(iq): a one-sided tone of amplitude A gives a real tone of
-# amplitude A.  Task 3's brief said 2.0; with that the audio runs +6.02 dB above radiod's own USB
-# audio, and every calibrated noise floor and scale_db measured on the usb path shifts by as much.
+# amplitude A.  A factor of 2 would put the audio +6.02 dB above radiod's own USB audio, and every
+# calibrated noise floor and scale_db measured on the usb path would shift by as much.
 USB_AUDIO_GAIN = 1.0
 
 
@@ -31,12 +33,20 @@ def iq_to_usb_audio(iq: np.ndarray) -> np.ndarray:
     return (USB_AUDIO_GAIN * iq.real).astype(np.float32)
 
 
-def write_iq_wav(path: Path, iq: np.ndarray, sample_rate: int) -> None:
+def _commit(part: Path, path: Path) -> None:
+    os.replace(part, path)
+
+
+def write_iq_wav(path: Path, iq: np.ndarray, sample_rate: int, frequency_hz: int = 0) -> None:
     """Write I/Q as a two-channel 32-bit float WAV: channel 1 = I, channel 2 = Q.
 
     The samples go to disk exactly as received: no gain, no normalisation, and any NaN or inf
     stays, because this file is the record.  Header: IEEE float (tag 3), 18-byte fmt chunk with
-    cbSize 0, like write_wav_f32.
+    cbSize 0, like write_wav_f32.  ``frequency_hz`` set: the same ``user.frequency`` xattr the
+    audio writers put on a recording.
+
+    The file appears under ``path`` only whole: it is written as ``<path>.part`` and renamed.  On
+    any failure the part file is removed, nothing is left at ``path``, and the error propagates.
     """
     data = np.ascontiguousarray(iq, dtype="<c8").view("<f4").tobytes()   # I0 Q0 I1 Q1 ...
     size = len(data)
@@ -60,6 +70,17 @@ def write_iq_wav(path: Path, iq: np.ndarray, sample_rate: int) -> None:
         size,
     )
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "wb") as f:
-        f.write(header)
-        f.write(data)
+    part = path.with_name(path.name + ".part")
+    try:
+        with open(part, "wb") as f:
+            f.write(header)
+            f.write(data)
+        if frequency_hz:
+            _set_xattrs(part, sample_rate, frequency_hz)
+        _commit(part, path)
+    except BaseException:
+        try:
+            part.unlink()
+        except OSError:
+            pass
+        raise

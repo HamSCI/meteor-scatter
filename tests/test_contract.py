@@ -281,6 +281,21 @@ class RadiodSchemaTests(unittest.TestCase):
             resolve_radiod_block(config, "nonexistent.local")
 
 
+class IqSampleRateValidateTests(unittest.TestCase):
+    def test_validate_fails_iq_at_the_wrong_rate(self):
+        from meteor_scatter.contract import build_validate
+        cfg = {"station": {"callsign": "AC0G", "grid_square": "EM38ww"},
+               "paths": {"spool_dir": "/tmp/ms-test/spool", "log_dir": "/tmp/ms-test/log"},
+               "instance": {"reporter_id": "AC0G/B4"},
+               "radiod": [{"status": "test-status.local",
+                           "msk144": {"freqs_hz": [50260000], "capture": "iq",
+                                      "sample_rate": 24000}}]}
+        out = build_validate(cfg)
+        bad = [i for i in out["issues"] if "sample_rate" in i["message"]]
+        self.assertEqual([i["severity"] for i in bad], ["fail"])
+        self.assertIn("12000", bad[0]["message"])
+
+
 if __name__ == "__main__":
     unittest.main()
 

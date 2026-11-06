@@ -86,6 +86,25 @@ def inflight_from(pending_procs, now_mono: float) -> tuple[int, float]:
     return len(ages), (max(ages) if ages else 0.0)
 
 
+def sweep_spool(spool_dir: Path, max_age_sec: float, now: Optional[float] = None) -> int:
+    """Remove ``*.wav``, ``*.iq.wav`` and ``*.part`` older than ``max_age_sec`` from the spool.
+
+    A crash or kill leaves slot files that no worker owns.  The sweep runs once at startup, over
+    the spool directory itself (not the ``work_*`` dirs), and returns how many files it removed.
+    """
+    now = time.time() if now is None else now
+    removed = 0
+    for pattern in ("*.wav", "*.iq.wav", "*.part"):
+        for f in Path(spool_dir).glob(pattern):
+            try:
+                if f.is_file() and now - f.stat().st_mtime > max_age_sec:
+                    f.unlink()
+                    removed += 1
+            except OSError:
+                pass
+    return removed
+
+
 class SlotWorker:
     """Extracts cadence-aligned audio slots from a Ring and decodes them."""
 
@@ -107,6 +126,8 @@ class SlotWorker:
         spool_spots: bool = False,
         on_desync: Optional[Callable[[], None]] = None,
         capture: str = "usb",
+        get_anchor: Optional[Callable[[], object]] = None,
+        client_radiod: Optional[str] = None,
     ):
         if capture not in CAPTURE_MODES:
             raise ValueError(f"capture must be one of {CAPTURE_MODES}; got {capture!r}")
@@ -152,6 +173,13 @@ class SlotWorker:
         # SlotClockDesyncError during harvest — ChannelSink._reset_timing,
         # the same full anchor+ring reset used on stream restore.
         self._on_desync = on_desync
+        # Returns the hamsci_dsp.timing.AnchorUTC the slot labels ride (None before anchoring);
+        # each slot's sidecar timing block is built from it at the moment the slot is cut.
+        self._get_anchor = get_anchor
+        self._client_radiod = client_radiod
+        self._slot_timing: dict[Path, dict] = {}
+        # Conditions that last across slots: key -> [slots so far, samples so far].
+        self._episodes: dict[str, list[int]] = {}
         # Next clean cadence-multiple UTC boundary to emit (None until first).
         self._next_boundary_utc: Optional[float] = None
         self._sr = clock.sample_rate
@@ -282,10 +310,11 @@ class SlotWorker:
                     self._mode.upper(), self._frequency_hz, start_utc,
                 )
                 continue
-            wav_path = self._write_spool_wav(samples, start_utc)
+            wav_path = self._write_spool_wav(samples, start_utc, start_off)
             self._fork_decoder(wav_path, start_utc)
 
-    def _write_spool_wav(self, samples, slot_start_utc: float) -> Path:
+    def _write_spool_wav(self, samples, slot_start_utc: float,
+                         start_off: Optional[int] = None) -> Path:
         # MSK144 slot boundaries are integer seconds (:00/:15/:30/:45), so
         # the filename label is exact.  We name the WAV with a 4-digit-year
         # WSJT-X-style stamp (YYYYMMDD_HHMMSS_<freqkhz>.wav); jt9 tolerates
@@ -301,32 +330,47 @@ class SlotWorker:
         wav_path = self._spool_dir / filename
 
         bad = int(samples.size - np.count_nonzero(np.isfinite(samples)))
-        if bad:
-            logger.warning(
-                "%s %d Hz: slot at %.0f holds %d non-finite samples (NaN or inf) of %d; "
-                "the audio for jt9 has them as 0, the stats skip them%s",
-                self._mode.upper(), self._frequency_hz, slot_start_utc, bad, samples.size,
-                ", and the kept I/Q keeps them as received" if self._capture == "iq" else "",
-            )
+        self._episode(
+            "nonfinite", bad,
+            f"slot at {slot_start_utc:.0f} holds {bad} non-finite samples (NaN or inf) of "
+            f"{samples.size}; the audio for jt9 has them as 0, the stats skip them"
+            + (", and the kept I/Q keeps them as received" if self._capture == "iq" else "")
+            + "; logged once until the slots are clean again",
+            "non-finite samples cleared")
+        if self._get_anchor is not None:
+            self._slot_timing[wav_path] = self._timing_block(slot_start_utc, start_off)
 
         audio = samples
         if self._capture == "iq":
             # The I/Q first: it is the record.  A failed write costs the keep, never the decode.
+            iq_path = self._iq_path(wav_path)
             try:
-                write_iq_wav(self._iq_path(wav_path), samples, self._ring.sample_rate)
+                write_iq_wav(iq_path, samples, self._ring.sample_rate, self._frequency_hz)
             except OSError as e:
-                logger.warning("%s %d Hz: could not write the I/Q for %s (%s); decoding continues",
-                               self._mode.upper(), self._frequency_hz, wav_path.name, e)
+                self._episode("iq_write", 1,
+                              f"could not write the I/Q for {wav_path.name} ({e}); decoding "
+                              "continues and keeps nothing; logged once until writes succeed",
+                              "I/Q writes resumed")
+            else:
+                self._episode("iq_write", 0, "", "I/Q writes resumed")
             audio = iq_to_usb_audio(samples)
 
         writer = write_wav_f32 if self._audio_f32 else write_wav
-        stats = writer(
-            path=wav_path,
-            samples=audio,
-            sample_rate=self._ring.sample_rate,
-            frequency_hz=self._frequency_hz,
-            scale_db=self._msqp.scale_db if self._msqp is not None else None,
-        )
+        try:
+            stats = writer(
+                path=wav_path,
+                samples=audio,
+                sample_rate=self._ring.sample_rate,
+                frequency_hz=self._frequency_hz,
+                scale_db=self._msqp.scale_db if self._msqp is not None else None,
+            )
+        except BaseException:
+            # No decode follows, so nothing else would delete what this slot left in the spool.
+            wav_path.unlink(missing_ok=True)
+            self._slot_timing.pop(wav_path, None)
+            if self._capture == "iq":
+                self._iq_path(wav_path).unlink(missing_ok=True)
+            raise
         if self._capture == "iq":
             # The count that matters is the I/Q's: a NaN in Q alone never reaches the audio.
             stats = dataclasses.replace(stats, nonfinite_samples=bad)
@@ -339,6 +383,54 @@ class SlotWorker:
             else:
                 self._msqp_ok("noise watch")
         return wav_path
+
+    def _episode(self, key: str, count: int, start_text: str, end_text: str) -> None:
+        """Log a condition that can last many slots once when it starts and once when it clears.
+
+        ``count`` > 0 means the slot has the condition (a WARNING on the first such slot, silence
+        on the next); 0 means it does not (an INFO on the first clean slot after an episode,
+        saying how many slots and samples it lasted).
+        """
+        who = f"{self._mode.upper()} {self._frequency_hz} Hz"
+        st = self._episodes.get(key)
+        if count:
+            if st is None:
+                self._episodes[key] = [1, count]
+                logger.warning("%s: %s", who, start_text)
+            else:
+                st[0] += 1
+                st[1] += count
+        elif st is not None:
+            del self._episodes[key]
+            logger.info("%s: %s after %d slots (%d samples in all)", who, end_text, st[0], st[1])
+
+    def _timing_block(self, slot_start_utc: float, start_off: Optional[int]) -> dict:
+        """The sidecar's ``timing`` block for the slot being cut now.
+
+        Built from the anchor that labels this slot (the stream's AnchorUTC), never from a fresh
+        authority.json read.  ``first_sample_rtp`` is the wrapped 32-bit RTP timestamp of the
+        slot's first sample.
+        """
+        rtp = None
+        if start_off is not None:
+            with self._clock_lock:
+                if self._clock.anchored:
+                    rtp = int(self._clock.rtp_of_offset(start_off))
+        anchor = self._get_anchor() if self._get_anchor is not None else None
+        block = {
+            "slot_start_utc_exact": float(slot_start_utc),
+            "first_sample_rtp": rtp,
+            "sample_rate": int(self._ring.sample_rate),
+            "anchor": None,
+            "timing_authority_applied": None,
+        }
+        if anchor is not None:
+            block["anchor"] = {"utc": anchor.utc, "source": anchor.source,
+                               "rtp_referenced": anchor.rtp_referenced,
+                               "offset_ns": anchor.offset_ns}
+            block["timing_authority_applied"] = anchor.timing_authority_applied(
+                self._client_radiod)
+        return block
 
     def _msqp_fault(self, what: str, e: Exception) -> None:
         self.msqp_errors += 1
@@ -366,10 +458,15 @@ class SlotWorker:
         The recording is the audio WAV, or in I/Q mode the I/Q WAV; the audio file goes either way.
         """
         stats = self._slot_stats.pop(wav_path, None)
+        timing = self._slot_timing.pop(wav_path, None)
         recording = self._iq_path(wav_path) if self._capture == "iq" else wav_path
-        if self._msqp is not None and decodes and stats is not None:
+        # An I/Q file that never landed (failed write) leaves nothing to archive.
+        if (self._msqp is not None and decodes and stats is not None
+                and recording.exists()):
+            extra = {"timing": timing} if timing is not None else {}
             try:
-                kept = self._msqp.on_decoded(recording, slot_start, self._sr, stats, decodes)
+                kept = self._msqp.on_decoded(recording, slot_start, self._sr, stats, decodes,
+                                             **extra)
             except Exception as e:  # noqa: BLE001 — archiving must never cost a decode
                 self._msqp_fault("archive", e)
             else:
