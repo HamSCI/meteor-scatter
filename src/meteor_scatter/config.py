@@ -252,6 +252,14 @@ MODES = ("msk144",)
 DEFAULT_SAMPLE_RATE = 12000
 DEFAULT_PRESET = "usb"
 DEFAULT_ENCODING = "s16be"
+# [radiod.msk144] capture: "usb" asks radiod for 12 kHz USB audio per frequency (today's path);
+# "iq" asks for one F32 I/Q channel per frequency, makes the audio from it, and keeps the I/Q of
+# every decoded slot.  "usb" stays the default until the side-by-side proof passes.
+CAPTURE_MODES = ("usb", "iq")
+DEFAULT_CAPTURE = "usb"
+# capture = "iq" asks radiod for the `usb` preset's passband, in Hz relative to the dial frequency.
+IQ_LOW_EDGE_HZ = 50.0
+IQ_HIGH_EDGE_HZ = 3000.0
 
 
 def load_config(path: Path | None = None) -> dict:
@@ -338,7 +346,10 @@ def get_freqs(radiod_block: dict, mode: str = "msk144") -> list[int]:
 
 
 def get_mode_params(radiod_block: dict, mode: str) -> dict:
-    """Extract sample_rate, preset, encoding, tr_period_sec for a mode."""
+    """Extract sample_rate, preset, encoding, tr_period_sec, capture for a mode.
+
+    Raises ValueError for a ``capture`` other than "usb" or "iq".
+    """
     mode_block = radiod_block.get(mode, {})
     return {
         "sample_rate": int(mode_block.get("sample_rate", DEFAULT_SAMPLE_RATE)),
@@ -347,7 +358,17 @@ def get_mode_params(radiod_block: dict, mode: str) -> dict:
         "tr_period_sec": float(
             mode_block.get("tr_period_sec", MSK144_CADENCE_SEC)
         ),
+        "capture": _capture(mode_block),
     }
+
+
+def _capture(mode_block: dict) -> str:
+    capture = mode_block.get("capture", DEFAULT_CAPTURE)
+    if not isinstance(capture, str) or capture not in CAPTURE_MODES:
+        raise ValueError(
+            f"radiod.msk144.capture must be one of {CAPTURE_MODES}; got {capture!r}"
+        )
+    return capture
 
 
 # Unconfigured-radiod sentinel — sigmond bring-up seeds a fresh recorder

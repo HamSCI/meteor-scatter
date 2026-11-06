@@ -26,11 +26,16 @@ logger = logging.getLogger(__name__)
 
 
 class Ring:
-    """Accumulates float32 audio samples keyed by absolute RTP sample offset."""
+    """Accumulates samples keyed by absolute RTP sample offset.
 
-    def __init__(self, max_seconds: float, sample_rate: int):
+    ``dtype`` follows the channel: float32 for the usb preset, complex64 for I/Q.  A gap in the
+    window extracts as zeros of that dtype (0 or 0+0j).
+    """
+
+    def __init__(self, max_seconds: float, sample_rate: int, dtype=np.float32):
         self._lock = threading.Lock()
         self._sample_rate = sample_rate
+        self._dtype = np.dtype(dtype)
         self._max_samples = int(max_seconds * sample_rate)
         # (samples, start_offset) — start_offset is the absolute RTP sample
         # offset (from the SlotClock anchor) of this chunk's first sample.
@@ -42,6 +47,8 @@ class Ring:
         n = len(samples)
         if n == 0:
             return
+        if samples.dtype != self._dtype:
+            samples = samples.astype(self._dtype)
         with self._lock:
             self._chunks.append((samples, int(start_offset)))
             self._total_samples += n
@@ -76,7 +83,7 @@ class Ring:
     ) -> Optional[np.ndarray]:
         """Extract exactly ``n_samples`` starting at absolute ``start_offset``.
 
-        Returns a float32 array of length ``n_samples``, or None if the ring
+        Returns an array (the ring's dtype) of length ``n_samples``, or None if the ring
         doesn't cover at least 90% of the requested interval.  Any small
         shortfall inside the window (an evicted head or a not-yet-arrived
         tail) is zero-padded so the decoder always gets a fixed-length slot.
@@ -105,7 +112,7 @@ class Ring:
         if collected < n_samples * 0.9:
             return None
 
-        result = np.zeros(n_samples, dtype=np.float32)
+        result = np.zeros(n_samples, dtype=self._dtype)
         for dest_index, piece in pieces:
             result[dest_index:dest_index + len(piece)] = piece
         return result

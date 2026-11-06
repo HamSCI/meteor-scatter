@@ -334,7 +334,13 @@ def _collect_issues(config: dict, paths: dict) -> list[dict]:
         # SSRC; MultiStream's slot dict silently overwrites.
         seen: dict[tuple, str] = {}
         for mode in ("msk144",):
-            params = get_mode_params(block, mode)
+            try:
+                params = get_mode_params(block, mode)
+            except ValueError as e:
+                issues.append({"severity": "fail", "instance": rid, "message": str(e)})
+                continue
+            if params["capture"] == "iq":
+                params = {**params, "preset": "iq"}     # what ReceiverManager asks radiod for
             for hz in get_freqs(block, mode):
                 key = (int(hz), params["preset"], params["sample_rate"], params["encoding"])
                 if key in seen:

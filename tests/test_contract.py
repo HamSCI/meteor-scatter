@@ -412,6 +412,21 @@ class MsqpSinkAndValidateTests(unittest.TestCase):
         self.assertEqual(msgs[0]["severity"], "warn")
         self.assertIn("archive_max_gb", msgs[0]["message"])
 
+    def test_validate_fails_on_a_bad_capture(self):
+        from meteor_scatter.contract import build_validate
+        cfg = self._cfg()
+        cfg["radiod"][0]["msk144"]["capture"] = "lsb"
+        out = build_validate(cfg)
+        bad = [i for i in out["issues"] if "capture" in i["message"]]
+        self.assertEqual([i["severity"] for i in bad], ["fail"])
+
+    def test_validate_accepts_capture_iq(self):
+        from meteor_scatter.contract import build_validate
+        cfg = self._cfg()
+        cfg["radiod"][0]["msk144"]["capture"] = "iq"
+        out = build_validate(cfg)
+        self.assertEqual([i for i in out["issues"] if "capture" in i["message"]], [])
+
     def test_inventory_survives_a_bad_msqp_block(self):
         from meteor_scatter.contract import build_inventory
         inv = build_inventory(self._cfg({"archive_max_gb": "2"}), Path("/x.toml"))

@@ -199,3 +199,35 @@ class KeepFailureRecoveryTests(unittest.TestCase):
         self.assertTrue(wav.exists(), "WAV should remain in spool after move failure")
         self.assertFalse(dest_wav.exists(), "Archive WAV should not exist after failure")
         self.assertFalse(dest_tmp.exists(), "Temporary JSON should not exist after failure")
+
+    def test_keep_takes_an_iq_recording_whatever_its_suffix(self):
+        a = Archive(self.root, max_days=90, max_gb=2)
+        src = self._wav("261213_235930.iq.wav", size=1440000)
+        dest = a.keep(src, 28145000, T0, {"capture": "iq"})
+        self.assertEqual(dest, self.root / "10m" / "20261213" / "261213_235930.wav")
+        self.assertEqual(dest.stat().st_size, 1440000)
+        self.assertFalse(src.exists())
+
+    def test_archive_cap_counts_iq_bytes(self):
+        # Two days of kept I/Q, 1.44 MB per slot (four times a 16-bit slot): the cap trims by the
+        # real sizes, oldest day first, and leaves the newer day alone.
+        a = Archive(self.root, max_days=90, max_gb=0.0045)         # 4.5 MB
+        for day_offset in (2, 1):
+            for i in range(2):
+                t = T0 - day_offset * 86400 + i * 15
+                a.keep(self._wav(f"s{day_offset}{i}.iq.wav", size=1_440_000), 28145000, t, {"k": 1})
+        before = a.usage(date(2026, 12, 13))["bytes"]
+        self.assertGreater(before, 4 * 1_440_000)
+        removed = a.prune(date(2026, 12, 13))
+        self.assertEqual(removed, ["10m/20261211"])
+        after = a.usage(date(2026, 12, 13))["bytes"]
+        self.assertGreaterEqual(after, 2 * 1_440_000)
+        self.assertLessEqual(after, a.max_bytes)
+
+    def test_a_16_bit_slot_size_would_not_have_trimmed(self):
+        a = Archive(self.root, max_days=90, max_gb=0.0045)
+        for day_offset in (2, 1):
+            for i in range(2):
+                a.keep(self._wav(f"t{day_offset}{i}.wav", size=360_000), 28145000,
+                       T0 - day_offset * 86400 + i * 15, {"k": 1})
+        self.assertEqual(a.prune(date(2026, 12, 13)), [])

@@ -73,8 +73,10 @@ class ChannelSink:
         decoder_kind: str = "jt9",
         spool_spots: bool = False,
         tr_period_sec: float = MSK144_CADENCE_SEC,
+        capture: str = "usb",
     ):
         self._mode = mode
+        self._capture = capture
         self._frequency_hz = frequency_hz
         self._sample_rate = sample_rate
         self._preset = preset
@@ -84,9 +86,12 @@ class ChannelSink:
         # value so the recorded slots frame the transmitters' T/R period.
         cadence = tr_period_sec
 
+        # complex64 for an I/Q channel (ka9q-python delivers interleaved I,Q as complex64 for the
+        # `iq` preset), float32 audio otherwise.
         self._ring = Ring(
             max_seconds=RING_SECONDS,
             sample_rate=sample_rate,
+            dtype=np.complex64 if capture == "iq" else np.float32,
         )
 
         # Epoch-aligned, RTP-referenced slot timing.  The clock is anchored
@@ -117,6 +122,7 @@ class ChannelSink:
             msqp=msqp,
             spool_spots=spool_spots,
             on_desync=self._reset_timing,
+            capture=capture,
         )
 
         self._total_delivered: int = 0
@@ -362,6 +368,10 @@ class ChannelSink:
     @property
     def preset(self) -> str:
         return self._preset
+
+    @property
+    def capture(self) -> str:
+        return self._capture
 
     @property
     def sample_rate(self) -> int:

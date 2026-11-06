@@ -100,6 +100,64 @@ class WavWriterTests(unittest.TestCase):
             self.assertGreaterEqual(int16_vals.min(), -32768)
 
 
+class NonFiniteSamplesTests(unittest.TestCase):
+    """NaN or inf in a slot must not poison the gain, the noise stats or the audio."""
+
+    @staticmethod
+    def _slot():
+        x = (0.01 * np.sin(np.linspace(0, 2 * np.pi * 440, 24000))).astype(np.float32)
+        return x
+
+    def test_nan_peak_leaves_gain_finite(self):
+        clean = self._slot()
+        bad = clean.copy()
+        bad[100] = np.nan
+        bad[200] = np.inf
+        bad[300] = -np.inf
+        for writer in (write_wav, write_wav_f32):
+            with tempfile.TemporaryDirectory() as td:
+                p0, p1 = Path(td) / "a.wav", Path(td) / "b.wav"
+                st0 = writer(p0, clean, 12000)
+                st1 = writer(p1, bad, 12000)
+                self.assertTrue(np.isfinite(st1.gain_db), writer.__name__)
+                self.assertEqual(st1.gain_db, st0.gain_db)      # the peak ignores the bad samples
+                self.assertTrue(np.isfinite(st1.noise_dbfs))
+                self.assertAlmostEqual(st1.noise_dbfs, st0.noise_dbfs, delta=0.5)
+                self.assertEqual(st1.nonfinite_samples, 3)
+                self.assertEqual(st0.nonfinite_samples, 0)
+
+    def test_nonfinite_replaced_by_zero_in_the_file(self):
+        bad = self._slot()
+        bad[10] = np.nan
+        bad[11] = np.inf
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "f.wav"
+            write_wav_f32(p, bad, 12000)
+            got = np.frombuffer(p.read_bytes()[-bad.size * 4:], dtype="<f4")
+            self.assertTrue(np.all(np.isfinite(got)))
+            self.assertEqual(got[10], 0.0)
+            self.assertEqual(got[11], 0.0)
+            q = Path(td) / "s.wav"
+            write_wav(q, bad, 12000)
+            got16 = np.frombuffer(q.read_bytes()[-bad.size * 2:], dtype="<i2")
+            self.assertEqual((got16[10], got16[11]), (0, 0))
+
+    def test_all_nonfinite_slot_is_silent_not_nan(self):
+        x = np.full(24000, np.nan, dtype=np.float32)
+        with tempfile.TemporaryDirectory() as td:
+            st = write_wav_f32(Path(td) / "n.wav", x, 12000)
+        self.assertEqual(st.gain_db, 0.0)
+        self.assertIsNone(st.noise_dbfs)
+        self.assertEqual(st.nonfinite_samples, 24000)
+
+    def test_fixed_gain_noise_stats_skip_nonfinite(self):
+        bad = self._slot()
+        bad[5] = np.nan
+        with tempfile.TemporaryDirectory() as td:
+            st = write_wav_f32(Path(td) / "f.wav", bad, 12000, scale_db=6.0)
+        self.assertTrue(np.isfinite(st.noise_dbfs))
+
+
 if __name__ == "__main__":
     unittest.main()
 

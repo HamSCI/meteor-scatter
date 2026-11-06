@@ -27,23 +27,46 @@ class WavStats:
     gain_db: float
     clipped_samples: int
     noise_dbfs: Optional[float]
+    # NaN or inf samples the slot held.  The writers replaced them with 0 in the audio file and
+    # left them out of the peak and the noise floor.
+    nonfinite_samples: int = 0
 
 
 def quiet_floor_dbfs(samples: np.ndarray, sample_rate: int) -> Optional[float]:
     """The slot's noise floor: 10th percentile of 100 ms RMS blocks, dB re 1.0.
 
     The low percentile keeps a ping of up to a few seconds from raising it.
-    None for an empty or all-zero slot.
+    None for an empty or all-zero slot.  NaN and inf samples count for nothing: each block's
+    RMS runs over its finite samples, and a block with none drops out.
     """
     block = max(1, sample_rate // 10)
     n = samples.size // block
     if n == 0:
         return None
-    rms = np.sqrt(np.mean(samples[: n * block].astype(np.float64).reshape(n, block) ** 2, axis=1))
+    x = samples[: n * block].astype(np.float64).reshape(n, block)
+    finite = np.isfinite(x)
+    counts = finite.sum(axis=1)
+    sq = np.where(finite, x, 0.0) ** 2
+    live = counts > 0
+    if not live.any():
+        return None
+    rms = np.sqrt(sq.sum(axis=1)[live] / counts[live])
     floor = float(np.percentile(rms, 10))
     if floor <= 0.0:
         return None
     return 20.0 * np.log10(floor)
+
+
+def sanitize(samples: np.ndarray) -> tuple[np.ndarray, int]:
+    """(samples with NaN and inf replaced by 0, how many were replaced).
+
+    Returns the input itself, uncopied, when every sample is finite.
+    """
+    finite = np.isfinite(samples)
+    bad = int(samples.size - np.count_nonzero(finite))
+    if bad == 0:
+        return samples, 0
+    return np.where(finite, samples, 0).astype(samples.dtype), bad
 
 
 def write_wav(
@@ -58,8 +81,9 @@ def write_wav(
     ``scale_db`` set: one fixed gain (a calibrated band).  ``None``: peak-normalize the slot to
     -1 dBFS, as before calibration existed.
     """
-    gain_db = scale_db if scale_db is not None else _peak_norm_gain_db(samples)
-    int16_samples, clipped = _to_int16(samples, gain_db)
+    clean, bad = sanitize(samples)
+    gain_db = scale_db if scale_db is not None else _peak_norm_gain_db(clean)
+    int16_samples, clipped = _to_int16(clean, gain_db)
     data_bytes = int16_samples.astype("<i2").tobytes()
     data_size = len(data_bytes)
 
@@ -96,7 +120,7 @@ def write_wav(
         _set_xattrs(path, sample_rate, frequency_hz)
 
     return WavStats(gain_db=gain_db, clipped_samples=clipped,
-                    noise_dbfs=quiet_floor_dbfs(samples, sample_rate))
+                    noise_dbfs=quiet_floor_dbfs(samples, sample_rate), nonfinite_samples=bad)
 
 
 def write_wav_f32(
@@ -117,11 +141,15 @@ def write_wav_f32(
     two differ by 20*log10(32768/32767) = 0.0003 dB.  The peak-normalize target is the same
     -1 dBFS in both.
 
+    NaN and inf samples become 0 in the file and count for nothing in the peak and the noise
+    floor; ``WavStats.nonfinite_samples`` says how many there were.
+
     Format follows wspr-recorder's float WAV writer: IEEE float (tag 3), 18-byte fmt chunk
     with cbSize 0, 46-byte header.
     """
-    gain_db = scale_db if scale_db is not None else _peak_norm_gain_db(samples)
-    scaled = (samples.astype(np.float64) * 10.0 ** (gain_db / 20.0)).astype("<f4")
+    clean, bad = sanitize(samples)
+    gain_db = scale_db if scale_db is not None else _peak_norm_gain_db(clean)
+    scaled = (clean.astype(np.float64) * 10.0 ** (gain_db / 20.0)).astype("<f4")
     data_bytes = scaled.tobytes()
     data_size = len(data_bytes)
 
@@ -154,7 +182,7 @@ def write_wav_f32(
         _set_xattrs(path, sample_rate, frequency_hz)
 
     return WavStats(gain_db=gain_db, clipped_samples=0,
-                    noise_dbfs=quiet_floor_dbfs(samples, sample_rate))
+                    noise_dbfs=quiet_floor_dbfs(samples, sample_rate), nonfinite_samples=bad)
 
 
 # Peak-normalize to -1 dBFS, matching wspr-recorder's wav_writer

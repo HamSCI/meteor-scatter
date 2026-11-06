@@ -29,6 +29,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
 from meteor_scatter.config import (
+    IQ_HIGH_EDGE_HZ,
+    IQ_LOW_EDGE_HZ,
     derive_source_key,
     resolve_msqp_instance_id,
     get_freqs,
@@ -289,7 +291,11 @@ class ReceiverManager:
 
             params = get_mode_params(self._radiod, mode)
             sample_rate = params["sample_rate"]
-            preset = params["preset"]
+            capture = params["capture"]
+            # capture = "iq": one F32 I/Q channel per frequency on radiod's `iq` preset, whatever
+            # the config's `preset` says.  radiod derives a different SSRC for it than for the
+            # usb channel at the same frequency (the preset is in ka9q-python's hash).
+            preset = "iq" if capture == "iq" else params["preset"]
             tr_period_sec = params["tr_period_sec"]
             # The WAV writer (wav.py) peak-normalizes f32 -> s16be at
             # write time, so radiod MUST emit f32 on the wire: an s16
@@ -315,12 +321,12 @@ class ReceiverManager:
             for freq_hz in freqs:
                 logger.info(
                     "ReceiverManager %s: provisioning %s %d Hz "
-                    "(sr=%d, preset=%s, enc=%s)",
+                    "(sr=%d, preset=%s, enc=%s, capture=%s)",
                     self._radiod_id, mode.upper(), freq_hz,
-                    sample_rate, preset, encoding_str,
+                    sample_rate, preset, encoding_str, capture,
                 )
                 msqp = self._msqp_channel(msqp_runtime, freq_hz, msqp_reporter,
-                                          tr_period_sec, preset)
+                                          tr_period_sec, preset, capture)
                 sink = ChannelSink(
                     mode=mode,
                     frequency_hz=freq_hz,
@@ -334,6 +340,7 @@ class ReceiverManager:
                     msqp=msqp,
                     spool_spots=spool_spots,
                     tr_period_sec=tr_period_sec,
+                    capture=capture,
                 )
                 if self._provision_one_with_retry(
                         sink, multi_by_group, deadline):
@@ -363,7 +370,7 @@ class ReceiverManager:
             )
 
     def _msqp_channel(self, msqp_runtime, freq_hz: int, reporter_id: str,
-                      tr_period_sec: float, preset: str = "usb"):
+                      tr_period_sec: float, preset: str = "usb", capture: str = "usb"):
         """This band's MsqpChannel, or None.  A bad per-band calibration value
         costs the band its archive, never its decodes."""
         if msqp_runtime is None:
@@ -376,6 +383,7 @@ class ReceiverManager:
                 noise_cal_dbfs=get_noise_cal_dbfs(self._radiod, freq_hz),
                 cadence_sec=tr_period_sec,
                 preset=preset,
+                **({"capture": capture} if capture != "usb" else {}),
             )
         except Exception as e:  # noqa: BLE001
             logger.warning("ReceiverManager %s: %d Hz not archived for MSQP: %s",
@@ -467,6 +475,10 @@ class ReceiverManager:
         # AGC off at 0 dB, stated rather than left to ka9q-python's defaults:
         # MSQP recordings and their scale_db rest on a fixed channel gain
         # (core/msqp.channel_requested records the same request).
+        # An I/Q channel asks for the usb preset's passband (+50 to +3000 Hz re the dial
+        # frequency) by ka9q-python's keyword names, as codar-sounder does; usb asks for none.
+        edges = ({"low_edge": IQ_LOW_EDGE_HZ, "high_edge": IQ_HIGH_EDGE_HZ}
+                 if sink.capture == "iq" else {})
         info = self._control.ensure_channel(
             frequency_hz=float(sink.frequency_hz),
             preset=sink.preset,
@@ -476,6 +488,7 @@ class ReceiverManager:
             gain=0.0,
             lifetime=lifetime_arg,
             timeout=timeout,
+            **edges,
         )
         key = (info.multicast_address, info.port)
         multi = multi_by_group.get(key)
@@ -495,6 +508,7 @@ class ReceiverManager:
             on_stream_restored=sink.on_stream_restored,
             lifetime=lifetime_arg,
             timeout=timeout,
+            **edges,
         )
         # Hand the freshly-discovered ChannelInfo (with GPS_TIME /
         # RTP_TIMESNAP / chain_delay_correction populated) to the sink

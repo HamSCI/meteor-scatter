@@ -17,6 +17,7 @@ from typing import Optional
 
 from meteor_scatter.core.archive import Archive, band_label, instance_dirname
 from meteor_scatter.core.frontend import FrontendLog
+from meteor_scatter.core.iq import IQ_HIGH_EDGE_HZ, IQ_LOW_EDGE_HZ
 from meteor_scatter.core.noise_watch import NoiseWatch
 from meteor_scatter.core.wav import WavStats
 
@@ -25,20 +26,31 @@ logger = logging.getLogger(__name__)
 NOISE_LOG_LINES = 240            # an hour of 15 s slots, for `msqp calibrate`
 
 
-def channel_requested(preset: str) -> dict:
+def channel_requested(preset: str, capture: str = "usb") -> dict:
     """What ReceiverManager asks radiod for on every channel (ensure_channel / add_channel):
-    AGC off at 0 dB, f32 (forced whatever the config says), and the configured preset."""
-    return {"agc_enable": 0, "gain_db": 0.0, "encoding": "f32", "preset": preset}
+    AGC off at 0 dB, f32 (forced whatever the config says), and the configured preset.  With
+    capture = "iq" it also asks for the filter edges, +50 and +3000 Hz re the dial frequency."""
+    req = {"agc_enable": 0, "gain_db": 0.0, "encoding": "f32", "preset": preset}
+    if capture == "iq":
+        req["low_edge"] = IQ_LOW_EDGE_HZ
+        req["high_edge"] = IQ_HIGH_EDGE_HZ
+    return req
 
 
 def build_sidecar(*, reporter_id, freq_hz, slot_start_utc, sample_rate, stats: WavStats,
                   scale_db, decodes, frontend: dict, version, preset: str = "usb",
-                  reported: Optional[dict] = None) -> dict:
+                  reported: Optional[dict] = None, capture: str = "usb") -> dict:
     """One recording's sidecar.  noise_floor_dbfs is dB re radiod's f32 full scale (1.0),
     measured before wav_gain_db; the floor in the WAV is noise_floor_dbfs + wav_gain_db.
     channel_reported holds radiod's latest status report for the channel's SSRC, or None
-    when none has arrived."""
-    return {
+    when none has arrived.
+
+    capture = "iq": the kept file holds the slot's I/Q, not audio, and the sidecar says so in
+    capture and the iq_* fields.  wav_gain_db, clipped_samples and noise_floor_dbfs then describe
+    the audio made for jt9; the kept I/Q has no gain and no normalisation.  nonfinite_samples
+    appears when the slot held NaN or inf: the audio had them replaced by 0, the I/Q file keeps
+    them as received."""
+    side = {
         "reporter_id": reporter_id,
         "band": band_label(freq_hz),
         "dial_freq_hz": int(freq_hz),
@@ -49,12 +61,24 @@ def build_sidecar(*, reporter_id, freq_hz, slot_start_utc, sample_rate, stats: W
         "clipped_samples": stats.clipped_samples,
         "noise_floor_dbfs": stats.noise_dbfs,
         "noise_floor_reference": "dB re radiod f32 full scale, before wav_gain_db",
-        "channel_requested": channel_requested(preset),
+        "channel_requested": channel_requested(preset, capture),
         "channel_reported": reported,
         "decodes": decodes,
         "frontend": frontend,
         "software_version": version,
     }
+    if stats.nonfinite_samples:
+        side["nonfinite_samples"] = int(stats.nonfinite_samples)
+    if capture == "iq":
+        side["capture"] = "iq"
+        side["iq_sample_rate"] = int(sample_rate)
+        side["iq_encoding"] = "f32le"
+        side["iq_center_hz"] = int(freq_hz)
+        side["iq_filter_hz"] = [int(IQ_LOW_EDGE_HZ), int(IQ_HIGH_EDGE_HZ)]
+        side["iq_scale"] = "radiod f32, no gain, no normalisation"
+        if stats.nonfinite_samples:
+            side["iq_contains_nonfinite"] = True
+    return side
 
 
 def _noise_line_ok(line: str) -> bool:
@@ -73,7 +97,7 @@ class MsqpChannel:
     def __init__(self, archive: Archive, frontend: FrontendLog, freq_hz: int, reporter_id: str,
                  scale_db: Optional[float], noise: NoiseWatch, version: str,
                  cadence_sec: float = 15.0, noise_log: Optional[Path] = None,
-                 preset: str = "usb"):
+                 preset: str = "usb", capture: str = "usb"):
         self._archive = archive
         self._frontend = frontend
         self.freq_hz = freq_hz
@@ -86,6 +110,7 @@ class MsqpChannel:
         self.archive_failures = 0
         self._failing = False
         self.preset = preset
+        self.capture = capture
         self._noise_log = Path(noise_log) if noise_log else None
         self._noise_log_failing = False
         self.noise_log_failures = 0
@@ -141,6 +166,7 @@ class MsqpChannel:
                                  slot_start_utc=slot_start_utc, sample_rate=sample_rate,
                                  stats=stats, scale_db=self.scale_db, decodes=decodes,
                                  frontend=frontend, version=self._version, preset=self.preset,
+                                 capture=self.capture,
                                  reported=self._frontend.channel_reported(self.ssrc))
             self._archive.keep(wav_path, self.freq_hz, slot_start_utc, side)
         except Exception as e:  # noqa: BLE001 — archiving must never cost a decode
@@ -203,7 +229,7 @@ class MsqpRuntime:
         self._listener = None
 
     def channel(self, freq_hz, *, reporter_id, scale_db, noise_cal_dbfs,
-                cadence_sec=30.0, preset="usb") -> MsqpChannel:
+                cadence_sec=30.0, preset="usb", capture="usb") -> MsqpChannel:
         # A scoped source rebuild provisions the same bands again; keep their counters.
         for ch in self.channels:
             if ch.freq_hz == freq_hz:
@@ -212,7 +238,7 @@ class MsqpRuntime:
                          NoiseWatch(noise_cal_dbfs), self._version, cadence_sec=cadence_sec,
                          noise_log=(self._spool_root / f"noise-{int(freq_hz)}.txt"
                                     if self._spool_root else None),
-                         preset=preset)
+                         preset=preset, capture=capture)
         self.channels.append(ch)
         return ch
 

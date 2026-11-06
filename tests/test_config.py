@@ -50,6 +50,25 @@ class TestModeParams(unittest.TestCase):
         self.assertEqual(get_mode_params(block, "msk144")["tr_period_sec"], 15.0)
 
 
+class TestCapture(unittest.TestCase):
+    """[radiod.msk144] capture = "usb" | "iq"; "usb" is today's path."""
+
+    def test_capture_default_usb(self):
+        params = get_mode_params({"msk144": {"freqs_hz": [28145000]}}, "msk144")
+        self.assertEqual(params["capture"], "usb")
+        self.assertEqual(params["preset"], "usb")
+
+    def test_capture_iq(self):
+        block = {"msk144": {"freqs_hz": [28145000], "capture": "iq"}}
+        self.assertEqual(get_mode_params(block, "msk144")["capture"], "iq")
+
+    def test_capture_is_validated(self):
+        for bad in ("IQ", "lsb", "", 1, None, True):
+            block = {"msk144": {"freqs_hz": [28145000], "capture": bad}}
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                get_mode_params(block, "msk144")
+
+
 class TestDeriveSourceKey(unittest.TestCase):
 
     def test_from_status_field(self):

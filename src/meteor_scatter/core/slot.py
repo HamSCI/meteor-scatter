@@ -28,12 +28,19 @@ Recordings: every slot's WAV lands in the spool.  A slot jt9 decoded something
 in goes to the MSQP archive (core/msqp.py) with a JSON sidecar; every other
 slot, and any recording the archive could not take, is deleted.
 
+capture = "iq": the ring holds complex64 I/Q.  Each slot's I/Q goes to the spool as
+``<stem>.iq.wav`` (two-channel F32, exactly as received), and the audio jt9 reads is made from
+it (core/iq.py) and written as ``<stem>.wav``.  On a decode the ``.iq.wav`` is what the archive
+keeps, under the name ``<stem>.wav``; the audio file goes.  Otherwise both go.  NaN or inf in a
+slot never reaches jt9, the gain or the noise floor (core/wav.py), and logs once per slot.
+
 MSK144 cadence: T/R slots at the configured tr_period_sec (default 15 s, the
 WSJT-X User Guide's MSK144 period — slots at :00/:15/:30/:45; 30 s gives :00, :30).
 """
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import math
 import os
@@ -43,9 +50,13 @@ import time
 from pathlib import Path
 from typing import Callable, Optional
 
+import numpy as np
+
 from ka9q import SlotClock, SlotClockDesyncError
 
+from meteor_scatter.config import CAPTURE_MODES
 from meteor_scatter.core import decoder as _decoder
+from meteor_scatter.core.iq import iq_to_usb_audio, write_iq_wav
 from meteor_scatter.core.ring import Ring
 from meteor_scatter.core.wav import WavStats, write_wav, write_wav_f32
 
@@ -95,13 +106,17 @@ class SlotWorker:
         decoder_kind: str = DECODER_JT9,
         spool_spots: bool = False,
         on_desync: Optional[Callable[[], None]] = None,
+        capture: str = "usb",
     ):
+        if capture not in CAPTURE_MODES:
+            raise ValueError(f"capture must be one of {CAPTURE_MODES}; got {capture!r}")
         if decoder_kind not in VALID_DECODER_KINDS:
             raise ValueError(
                 f"decoder_kind must be one of {VALID_DECODER_KINDS}; "
                 f"got {decoder_kind!r}"
             )
         self._ring = ring
+        self._capture = capture
         self._mode = mode
         self._frequency_hz = frequency_hz
         self._cadence_sec = cadence_sec
@@ -113,8 +128,8 @@ class SlotWorker:
         # F32 audio only for a jt9 that reads it (our port); 16-bit otherwise.
         self._audio_f32 = _decoder.jt9_reads_f32(self._decoder_path)
         logger.info(
-            "%s %d Hz: jt9 audio is %s (%s %s)",
-            mode.upper(), frequency_hz,
+            "%s %d Hz: capture=%s, jt9 audio is %s (%s %s)",
+            mode.upper(), frequency_hz, capture,
             "F32" if self._audio_f32 else "16-bit",
             self._decoder_path,
             "lists --msk-shmsg: the port reads float WAV" if self._audio_f32
@@ -285,14 +300,36 @@ class SlotWorker:
         filename = time.strftime("%Y%m%d_%H%M%S", slot_time) + f"_{freq_khz}.wav"
         wav_path = self._spool_dir / filename
 
+        bad = int(samples.size - np.count_nonzero(np.isfinite(samples)))
+        if bad:
+            logger.warning(
+                "%s %d Hz: slot at %.0f holds %d non-finite samples (NaN or inf) of %d; "
+                "the audio for jt9 has them as 0, the stats skip them%s",
+                self._mode.upper(), self._frequency_hz, slot_start_utc, bad, samples.size,
+                ", and the kept I/Q keeps them as received" if self._capture == "iq" else "",
+            )
+
+        audio = samples
+        if self._capture == "iq":
+            # The I/Q first: it is the record.  A failed write costs the keep, never the decode.
+            try:
+                write_iq_wav(self._iq_path(wav_path), samples, self._ring.sample_rate)
+            except OSError as e:
+                logger.warning("%s %d Hz: could not write the I/Q for %s (%s); decoding continues",
+                               self._mode.upper(), self._frequency_hz, wav_path.name, e)
+            audio = iq_to_usb_audio(samples)
+
         writer = write_wav_f32 if self._audio_f32 else write_wav
         stats = writer(
             path=wav_path,
-            samples=samples,
+            samples=audio,
             sample_rate=self._ring.sample_rate,
             frequency_hz=self._frequency_hz,
             scale_db=self._msqp.scale_db if self._msqp is not None else None,
         )
+        if self._capture == "iq":
+            # The count that matters is the I/Q's: a NaN in Q alone never reaches the audio.
+            stats = dataclasses.replace(stats, nonfinite_samples=bad)
         self._slot_stats[wav_path] = stats
         if self._msqp is not None:
             try:
@@ -318,19 +355,30 @@ class SlotWorker:
             logger.info("%s %d Hz: MSQP %s resumed", self._mode.upper(), self._frequency_hz,
                         what)
 
+    @staticmethod
+    def _iq_path(wav_path: Path) -> Path:
+        """The spool file holding this slot's I/Q: ``<stem>.iq.wav`` beside ``<stem>.wav``."""
+        return wav_path.with_suffix(".iq.wav")
+
     def _finish_slot(self, wav_path: Path, slot_start: float, decodes: list) -> None:
-        """Archive a decoded recording, or delete it.  Never leaves a spool WAV behind."""
+        """Archive a decoded recording, or delete it.  Never leaves a spool file behind.
+
+        The recording is the audio WAV, or in I/Q mode the I/Q WAV; the audio file goes either way.
+        """
         stats = self._slot_stats.pop(wav_path, None)
+        recording = self._iq_path(wav_path) if self._capture == "iq" else wav_path
         if self._msqp is not None and decodes and stats is not None:
             try:
-                kept = self._msqp.on_decoded(wav_path, slot_start, self._sr, stats, decodes)
+                kept = self._msqp.on_decoded(recording, slot_start, self._sr, stats, decodes)
             except Exception as e:  # noqa: BLE001 — archiving must never cost a decode
                 self._msqp_fault("archive", e)
             else:
                 self._msqp_ok("archive")
                 if kept:
-                    return                       # moved into the archive
+                    wav_path.unlink(missing_ok=True)   # moved into the archive; audio is no record
+                    return
         wav_path.unlink(missing_ok=True)
+        recording.unlink(missing_ok=True)
 
     def _fork_decoder(self, wav_path: Path, slot_start: float) -> None:
         self._fork_decoder_jt9(wav_path, slot_start)

@@ -7,6 +7,8 @@ absolute offset, writing the WAV, and the hung-decoder reap path.
 """
 
 import io
+import json
+import time
 import threading
 import tempfile
 import unittest
@@ -26,10 +28,11 @@ SR = 12000
 
 
 def _make_worker(tmpdir, *, mode="msk144", cadence=15.0, ring=None,
-                 msqp=None, decoder_path=""):
+                 msqp=None, decoder_path="", capture="usb"):
     """Construct a SlotWorker wired to a SlotClock + ring + latest-rtp box."""
     if ring is None:
-        ring = Ring(max_seconds=60, sample_rate=SR)
+        ring = Ring(max_seconds=60, sample_rate=SR,
+                    dtype=np.complex64 if capture == "iq" else np.float32)
     clock = SlotClock(cadence_sec=cadence, sample_rate=SR, settle_sec=1.5)
     lock = threading.Lock()
     box = {"rtp": None}
@@ -53,6 +56,7 @@ def _make_worker(tmpdir, *, mode="msk144", cadence=15.0, ring=None,
         clock_lock=lock,
         get_anchor_utc_now=_anchor_utc_now,
         msqp=msqp,
+        capture=capture,
     )
     return worker, clock, ring, box
 
@@ -484,6 +488,187 @@ class AudioFormatTests(unittest.TestCase):
                 self.assertEqual(len(line), 1)
                 self.assertIn(want, line[0])
                 self.assertIn("--msk-shmsg", line[0])
+
+
+def _decoding_jt9(tmpdir, help_text, line="000000  -5  0.2 1500 & CQ AC0G EM38"):
+    """A fake jt9 that decodes `line` from any WAV, or prints help for -h."""
+    fake = Path(tmpdir) / "decoding_jt9"
+    fake.write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys\n"
+        "if '-h' in sys.argv:\n"
+        f"    print({help_text!r})\n"
+        "else:\n"
+        + (f"    print({line!r})\n" if line else "")
+        + "    print('<DecodeFinished>   0   0        0')\n"
+    )
+    fake.chmod(0o755)
+    return str(fake)
+
+
+def _iq_slot(seconds=15, amp=0.01):
+    t = np.arange(seconds * SR) / SR
+    return (amp * np.exp(2j * np.pi * 1500.0 * t)).astype(np.complex64)
+
+
+def _read_f32_data(path, channels):
+    d = path.read_bytes()
+    at = d.index(b"data") + 8
+    x = np.frombuffer(d, dtype="<f4", offset=at)
+    return x.reshape(-1, channels) if channels > 1 else x
+
+
+def _iq_worker(td, *, decode=True, nonfinite=False):
+    """An I/Q-capture worker with a real MsqpChannel, a fake jt9, and one slot written + forked."""
+    from meteor_scatter.core.archive import Archive
+    from meteor_scatter.core.frontend import FrontendLog
+    from meteor_scatter.core.msqp import MsqpChannel
+    from meteor_scatter.core.noise_watch import NoiseWatch
+    jt9 = _decoding_jt9(td, "jt9 --msk144 --msk-shmsg", line=None if not decode else
+                        "000000  -5  0.2 1500 & CQ AC0G EM38")
+    ch = MsqpChannel(Archive(Path(td) / "arch", 90, 2), FrontendLog(), 28145000, "AC0G/B4",
+                     None, NoiseWatch(None), "test", preset="iq", capture="iq")
+    w, *_ = _make_worker(td, decoder_path=jt9, msqp=ch, capture="iq")
+    return w, ch
+
+
+def _run_slot(w, iq, t0=1797206370.0):
+    wav = w._write_spool_wav(iq, t0)
+    w._fork_decoder(wav, t0)
+    for _ in range(200):
+        w._reap_finished()
+        if not w._pending_procs:
+            break
+        time.sleep(0.05)
+    return wav
+
+
+class IqCaptureTests(unittest.TestCase):
+    def test_capture_default_usb(self):
+        with tempfile.TemporaryDirectory() as td:
+            w, *_ = _make_worker(td)
+            self.assertEqual(w._capture, "usb")
+            wav = w._write_spool_wav(np.full(SR, 0.01, dtype=np.float32), 900_000_000.0)
+            self.assertEqual(sorted(p.name for p in wav.parent.glob("*.wav")), [wav.name])
+
+    def test_bad_capture_is_refused(self):
+        with tempfile.TemporaryDirectory() as td:
+            with self.assertRaises(ValueError):
+                _make_worker(td, capture="lsb")
+
+    def test_decoded_slot_keeps_iq(self):
+        with tempfile.TemporaryDirectory() as td:
+            w, ch = _iq_worker(td)
+            iq = _iq_slot()
+            wav = _run_slot(w, iq)
+            kept = Path(td) / "arch" / "10m" / "20261213" / "261213_235930.wav"
+            self.assertTrue(kept.exists())
+            x = _read_f32_data(kept, 2)
+            self.assertEqual(x.shape, (15 * SR, 2))
+            np.testing.assert_array_equal(x[:, 0], iq.real)        # radiod's scale, no gain
+            np.testing.assert_array_equal(x[:, 1], iq.imag)
+            import struct
+            tag, nch, sr, _br, _al, bits = struct.unpack_from("<HHIIHH", kept.read_bytes(), 20)
+            self.assertEqual((tag, nch, sr, bits), (3, 2, SR, 32))
+            side = json.loads(kept.with_suffix(".json").read_text())
+            self.assertEqual(side["capture"], "iq")
+            self.assertEqual(side["iq_sample_rate"], SR)
+            self.assertEqual(side["iq_encoding"], "f32le")
+            self.assertEqual(side["iq_center_hz"], 28145000)
+            self.assertEqual(side["iq_filter_hz"], [50, 3000])
+            self.assertEqual(side["channel_requested"]["preset"], "iq")
+            self.assertEqual(side["channel_requested"]["low_edge"], 50.0)
+            self.assertEqual(side["channel_requested"]["high_edge"], 3000.0)
+            self.assertNotIn("nonfinite_samples", side)
+            self.assertFalse(wav.exists())                     # the audio file is gone
+            self.assertEqual(list(wav.parent.glob("*.wav")), [])
+            self.assertEqual(list(wav.parent.glob("*.iq.wav")), [])
+
+    def test_undecoded_slot_keeps_nothing(self):
+        with tempfile.TemporaryDirectory() as td:
+            w, ch = _iq_worker(td, decode=False)
+            wav = _run_slot(w, _iq_slot())
+            self.assertFalse(wav.exists())
+            self.assertFalse(wav.with_suffix(".iq.wav").exists())
+            self.assertEqual(list(wav.parent.glob("*.wav")), [])
+            self.assertEqual(list((Path(td) / "arch").rglob("*.wav")), [])
+            self.assertEqual(w.decodes_ok, 1)
+
+    def test_nonfinite_iq_slot(self):
+        with tempfile.TemporaryDirectory() as td:
+            w, ch = _iq_worker(td)
+            iq = _iq_slot()
+            iq[1000] = complex(np.nan, 0.0)
+            iq[2000] = complex(0.0, np.inf)
+            iq[3000] = complex(np.inf, np.nan)
+            with self.assertLogs("meteor_scatter.core.slot", "WARNING") as cm:
+                wav = w._write_spool_wav(iq, 1797206370.0)
+            warnings = [r for r in cm.records if "non-finite" in r.getMessage()]
+            self.assertEqual(len(warnings), 1)
+            self.assertIn("3", warnings[0].getMessage())
+            # the audio jt9 reads is finite, with a finite gain
+            audio = _read_f32_data(wav, 1)
+            self.assertTrue(np.all(np.isfinite(audio)))
+            self.assertTrue(np.isfinite(w._slot_stats[wav].gain_db))
+            self.assertTrue(np.isfinite(w._slot_stats[wav].noise_dbfs))
+            # jt9 still runs and the slot decodes
+            w._fork_decoder(wav, 1797206370.0)
+            for _ in range(200):
+                w._reap_finished()
+                if not w._pending_procs:
+                    break
+                time.sleep(0.05)
+            self.assertEqual(w.decodes_ok, 1)
+            # the kept I/Q is exactly as received, non-finite values included
+            kept = Path(td) / "arch" / "10m" / "20261213" / "261213_235930.wav"
+            x = _read_f32_data(kept, 2)
+            self.assertTrue(np.isnan(x[1000, 0]))
+            self.assertTrue(np.isinf(x[2000, 1]))
+            side = json.loads(kept.with_suffix(".json").read_text())
+            self.assertEqual(side["nonfinite_samples"], 3)
+            self.assertTrue(side["iq_contains_nonfinite"])
+            self.assertTrue(np.isfinite(side["wav_gain_db"]))
+            self.assertTrue(np.isfinite(side["noise_floor_dbfs"]))
+
+    def test_nonfinite_iq_undecoded_keeps_nothing(self):
+        with tempfile.TemporaryDirectory() as td:
+            w, ch = _iq_worker(td, decode=False)
+            iq = _iq_slot()
+            iq[5] = complex(np.nan, np.nan)
+            wav = _run_slot(w, iq)
+            self.assertEqual(list(wav.parent.glob("*.wav")), [])
+            self.assertEqual(list((Path(td) / "arch").rglob("*.wav")), [])
+
+    def test_nonfinite_audio_slot_in_usb_mode(self):
+        # The audio path: a NaN peak must not turn every sample, or the gain, into NaN.
+        with tempfile.TemporaryDirectory() as td:
+            jt9 = _fake_jt9(td, "jt9 --msk144 --msk-shmsg")
+            w, *_ = _make_worker(td, decoder_path=jt9)
+            x = np.full(SR, 0.01, dtype=np.float32)
+            x[7] = np.nan
+            with self.assertLogs("meteor_scatter.core.slot", "WARNING") as cm:
+                wav = w._write_spool_wav(x, 900_000_000.0)
+            self.assertEqual(len([r for r in cm.records if "non-finite" in r.getMessage()]), 1)
+            self.assertTrue(np.isfinite(w._slot_stats[wav].gain_db))
+            audio = _read_f32_data(wav, 1)
+            self.assertTrue(np.all(np.isfinite(audio)))
+            self.assertEqual(w._slot_stats[wav].nonfinite_samples, 1)
+
+    def test_clean_slot_logs_no_nonfinite_warning(self):
+        with tempfile.TemporaryDirectory() as td:
+            w, *_ = _make_worker(td, capture="iq")
+            with self.assertNoLogs("meteor_scatter.core.slot", "WARNING"):
+                w._write_spool_wav(_iq_slot(1), 900_000_000.0)
+
+    def test_iq_audio_matches_the_usb_audio_of_the_same_tone(self):
+        with tempfile.TemporaryDirectory() as td:
+            jt9 = _fake_jt9(td, "jt9 --msk144 --msk-shmsg")
+            w, *_ = _make_worker(td, decoder_path=jt9, capture="iq", msqp=_FakeMsqp())
+            iq = _iq_slot(1, amp=0.01)
+            wav = w._write_spool_wav(iq, 900_000_000.0)
+            audio = _read_f32_data(wav, 1)
+            gain = 10.0 ** (w._slot_stats[wav].gain_db / 20.0)
+            np.testing.assert_allclose(audio, iq.real * gain, rtol=1e-6)
 
 
 if __name__ == "__main__":

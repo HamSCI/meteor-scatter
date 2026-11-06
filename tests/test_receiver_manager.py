@@ -195,5 +195,45 @@ class MeteorScatterRecorderMultiSourceTests(unittest.TestCase):
             MeteorScatterRecorder(self._cfg(), [])
 
 
+class IqChannelRequestTests(unittest.TestCase):
+    """capture = "iq": the iq preset with the usb passband, by ka9q-python's keyword names."""
+
+    def _request(self, capture, preset):
+        import types
+        from unittest import mock
+        rx = _make_rx({"status": "rx.local"})
+        rx._control = mock.MagicMock()
+        rx._control.ensure_channel.return_value = mock.MagicMock(
+            multicast_address="239.1.2.3", port=5004)
+        ka9q = types.ModuleType("ka9q")
+        ka9q.MultiStream = mock.MagicMock(name="MultiStream")
+        sink = mock.MagicMock(frequency_hz=50_260_000, preset=preset, sample_rate=12000,
+                              encoding=4, capture=capture)
+        with mock.patch.dict(sys.modules, {"ka9q": ka9q}):
+            rx._add_sink_to_multi(sink, {})
+        return (rx._control.ensure_channel.call_args.kwargs,
+                ka9q.MultiStream.return_value.add_channel.call_args.kwargs)
+
+    def test_iq_asks_for_the_iq_preset_and_the_usb_passband(self):
+        for kw in self._request("iq", "iq"):
+            self.assertEqual(kw["preset"], "iq")
+            self.assertEqual((kw["low_edge"], kw["high_edge"]), (50.0, 3000.0))
+            self.assertEqual((kw["agc_enable"], kw["gain"]), (0, 0.0))
+            self.assertEqual(kw["sample_rate"], 12000)
+
+    def test_usb_asks_for_no_edges(self):
+        for kw in self._request("usb", "usb"):
+            self.assertEqual(kw["preset"], "usb")
+            self.assertNotIn("low_edge", kw)
+            self.assertNotIn("high_edge", kw)
+
+    def test_iq_channel_does_not_share_an_ssrc_with_the_usb_channel(self):
+        # radiod derives SSRCs (ka9q-python's hash covers the preset); we never compute one.
+        from ka9q.control import allocate_ssrc
+        usb = allocate_ssrc(50_260_000, "usb", 12000, False, 0.0, None, 4, "rx.local")
+        iq = allocate_ssrc(50_260_000, "iq", 12000, False, 0.0, None, 4, "rx.local")
+        self.assertNotEqual(usb, iq)
+
+
 if __name__ == "__main__":
     unittest.main()

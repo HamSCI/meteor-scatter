@@ -16,7 +16,9 @@ ping it hears. It is passive monitoring, not QSO operation.
 
 ```
 radiod (ka9q-radio)
-  │   RTP multicast, one stream per MSK144 channel (usb, 12 kHz, s16be)
+  │   RTP multicast, one stream per MSK144 channel (usb, 12 kHz, s16be;
+  │   or, with `capture = "iq"`, F32 I/Q, from which the audio is made and
+  │   whose I/Q is kept for every decoded slot — see docs/CONFIG.md)
   ▼
 meteor-scatter daemon (one per radiod)
   ├─ per-channel: RTP-anchored SlotClock → ring → T/R slot WAV
