@@ -70,8 +70,8 @@ class NoMsk144Decoder(RuntimeError):
     """No jt9 on this host decodes MSK144."""
 
 
-def jt9_decodes_msk144(path: str, run=subprocess.run) -> bool:
-    """True when ``path -h`` lists ``--msk144``.  False on any failure to run it."""
+def _help_lists(path: str, flag: str, run=subprocess.run) -> bool:
+    """True when ``path -h`` mentions ``flag``.  False on any failure to run it."""
     try:
         proc = run([path, "-h"], capture_output=True, timeout=JT9_PROBE_TIMEOUT_SEC)
     except (OSError, subprocess.SubprocessError):
@@ -79,7 +79,12 @@ def jt9_decodes_msk144(path: str, run=subprocess.run) -> bool:
     text = (proc.stdout or b"") + (proc.stderr or b"")
     if isinstance(text, bytes):
         text = text.decode("utf-8", errors="replace")
-    return "--msk144" in text
+    return flag in text
+
+
+def jt9_decodes_msk144(path: str, run=subprocess.run) -> bool:
+    """True when ``path -h`` lists ``--msk144``.  False on any failure to run it."""
+    return _help_lists(path, "--msk144", run)
 
 
 def jt9_reads_f32(path: str, run=subprocess.run) -> bool:
@@ -87,14 +92,7 @@ def jt9_reads_f32(path: str, run=subprocess.run) -> bool:
     32-bit float WAV for MSK144.  WSJT-X 3.0.2's jt9 lacks the option and refuses float
     input.  False on any failure to run it.
     """
-    try:
-        proc = run([path, "-h"], capture_output=True, timeout=JT9_PROBE_TIMEOUT_SEC)
-    except (OSError, subprocess.SubprocessError):
-        return False
-    text = (proc.stdout or b"") + (proc.stderr or b"")
-    if isinstance(text, bytes):
-        text = text.decode("utf-8", errors="replace")
-    return "--msk-shmsg" in text
+    return _help_lists(path, "--msk-shmsg", run)
 
 
 def resolve_jt9_binary(explicit: str = "", *, probe=jt9_decodes_msk144,

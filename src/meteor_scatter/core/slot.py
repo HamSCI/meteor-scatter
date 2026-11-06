@@ -112,6 +112,14 @@ class SlotWorker:
         self._decoder_path = _decoder.resolve_jt9_binary(decoder_path)
         # F32 audio only for a jt9 that reads it (our port); 16-bit otherwise.
         self._audio_f32 = _decoder.jt9_reads_f32(self._decoder_path)
+        logger.info(
+            "%s %d Hz: jt9 audio is %s (%s %s)",
+            mode.upper(), frequency_hz,
+            "F32" if self._audio_f32 else "16-bit",
+            self._decoder_path,
+            "lists --msk-shmsg: the port reads float WAV" if self._audio_f32
+            else "does not list --msk-shmsg, or its -h probe failed: WSJT-X reads 16-bit only",
+        )
         # Epoch-aligned, RTP-referenced slot timing (shared ka9q.SlotClock).
         # The clock is anchored by ChannelSink.on_samples off the GPS-true RTP
         # timestamp; this worker only harvests completed slots and extracts

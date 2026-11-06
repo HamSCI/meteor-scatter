@@ -202,10 +202,6 @@ class TestNormalizeLogLine(unittest.TestCase):
         self.assertEqual(row["grid"], "EN52")
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestJt9ReadsF32(unittest.TestCase):
     """jt9_reads_f32 is true only for the port, which lists --msk-shmsg."""
 
@@ -224,3 +220,7 @@ class TestJt9ReadsF32(unittest.TestCase):
         def boom(*a, **k):
             raise OSError("no such file")
         self.assertFalse(decoder.jt9_reads_f32("jt9", run=boom))
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -437,10 +437,6 @@ class ArchiveDecisionTests(unittest.TestCase):
         self.assertEqual(m.calls, [])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 def _fake_jt9(tmpdir, help_text):
     fake = Path(tmpdir) / "fake_jt9"
     fake.write_text(
@@ -477,3 +473,18 @@ class AudioFormatTests(unittest.TestCase):
             self.assertFalse(w._audio_f32)
             wav = w._write_spool_wav(np.full(SR, 0.01, dtype=np.float32), 900_000_000.0)
             self.assertEqual(self._fmt_bits(wav), (1, 16))
+
+    def test_init_logs_the_audio_format_and_why(self):
+        with tempfile.TemporaryDirectory() as td:
+            for text, want in (("jt9 --msk144 --msk-shmsg", "F32"), ("jt9 --msk144 -p", "16-bit")):
+                jt9 = _fake_jt9(td, text)
+                with self.assertLogs("meteor_scatter.core.slot", "INFO") as cm:
+                    _make_worker(td, decoder_path=jt9)
+                line = [r.getMessage() for r in cm.records if "jt9 audio" in r.getMessage()]
+                self.assertEqual(len(line), 1)
+                self.assertIn(want, line[0])
+                self.assertIn("--msk-shmsg", line[0])
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -113,6 +113,10 @@ def write_wav_f32(
     16 bits and no clipping, so ``clipped_samples`` is always 0.  Full scale is 1.0 (a
     16-bit sample s is s/32768), which is how UberSDR's jt9 reads float input.
 
+    The 16-bit path scales by 32767 and this path does not, so for the same ``gain_db`` the
+    two differ by 20*log10(32768/32767) = 0.0003 dB.  The peak-normalize target is the same
+    -1 dBFS in both.
+
     Format follows wspr-recorder's float WAV writer: IEEE float (tag 3), 18-byte fmt chunk
     with cbSize 0, 46-byte header.
     """
