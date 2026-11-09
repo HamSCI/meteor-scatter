@@ -1325,6 +1325,22 @@ class MsqpWavTests(unittest.TestCase):
         self.assertEqual(out.read_bytes(), self._expected(12.0))
         self.assertEqual([p.name for p in self.root.iterdir() if p.name.endswith(".part")], [])
 
+    def test_msqp_wav_refuses_a_non_numeric_scale_db(self):
+        # Final review M4: a hand-edited sidecar gives one line and exit 2, not a traceback.
+        for bad in ("12", [12.0], True, {"db": 1}, float("nan")):
+            with self.subTest(scale_db=bad):
+                self.a = Archive(self.root / f"arch-{type(bad).__name__}", 90, 2)
+                slot = self._slot(bad)
+                out = self.root / "o.wav"
+                rc, err = self._run(slot, out)
+                self.assertEqual(rc, 2, err)
+                self.assertIn("scale_db", err)
+                self.assertNotIn("Traceback", err)
+                self.assertEqual(len(err.strip().splitlines()), 1)
+                self.assertFalse(out.exists())
+                self.assertEqual([p.name for p in self.root.iterdir()
+                                  if p.name.endswith(".part")], [])
+
     def test_msqp_wav_refuses_output_inside_the_archive(self):
         from meteor_scatter.msqp_cli import derive_wav
         slot = self._slot(12.0)

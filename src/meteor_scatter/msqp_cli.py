@@ -10,6 +10,7 @@ import copy
 import errno
 import shutil
 import time
+import math
 import json
 import os
 import re
@@ -550,6 +551,12 @@ def derive_wav(slot: Path, out: Path | None = None, archive_root: Path | None = 
         raise ValueError(f"{side_name} is not a sidecar")
     if side.get("capture", "usb") != "iq":
         raise ValueError(f"{slot} is a usb-capture recording: it is 16-bit audio already")
+    scale_db = side.get("scale_db")
+    if scale_db is not None and (isinstance(scale_db, bool)
+                                 or not isinstance(scale_db, (int, float))
+                                 or not math.isfinite(scale_db)):
+        raise ValueError(f"{side_name}: scale_db must be a finite number or null; "
+                         f"it holds {scale_db!r:.40}")
     iq, rate = read_iq_bytes(wav_bytes)
     out = Path(out) if out else Path(Path(parts[-1]).stem + ".s16.wav")
     if os.path.islink(out):
@@ -570,7 +577,7 @@ def derive_wav(slot: Path, out: Path | None = None, archive_root: Path | None = 
     os.close(tfd)
     try:
         write_wav(Path(tmp), iq_to_usb_audio(iq), rate, int(side.get("iq_center_hz") or 0),
-                  scale_db=side.get("scale_db"))
+                  scale_db=scale_db)
         os.chmod(tmp, 0o644)
         os.replace(tmp, out)
     except BaseException:
