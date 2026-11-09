@@ -468,10 +468,38 @@ class AudioFormatTests(unittest.TestCase):
     def test_f32_for_the_port(self):
         with tempfile.TemporaryDirectory() as td:
             jt9 = _fake_jt9(td, "jt9 --msk144 --msk-shmsg")
-            w, *_ = _make_worker(td, decoder_path=jt9)
+            w, *_ = _make_worker(td, decoder_path=jt9, capture="iq")
             self.assertTrue(w._audio_f32)
-            wav = w._write_spool_wav(np.full(SR, 0.01, dtype=np.float32), 900_000_000.0)
+            wav = w._write_spool_wav(np.full(SR, 0.01, dtype=np.complex64), 900_000_000.0)
             self.assertEqual(self._fmt_bits(wav), (3, 32))
+
+    def test_usb_stays_16_bit_with_the_port(self):
+        # The usb path is the proof's control arm: installing the port must not change it.
+        with tempfile.TemporaryDirectory() as td:
+            jt9 = _fake_jt9(td, "jt9 --msk144 --msk-shmsg")
+            w, *_ = _make_worker(td, decoder_path=jt9)
+            self.assertFalse(w._audio_f32)
+            wav = w._write_spool_wav(np.full(SR, 0.01, dtype=np.float32), 900_000_000.0)
+            self.assertEqual(self._fmt_bits(wav), (1, 16))
+
+    def test_iq_with_302_writes_16_bit_and_keeps_the_iq(self):
+        # Review Focus 4: WSJT-X 3.0.2 (no --msk-shmsg) reads 16-bit only; I/Q capture still
+        # keeps the two-channel float I/Q beside the 16-bit audio.
+        with tempfile.TemporaryDirectory() as td:
+            jt9 = _fake_jt9(td, "jt9 --msk144 -p")
+            w, *_ = _make_worker(td, decoder_path=jt9, capture="iq")
+            self.assertFalse(w._audio_f32)
+            iq = np.full(SR, 0.01 + 0.02j, dtype=np.complex64)
+            wav = w._write_spool_wav(iq, 900_000_000.0)
+            self.assertEqual(self._fmt_bits(wav), (1, 16))
+            iq_path = w._iq_path(wav)
+            self.assertTrue(iq_path.exists())
+            import struct
+            tag, nch, _sr, _br, _al, bits = struct.unpack_from("<HHIIHH", iq_path.read_bytes(), 20)
+            self.assertEqual((tag, nch, bits), (3, 2, 32))
+            x = _read_f32_data(iq_path, 2)
+            np.testing.assert_array_equal(x[:, 0], iq.real)
+            np.testing.assert_array_equal(x[:, 1], iq.imag)
 
     def test_falls_back_to_s16_for_302(self):
         with tempfile.TemporaryDirectory() as td:
@@ -486,7 +514,7 @@ class AudioFormatTests(unittest.TestCase):
             for text, want in (("jt9 --msk144 --msk-shmsg", "F32"), ("jt9 --msk144 -p", "16-bit")):
                 jt9 = _fake_jt9(td, text)
                 with self.assertLogs("meteor_scatter.core.slot", "INFO") as cm:
-                    _make_worker(td, decoder_path=jt9)
+                    _make_worker(td, decoder_path=jt9, capture="iq")
                 line = [r.getMessage() for r in cm.records if "jt9 audio" in r.getMessage()]
                 self.assertEqual(len(line), 1)
                 self.assertIn(want, line[0])

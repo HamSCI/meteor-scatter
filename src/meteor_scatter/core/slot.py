@@ -159,15 +159,22 @@ class SlotWorker:
         # Resolve the jt9 binary once (arch-specific bundled binary, or an
         # explicit override).  An empty decoder_path means "auto-resolve".
         self._decoder_path = _decoder.resolve_jt9_binary(decoder_path)
-        # F32 audio only for a jt9 that reads it (our port); 16-bit otherwise.
-        self._audio_f32 = _decoder.jt9_reads_f32(self._decoder_path)
+        # F32 audio only in I/Q capture, and only for a jt9 that reads it (our port).  The usb
+        # path writes 16-bit audio whatever jt9 is installed: it is the proof's control arm,
+        # and its archive promises 16-bit WAVs that WSJT-X 3.0.2 opens.
+        reads_f32 = _decoder.jt9_reads_f32(self._decoder_path)
+        self._audio_f32 = capture == "iq" and reads_f32
+        if self._audio_f32:
+            why = "lists --msk-shmsg: the port reads float WAV"
+        elif capture != "iq":
+            why = "capture=usb keeps 16-bit audio whatever jt9 is installed"
+        else:
+            why = "does not list --msk-shmsg, or its -h probe failed: WSJT-X reads 16-bit only"
         logger.info(
             "%s %d Hz: capture=%s, jt9 audio is %s (%s %s)",
             mode.upper(), frequency_hz, capture,
             "F32" if self._audio_f32 else "16-bit",
-            self._decoder_path,
-            "lists --msk-shmsg: the port reads float WAV" if self._audio_f32
-            else "does not list --msk-shmsg, or its -h probe failed: WSJT-X reads 16-bit only",
+            self._decoder_path, why,
         )
         # Epoch-aligned, RTP-referenced slot timing (shared ka9q.SlotClock).
         # The clock is anchored by ChannelSink.on_samples off the GPS-true RTP
