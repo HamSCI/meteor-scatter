@@ -5,8 +5,8 @@
 
 Each log is a <radiod>-msk144.log: "YYYY/MM/DD HH:MM:SS <snr> <dt> <freq_hz> & <message>".
 A slot is (slot start, band); a band is the dial's MHz.  Within a slot a message counts once,
-at its best SNR, since one meteor can give several pings of the same message.  Prints every
-slot and message heard by one side only, the SNR difference on messages both heard, and totals.
+at its best SNR, since one meteor can give several pings of the same message.  Prints a row
+for every message, with both SNRs and the difference where both sides heard it, and totals.
 Exit 0 always: the verdict is for a person to read.
 """
 import re
@@ -47,7 +47,8 @@ def compare(old, new):
         for msg in sorted(set(o) | set(n)):
             if msg in o and msg in n:
                 tally["msgs_both"] += 1
-                deltas.append(n[msg] - o[msg])
+                deltas.append((key, msg, n[msg] - o[msg]))
+                rows.append((key, "both", msg, (o[msg], n[msg])))
             elif msg in o:
                 tally["msgs_old_only"] += 1
                 rows.append((key, "old only", msg, o[msg]))
@@ -71,8 +72,14 @@ def main(argv):
     if hi and len(hi) == 16:
         hi += ":59"
     tally, deltas, rows = compare(load(args[0], lo, hi), load(args[1], lo, hi))
+    deltas = [d for _key, _msg, d in deltas]
     for (ts, band), side, msg, snr in rows:
-        print(f"{ts}  {band:3d} MHz  {side:8s}  {snr:+3d} dB  {msg}")
+        if side == "both":
+            old_snr, new_snr = snr
+            print(f"{ts}  {band:3d} MHz  {side:8s}  old={old_snr:+d} new={new_snr:+d} "
+                  f"d={new_snr - old_snr:+d}  {msg}")
+        else:
+            print(f"{ts}  {band:3d} MHz  {side:8s}  {snr:+3d} dB  {msg}")
     print("")
     print(f"slots: both {tally['slots_both']}, old only {tally['slots_old_only']}, "
           f"new only {tally['slots_new_only']}")
