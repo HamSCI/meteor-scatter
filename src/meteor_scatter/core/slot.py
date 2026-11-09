@@ -96,6 +96,14 @@ TIMING_NOTES = [
     "timestamp of sample 0.",
     "slot_start_utc_exact is the requested slot boundary; it lies within half a sample of the "
     "UTC of sample 0.",
+    "batch_rtp_basis names how each delivered batch's first sample got its RTP timestamp, and so "
+    "how far these labels can be trusted.  'delivered_rtp_start': ka9q-python's resequencer "
+    "reported it (gap fills included); the labels hold to a sample.  'last_packet_minus_n': an "
+    "older ka9q-python gave only the last received packet's header, and the label is that minus "
+    "the batch length, which runs one packet early (each sample's true RTP and UTC lie one "
+    "packet later than the formulas above give: about 20 ms if radiod sends a 20 ms frame per "
+    "packet), more under loss.  'mixed': the basis changed while this anchor held, so the "
+    "labels are not consistent.  null: no basis was recorded.",
 ]
 
 
@@ -141,6 +149,7 @@ class SlotWorker:
         capture: str = "usb",
         get_anchor: Optional[Callable[[], object]] = None,
         client_radiod: Optional[str] = None,
+        get_rtp_basis: Optional[Callable[[], Optional[str]]] = None,
     ):
         if capture not in CAPTURE_MODES:
             raise ValueError(f"capture must be one of {CAPTURE_MODES}; got {capture!r}")
@@ -197,6 +206,8 @@ class SlotWorker:
         # each slot's sidecar timing block is built from it at the moment the slot is cut.
         self._get_anchor = get_anchor
         self._client_radiod = client_radiod
+        # Returns how the sink labels each batch's first sample (ChannelSink.rtp_basis).
+        self._get_rtp_basis = get_rtp_basis
         self._slot_timing: dict[Path, dict] = {}
         # Conditions that last across slots: key -> [slots so far, samples so far].
         self._episodes: dict[str, list[int]] = {}
@@ -325,6 +336,8 @@ class SlotWorker:
                             "anchor_rtp": int(self._clock.rtp_of_offset(0)),
                             "label_anchor_utc": float(anchor_utc_now),
                             "first_sample_offset": int(start_off),
+                            "batch_rtp_basis": (self._get_rtp_basis()
+                                                if self._get_rtp_basis is not None else None),
                         }
                     harvested.append((start_off, self._next_boundary_utc, snapshot))
                     self._next_boundary_utc += self._cadence_sec
@@ -459,6 +472,7 @@ class SlotWorker:
             "first_sample_offset": None,
             "anchor_rtp": None,
             "label_anchor_utc": None,
+            "batch_rtp_basis": None,
             "sample_rate": int(self._ring.sample_rate),
             "anchor": None,
             "timing_authority_applied": None,
@@ -471,6 +485,7 @@ class SlotWorker:
         block["first_sample_offset"] = off
         block["first_sample_rtp"] = (anchor_rtp + off) & 0xFFFFFFFF
         block["label_anchor_utc"] = snapshot["label_anchor_utc"]
+        block["batch_rtp_basis"] = snapshot.get("batch_rtp_basis")
         anchor = snapshot["anchor"]
         if anchor is not None:
             block["anchor"] = {"utc": anchor.utc, "source": anchor.source,

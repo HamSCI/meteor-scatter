@@ -206,14 +206,24 @@ output path inside the station's archive.
 
 What the sidecar's fields let an analyst do.
 
-Timing.  The "timing" block fixes each sample in UTC.  Its fields are
+Timing.  The "timing" block labels each sample in UTC.  Its fields are
 slot_start_utc_exact (the requested slot boundary), first_sample_rtp (the RTP
 timestamp of sample 0), anchor_rtp, label_anchor_utc, first_sample_offset,
-sample_rate and the anchor details.  The block's own notes give the rule:
+batch_rtp_basis, sample_rate and the anchor details.  The block's own notes
+give the rule:
 
     utc(sample i) = label_anchor_utc + (first_sample_offset + i) / sample_rate
 
 and first_sample_rtp = (anchor_rtp + first_sample_offset) mod 2**32.
+
+How far to trust those labels depends on batch_rtp_basis.  With
+"delivered_rtp_start" the receiving software reported the RTP timestamp of
+each batch's first sample, and the labels hold to one sample.  With
+"last_packet_minus_n" an older version gave only the last packet's header;
+each sample then lies one radio packet later than the rule says (about 20 ms
+if the radio sends one 20 ms frame per packet), and more where packets were
+lost.  "mixed" means the basis changed during the recording, and a null
+basis means none was recorded.
 
 Gain.  gain_chain lists every gain stage from the antenna to the file, in
 order, each with the key that records it.  Those keys are frontend (the RF

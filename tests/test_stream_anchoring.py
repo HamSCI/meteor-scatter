@@ -348,3 +348,89 @@ class TestSinkTellsMsqpItsSsrc(unittest.TestCase):
             self.assertEqual(msqp.ssrc, 4343)
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
+
+
+@dataclass
+class _DeliveredQuality:
+    """StreamQuality as ka9q-python fills it now: delivered_rtp_start is the first-sample RTP of
+    the delivered batch; last_rtp_timestamp is the header of the last packet RECEIVED, which is
+    that packet's FIRST sample, so it sits one packet (PKT samples) short of the batch's end."""
+    delivered_rtp_start: object = None
+    last_rtp_timestamp: int = 0
+
+
+PKT = 240   # one 20 ms packet at 12 kHz
+
+
+class TestBatchRtpBasis(unittest.TestCase):
+    """Final review I2: label each batch from delivered_rtp_start when ka9q-python gives it;
+    fall back to last_rtp_timestamp - n (one packet early) and say so in the sidecar."""
+
+    def _feed(self, sink, quality, n=2400):
+        with mock.patch("ka9q.rtp_to_utc", return_value=1_700_000_500.0):
+            with mock.patch("hamsci_dsp.timing.time.time", return_value=1_700_000_500.0):
+                with mock.patch.object(sink._ring, "push") as push:
+                    sink.on_samples(np.zeros(n, dtype=np.float32), quality)
+        return push
+
+    def test_labels_from_delivered_rtp_start(self):
+        sink = _make_sink(authority_reader=_NoAuthority())
+        sink.set_channel_info(_FakeChannelInfo())
+        try:
+            n = 2400
+            r0 = 1_000_000
+            p1 = self._feed(sink, _DeliveredQuality(r0, r0 + n - PKT), n)
+            self.assertEqual(sink._anchor_rtp, r0)          # old formula: r0 - PKT
+            self.assertEqual(p1.call_args[0][1], 0)
+            self.assertEqual(sink._latest_rtp, r0 + n)
+            self.assertEqual(sink.rtp_basis, "delivered_rtp_start")
+            p2 = self._feed(sink, _DeliveredQuality(r0 + n, r0 + 2 * n - PKT), n)
+            self.assertEqual(p2.call_args[0][1], n)
+            self.assertEqual(sink._latest_rtp, r0 + 2 * n)
+            self.assertEqual(sink._slot_worker._get_rtp_basis(), "delivered_rtp_start")
+        finally:
+            _cleanup_sink(sink)
+
+    def test_delivered_rtp_start_of_zero_is_a_label(self):
+        # 0 is a real RTP timestamp after a wrap, not "absent".
+        sink = _make_sink(authority_reader=_NoAuthority())
+        sink.set_channel_info(_FakeChannelInfo())
+        try:
+            self._feed(sink, _DeliveredQuality(0, 2400 - PKT))
+            self.assertEqual(sink._anchor_rtp, 0)
+            self.assertEqual(sink.rtp_basis, "delivered_rtp_start")
+        finally:
+            _cleanup_sink(sink)
+
+    def test_falls_back_to_last_packet_minus_n(self):
+        sink = _make_sink(authority_reader=_NoAuthority())
+        sink.set_channel_info(_FakeChannelInfo())
+        try:
+            n = 2400
+            self._feed(sink, _FakeQuality(last_rtp_timestamp=1_000_000 + n), n)
+            self.assertEqual(sink._anchor_rtp, 1_000_000)
+            self.assertEqual(sink._latest_rtp, 1_000_000 + n)
+            self.assertEqual(sink.rtp_basis, "last_packet_minus_n")
+            # a producer that has the field but leaves it None falls back too
+            sink.on_stream_restored(_FakeChannelInfo())
+            self.assertIsNone(sink.rtp_basis)
+            self._feed(sink, _DeliveredQuality(None, 5_000_000 + n), n)
+            self.assertEqual(sink._anchor_rtp, 5_000_000)
+            self.assertEqual(sink.rtp_basis, "last_packet_minus_n")
+        finally:
+            _cleanup_sink(sink)
+
+    def test_a_change_of_basis_marks_mixed_and_logs_once(self):
+        sink = _make_sink(authority_reader=_NoAuthority())
+        sink.set_channel_info(_FakeChannelInfo())
+        try:
+            n = 2400
+            r0 = 1_000_000
+            self._feed(sink, _DeliveredQuality(r0, r0 + n - PKT), n)
+            with self.assertLogs("meteor_scatter.core.stream", "WARNING") as cm:
+                self._feed(sink, _FakeQuality(last_rtp_timestamp=r0 + 2 * n), n)
+                self._feed(sink, _FakeQuality(last_rtp_timestamp=r0 + 3 * n), n)
+            self.assertEqual(sink.rtp_basis, "mixed")
+            self.assertEqual(len([r for r in cm.records if "basis" in r.getMessage()]), 1)
+        finally:
+            _cleanup_sink(sink)

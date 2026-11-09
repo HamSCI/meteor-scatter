@@ -29,7 +29,7 @@ SR = 12000
 
 def _make_worker(tmpdir, *, mode="msk144", cadence=15.0, ring=None,
                  msqp=None, decoder_path="", capture="usb", get_anchor=None,
-                 client_radiod=None):
+                 client_radiod=None, get_rtp_basis=None):
     """Construct a SlotWorker wired to a SlotClock + ring + latest-rtp box."""
     if ring is None:
         ring = Ring(max_seconds=60, sample_rate=SR,
@@ -60,6 +60,7 @@ def _make_worker(tmpdir, *, mode="msk144", cadence=15.0, ring=None,
         capture=capture,
         get_anchor=get_anchor,
         client_radiod=client_radiod,
+        get_rtp_basis=get_rtp_basis,
     )
     return worker, clock, ring, box
 
@@ -892,9 +893,11 @@ class SidecarTimingTests(unittest.TestCase):
                          capture=capture)
         self.anchor = self._anchor(self.PIN_UTC)
         self.cur_anchor = {"a": self.anchor}
+        self.basis = {"b": "delivered_rtp_start"}
         w, clock, ring, box = _make_worker(td, decoder_path=jt9, msqp=ch, capture=capture,
                                            get_anchor=lambda: self.cur_anchor["a"],
-                                           client_radiod="rx.local")
+                                           client_radiod="rx.local",
+                                           get_rtp_basis=lambda: self.basis["b"])
         clock.anchor(self.ANCHOR_RTP, self.PIN_UTC)
         box["anchor_utc"] = self.LABEL_ANCHOR_UTC
         n = 330000
@@ -932,6 +935,8 @@ class SidecarTimingTests(unittest.TestCase):
         self.assertEqual(t["first_sample_offset"], self.OFF)
         self.assertEqual(t["first_sample_rtp"], (self.ANCHOR_RTP + self.OFF) & 0xFFFFFFFF)
         self.assertEqual(t["label_anchor_utc"], self.LABEL_ANCHOR_UTC)
+        self.assertEqual(t["batch_rtp_basis"], "delivered_rtp_start")
+        self.assertTrue(any("batch_rtp_basis" in n for n in t["notes"]))
         # the relation the notes state: sample 0's UTC reproduces the slot start to a sample
         utc0 = t["label_anchor_utc"] + t["first_sample_offset"] / sr
         self.assertLessEqual(abs(utc0 - t["slot_start_utc_exact"]), 0.5 / sr)
@@ -997,6 +1002,7 @@ class SidecarTimingTests(unittest.TestCase):
             self.assertIsNone(t["anchor"])
             self.assertIsNone(t["timing_authority_applied"])
             self.assertIsNone(t["first_sample_offset"])
+            self.assertIsNone(t["batch_rtp_basis"])
 
 
 class InsufficientSamplesEpisodeTests(unittest.TestCase):

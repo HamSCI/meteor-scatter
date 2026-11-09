@@ -126,6 +126,7 @@ class ChannelSink:
             capture=capture,
             get_anchor=lambda: self._anchor,
             client_radiod=client_radiod,
+            get_rtp_basis=lambda: self._rtp_basis,
         )
 
         self._total_delivered: int = 0
@@ -145,6 +146,8 @@ class ChannelSink:
         # The fixed RTP reference the ring + grid are keyed to (set once at the
         # first anchor; reset only on a genuine stream restart).
         self._anchor_rtp: Optional[int] = None
+        # How each batch's first sample got its RTP label since the anchor (see rtp_basis).
+        self._rtp_basis: Optional[str] = None
         # §18 authority reader — supplies the dynamic RTP→UTC offset.
         self._reader = authority_reader if authority_reader is not None else AuthorityReader()
 
@@ -246,7 +249,8 @@ class ChannelSink:
 
         Each batch is tagged with the absolute sample offset of its FIRST
         sample, derived from radiod's GPS-true RTP timestamp
-        (``quality.last_rtp_timestamp``) via the shared ``ka9q.SlotClock`` —
+        (``quality.delivered_rtp_start``, else ``quality.last_rtp_timestamp``
+        minus the batch length) via the shared ``ka9q.SlotClock`` —
         NOT from a delivered-sample-count projection.  This is the fix for
         the long-standing "decodes=N/N but spots=0" drift (the audio handed
         to the decoder now always lines up with the RTP grid point its WAV
@@ -256,18 +260,25 @@ class ChannelSink:
         n = len(samples)
         if n == 0:
             return
-        last_rtp = getattr(quality, "last_rtp_timestamp", None)
-        if not last_rtp:
-            # No RTP timestamp yet (pre-first-packet) — nothing to anchor to.
-            return
-        last_rtp = int(last_rtp) & 0xFFFFFFFF
-        # RTP timestamp of this batch's first sample.  The batch ends ~at the
-        # last packet's timestamp; first sample = last_rtp - n.  The <1-packet
-        # constant bias from ignoring the final packet's own length is
-        # harmless (jt9 --msk144 tolerates the slot's settle window) and does
-        # NOT accumulate — every batch is pinned to a true GPS-stamped RTP
-        # value.
-        batch_first_rtp = (last_rtp - n) & 0xFFFFFFFF
+        # RTP timestamp of this batch's first sample.  ka9q-python's resequencer reports it as
+        # quality.delivered_rtp_start (gap fills included): the true label.  An older
+        # ka9q-python gives only last_rtp_timestamp, the header of the last packet RECEIVED,
+        # which is that packet's FIRST sample; last_rtp - n then runs one packet early, and
+        # more under loss.  jt9 tolerates that, the sidecar's timing does not, so the basis
+        # goes into every sidecar (batch_rtp_basis).
+        delivered = getattr(quality, "delivered_rtp_start", None)
+        if delivered is not None:
+            batch_first_rtp = int(delivered) & 0xFFFFFFFF
+            basis = "delivered_rtp_start"
+        else:
+            last_rtp = getattr(quality, "last_rtp_timestamp", None)
+            if not last_rtp:
+                # No RTP timestamp yet (pre-first-packet) — nothing to anchor to.
+                return
+            batch_first_rtp = (int(last_rtp) - n) & 0xFFFFFFFF
+            basis = "last_packet_minus_n"
+        # Just past the newest delivered sample, in either basis.
+        last_rtp = (batch_first_rtp + n) & 0xFFFFFFFF
 
         try:
             with self._clock_lock:
@@ -281,10 +292,19 @@ class ChannelSink:
                     # re-pin (see _anchor_utc_now).  Set once; only changes on a
                     # genuine stream restart (on_stream_restored resets the clock).
                     self._anchor_rtp = batch_first_rtp
+                    self._rtp_basis = basis
                     logger.info(
                         "%s %d Hz: SlotClock anchored via %s",
                         self._mode.upper(), self._frequency_hz, source,
                     )
+                elif basis != self._rtp_basis and self._rtp_basis != "mixed":
+                    logger.warning(
+                        "%s %d Hz: batch RTP label basis changed from %s to %s while the "
+                        "anchor held; sidecars say batch_rtp_basis=mixed until the next "
+                        "re-anchor",
+                        self._mode.upper(), self._frequency_hz, self._rtp_basis, basis,
+                    )
+                    self._rtp_basis = "mixed"
                 start_off = self._clock.offset_of_rtp(batch_first_rtp)
         except SlotClockDesyncError as exc:
             # F18: recover like SlotClock.advance() — drop the anchor (and
@@ -365,8 +385,15 @@ class ChannelSink:
         self._anchor_source = ""
         self._anchor_rtp = None
         self._anchor = None
+        self._rtp_basis = None
         # New RTP reference space -> the SlotWorker must re-seed its boundary.
         self._slot_worker.reset_boundary()
+
+    @property
+    def rtp_basis(self) -> Optional[str]:
+        """How batches are labelled since the anchor: "delivered_rtp_start",
+        "last_packet_minus_n", "mixed", or None before anchoring."""
+        return self._rtp_basis
 
     @property
     def preset(self) -> str:
