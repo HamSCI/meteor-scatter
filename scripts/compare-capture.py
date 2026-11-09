@@ -7,8 +7,10 @@ Each log is a <radiod>-msk144.log: "YYYY/MM/DD HH:MM:SS <snr> <dt> <freq_hz> & <
 A slot is (slot start, band); a band is the dial's MHz.  Within a slot a message counts once,
 at its best SNR, since one meteor can give several pings of the same message.  Prints a row
 for every message, with both SNRs and the difference where both sides heard it, and totals.
-Exit 0 always: the verdict is for a person to read.
+Exit 0 after a comparison: the verdict is for a person to read.  Exit 2 for bad
+arguments or a log it cannot read.
 """
+import argparse
 import re
 import statistics
 import sys
@@ -58,20 +60,33 @@ def compare(old, new):
     return tally, deltas, rows
 
 
+def parse_args(argv):
+    p = argparse.ArgumentParser(
+        prog="compare-capture.py",
+        description="Compare two meteor-scatter decode logs slot by slot.")
+    p.add_argument("old_log", metavar="OLD_LOG")
+    p.add_argument("new_log", metavar="NEW_LOG")
+    p.add_argument("--from", dest="lo", metavar='"YYYY/MM/DD HH:MM"',
+                   help="first slot to count (inclusive)")
+    p.add_argument("--to", dest="hi", metavar='"YYYY/MM/DD HH:MM"',
+                   help="last minute to count (inclusive: HH:MM runs to HH:MM:59)")
+    return p.parse_args(argv)
+
+
 def main(argv):
-    args = [a for a in argv if not a.startswith("--")]
-    opts = {}
-    for i, a in enumerate(argv):
-        if a in ("--from", "--to") and i + 1 < len(argv):
-            opts[a[2:]] = argv[i + 1]
-            args = [x for x in args if x != argv[i + 1]]
-    if len(args) != 2:
-        print(__doc__.strip().splitlines()[2].strip(), file=sys.stderr)
-        return 2
-    lo, hi = opts.get("from"), opts.get("to")
+    try:
+        a = parse_args(argv)
+    except SystemExit as e:          # argparse has printed the usage and the reason
+        return e.code
+    lo, hi = a.lo, a.hi
     if hi and len(hi) == 16:
         hi += ":59"
-    tally, deltas, rows = compare(load(args[0], lo, hi), load(args[1], lo, hi))
+    try:
+        old, new = load(a.old_log, lo, hi), load(a.new_log, lo, hi)
+    except OSError as e:
+        print(f"compare-capture.py: cannot read {e.filename}: {e.strerror}", file=sys.stderr)
+        return 2
+    tally, deltas, rows = compare(old, new)
     deltas = [d for _key, _msg, d in deltas]
     for (ts, band), side, msg, snr in rows:
         if side == "both":

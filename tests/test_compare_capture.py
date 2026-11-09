@@ -72,3 +72,40 @@ def test_main_prints_a_row_for_every_shared_message(tmp_path, capsys):
     assert all(t in w4.split() for t in ("old=-1", "new=+1", "d=+2"))
     k1 = next(ln for ln in both if "K1ABC W2XYZ FN20" in ln)
     assert all(t in k1.split() for t in ("old=+2", "new=+2", "d=+0"))
+
+
+def test_to_alone_pads_the_minute_to_59_seconds(tmp_path, capsys):
+    # "--to 09:00" must keep the 09:00:15 slot: the whole minute, not the instant 09:00.
+    o, n = _logs(tmp_path)
+    assert cc.main([str(o), str(n), "--to", "2026/11/08 09:00"]) == 0
+    out = capsys.readouterr().out
+    assert "slots: both 2, old only 0, new only 0" in out
+
+
+def test_to_equals_value_form(tmp_path, capsys):
+    o, n = _logs(tmp_path)
+    assert cc.main([str(o), str(n), "--to=2026/11/08 09:00", "--from=2026/11/08 09:00"]) == 0
+    out = capsys.readouterr().out
+    assert "slots: both 2, old only 0, new only 0" in out
+
+
+def test_bad_arguments_exit_2(tmp_path, capsys):
+    o, n = _logs(tmp_path)
+    for argv in ([str(o)],                                   # one log only
+                 [str(o), str(n), "--to"],                   # trailing option with no value
+                 [str(o), str(n), "--from"],
+                 [str(o), str(n), "--bogus", "x"],           # unknown option
+                 [str(o), str(n), str(o)]):                  # a third log
+        assert cc.main(argv) == 2, argv
+        err = capsys.readouterr().err
+        assert "usage" in err.lower(), argv
+
+
+def test_missing_file_is_one_line_exit_2(tmp_path, capsys):
+    o, _ = _logs(tmp_path)
+    assert cc.main([str(o), str(tmp_path / "nope.log")]) == 2
+    captured = capsys.readouterr()
+    lines = captured.err.strip().splitlines()
+    assert len(lines) == 1 and "nope.log" in lines[0]
+    assert "Traceback" not in captured.err
+    assert captured.out == ""
