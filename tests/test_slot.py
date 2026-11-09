@@ -140,6 +140,47 @@ class SlotHarvestTickTests(unittest.TestCase):
             self.assertIn(168000, captured)
 
 
+class _RenamedClock:
+    """A SlotClock whose private ``_anchor_rtp`` has been renamed away (a ka9q-python update)."""
+    def __init__(self, real):
+        object.__setattr__(self, "_real", real)
+
+    def __getattr__(self, name):
+        if name == "_anchor_rtp":
+            raise AttributeError(name)
+        return getattr(self._real, name)
+
+
+class AnchorRtpGuardTests(unittest.TestCase):
+    """Final review M2: the harvest guard reads ka9q's private SlotClock._anchor_rtp.  If a
+    ka9q-python update renames it, the worker must say so loudly, once, not cut no slots in
+    silence."""
+
+    def test_missing_anchor_rtp_logs_one_error(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worker, clock, ring, box = _make_worker(tmpdir)
+            clock.anchor(rtp_timestamp=0, utc=900_000_000.0)
+            for i in range(40):
+                ring.push(np.ones(6000, dtype=np.float32), start_offset=i * 6000)
+            box["rtp"] = clock.rtp_of_offset(40 * 6000)
+            worker._clock = _RenamedClock(clock)
+            worker._fork_decoder = lambda wav, start: None
+            with self.assertLogs("meteor_scatter.core.slot", "ERROR") as cm:
+                for _ in range(3):
+                    worker._tick()
+            errors = [r for r in cm.records if r.levelname == "ERROR"]
+            self.assertEqual(len(errors), 1)
+            self.assertIn("_anchor_rtp", errors[0].getMessage())
+            self.assertEqual(list((Path(tmpdir) / "msk144").glob("*.wav")), [])
+
+    def test_present_anchor_rtp_logs_no_error(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worker, clock, ring, box = _make_worker(tmpdir)
+            box["rtp"] = 123456            # not anchored: _anchor_rtp exists and is None
+            with self.assertNoLogs("meteor_scatter.core.slot", "ERROR"):
+                worker._tick()
+
+
 class DecodeTimeoutTests(unittest.TestCase):
     """A hung jt9 must be killed + reaped, not leaked forever.
 

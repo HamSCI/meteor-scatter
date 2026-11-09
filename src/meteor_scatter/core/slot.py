@@ -209,6 +209,7 @@ class SlotWorker:
         # Returns how the sink labels each batch's first sample (ChannelSink.rtp_basis).
         self._get_rtp_basis = get_rtp_basis
         self._slot_timing: dict[Path, dict] = {}
+        self._anchor_rtp_missing = False
         # Conditions that last across slots: key -> [slots so far, samples so far].
         self._episodes: dict[str, list[int]] = {}
         # Next clean cadence-multiple UTC boundary to emit (None until first).
@@ -292,7 +293,19 @@ class SlotWorker:
         # This is what lets the grid FOLLOW radiod's RTP↔UTC slide: anchor_rtp
         # never moves (so ring offsets stay valid), but its UTC — and thus the
         # RTP offset of each clean cadence boundary — tracks radiod every tick.
-        anchor_rtp_seen = getattr(self._clock, "_anchor_rtp", None)
+        # SlotClock has no public reading of its anchor RTP, so the guard below reads the
+        # private _anchor_rtp.  If a ka9q-python update renames it, no slot can be cut: say so
+        # once, loudly, rather than stop decoding in silence.
+        if not hasattr(self._clock, "_anchor_rtp"):
+            if not self._anchor_rtp_missing:
+                self._anchor_rtp_missing = True
+                logger.error(
+                    "%s %d Hz: ka9q SlotClock has no _anchor_rtp attribute (ka9q-python "
+                    "changed?); the harvest guard cannot check the anchor, so NO slots are "
+                    "cut or decoded; logged once",
+                    self._mode.upper(), self._frequency_hz)
+            return
+        anchor_rtp_seen = self._clock._anchor_rtp
         anchor_utc_now = self._get_anchor_utc_now()
         if anchor_utc_now is None:
             return
