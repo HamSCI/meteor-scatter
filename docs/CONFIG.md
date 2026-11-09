@@ -46,6 +46,17 @@ An explicit decoder override that resolves to neither an existing file
 nor a `which`-able name is a `validate` **warning** (not a failure) — the
 recorder still records slots, it just cannot decode them.
 
+**A second instance on the same radiod needs its own directories.** The
+F32 side-by-side proof runs one `capture = "usb"` instance and one
+`capture = "iq"` instance on one radiod. Give the second instance its own
+`spool_dir`, `log_dir` and `[msqp] archive_dir`. Spool file names come
+from the slot time and the frequency, and the log name comes from the
+radiod id. Two instances that share these paths therefore write spool
+files under the same names and append to the same
+`<radiod_id>-msk144.log`. The archive also collides when both instances
+share a reporter id. `compare-capture.py` then has no separate old and
+new logs to compare. Nothing checks for this at startup.
+
 ## `[msqp]` (optional)
 
 Settings for the MSQP capture: the archive of decoded recordings and the Zenodo draft.
