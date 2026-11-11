@@ -18,6 +18,7 @@ dependencies = [
     "hamsci-dsp>=0.8.0",
     "numpy>=1.24.0",
     "tomli>=2.0; python_version < '3.11'",
+    "zstandard>=0.22.0",
 ]
 
 [project.optional-dependencies]

@@ -70,6 +70,7 @@ freqs_hz      = [
 #[msqp]
 #archive_max_days  = 90
 #archive_max_gb    = 2
+#archive_dtype    = "complex64"   # "f16" keeps capture = "iq" slots as half-size <stem>.iq16.zst
 #operator          = ""   # operator names and calls, for the Zenodo description
 #contact_email     = ""
 #antenna           = ""

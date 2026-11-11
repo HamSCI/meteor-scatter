@@ -244,7 +244,8 @@ class MsqpRuntime:
         self.instance_id = instance_id
         self._spool_root = Path(spool_root) if spool_root else None
         self.archive = Archive(Path(msqp_cfg["archive_dir"]) / instance_dirname(instance_id),
-                               msqp_cfg["archive_max_days"], msqp_cfg["archive_max_gb"])
+                               msqp_cfg["archive_max_days"], msqp_cfg["archive_max_gb"],
+                               msqp_cfg.get("archive_dtype", "complex64"))
         self.frontend = FrontendLog()
         self._listener = None
         self._version = version

@@ -468,7 +468,8 @@ def _resolve_instance(args):
     if not grid:
         raise PackageRefused("set [station] grid_square in the instance config first")
     archive = Archive(Path(cfg["archive_dir"]) / instance_dirname(instance_id),
-                      cfg["archive_max_days"], cfg["archive_max_gb"])
+                      cfg["archive_max_days"], cfg["archive_max_gb"],
+                      cfg["archive_dtype"])
     return config, cfg, archive, callsign, grid
 
 

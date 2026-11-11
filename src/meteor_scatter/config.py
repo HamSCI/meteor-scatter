@@ -107,6 +107,9 @@ DEFAULTS: dict[str, Any] = {
 
 MSQP_DEFAULTS: dict[str, Any] = {
     "archive_dir": "/var/lib/meteor-scatter/archive",
+    # "complex64" keeps a decoded slot's I/Q as the F32 WAV; "f16" keeps it as <stem>.iq16.zst
+    # (binary16 x 4096, half the size).  Only capture = "iq" slots have I/Q to convert.
+    "archive_dtype": "complex64",
     "archive_max_days": 90,
     "archive_max_gb": 2.0,
     "operator": "",
@@ -213,6 +216,9 @@ def get_msqp(config: dict) -> dict:
                 "zenodo_url", "zenodo_community"):
         if not isinstance(raw[key], str):
             raise ValueError(f"msqp.{key} must be a string; got {raw[key]!r}")
+    if raw["archive_dtype"] not in ("complex64", "f16"):
+        raise ValueError(f'msqp.archive_dtype must be "complex64" or "f16"; '
+                         f'got {raw["archive_dtype"]!r}')
     for key in ("archive_dir", "zenodo_token_path"):
         if not isinstance(raw[key], str) or not raw[key]:
             raise ValueError(f"msqp.{key} must be a non-empty string; got {raw[key]!r}")
