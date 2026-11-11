@@ -167,6 +167,13 @@ frequency and iq_filter_hz the passband edges, in Hz above it.  The samples
 are radiod's own: no gain, no normalisation.  The filter keeps only the upper
 sideband, so the real part is the USB audio a receiver would give.
 
+Every I/Q slot arrives as <stem>.wav, 32-bit float I/Q, whichever way the
+station stored it.  A station may keep slots at half precision (its sidecar then
+says "dtype": "complex-f16").  The package holds those slots converted to the
+same 32-bit float WAV; each matches the station's original to the rounding of
+the half-precision format, about three significant digits.  Ignore such a
+sidecar's "scale" field: the WAV holds the true values.
+
 To get a 16-bit WAV like the usb recordings, run this numpy code.  Put the
 file's name where <stem> stands.  It reads the file by its chunks, takes the
 real part, applies the sidecar's gain and writes samples that match

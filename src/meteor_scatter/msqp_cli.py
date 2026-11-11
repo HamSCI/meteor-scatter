@@ -24,6 +24,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from meteor_scatter import msqp_package as P
+from meteor_scatter.core.archive import F16_SUFFIX, decode_f16_slot, slot_stem_of
 from meteor_scatter.core import review as R
 from meteor_scatter.zenodo import Zenodo, ZenodoError
 
@@ -207,9 +208,10 @@ def _check_recording(root_fd: int, parts):
     from the archive's root fd.  The sidecar is parsed from the bytes read there, and the
     wav's (st_dev, st_ino) lets the zip pass confirm it reopens the same file."""
     fd, wst = _open_recording(root_fd, parts)
+    is_f16 = parts[-1].endswith(F16_SUFFIX)
     with os.fdopen(fd, "rb") as f:
-        head = f.read(HEADER_PEEK)
-    fd, _ = _open_recording(root_fd, parts[:-1] + (Path(parts[-1]).with_suffix(".json").name,))
+        head = b"" if is_f16 else f.read(HEADER_PEEK)
+    fd, _ = _open_recording(root_fd, parts[:-1] + (slot_stem_of(parts[-1]) + ".json",))
     with os.fdopen(fd, "rb") as f:
         raw = f.read()
     try:
@@ -227,7 +229,11 @@ def _check_recording(root_fd: int, parts):
         msg = d.get("message") if isinstance(d, dict) else None
         if isinstance(msg, str) and msg != "".join(msg.splitlines()):
             raise ValueError("a decode message holds a line break")
-    _check_kind(side, head)
+    if is_f16:
+        if side.get("capture", "usb") != "iq" or side.get("dtype") != "complex-f16":
+            raise ValueError("an .iq16.zst slot's sidecar must say capture iq, dtype complex-f16")
+    else:
+        _check_kind(side, head)
     try:
         lines = [P.all_txt_line(side, d) for d in side["decodes"]]
     except (KeyError, TypeError, ValueError, AttributeError) as e:
@@ -303,6 +309,16 @@ def build_package(archive, cfg, callsign, grid, first, last, out_root, version):
         os.close(arch_fd)
 
 
+def _iq_wav_bytes(iq, rate: int) -> bytes:
+    """The two-channel 32-bit float I/Q WAV of ``iq``, as bytes."""
+    import tempfile
+    from meteor_scatter.core.iq import write_iq_wav
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "slot.wav"
+        write_iq_wav(p, iq, rate)
+        return p.read_bytes()
+
+
 def _package(archive, arch_fd, recs, cfg, callsign, grid, first, last, out_root, version):
     valid, lines, per, flagged, bands, skipped = [], [], {}, [], [], []
     has_iq = False
@@ -364,15 +380,27 @@ def _package(archive, arch_fd, recs, cfg, callsign, grid, first, last, out_root,
                     fd, st = _open_recording(arch_fd, rel.parts)
                 except ValueError as e:
                     raise PackageRefused(f"{rel} changed during packaging: {e}")
+                stem = slot_stem_of(rel.name)
+                # A package holds <stem>.wav only: an F16 slot goes in as 32-bit float I/Q.
+                wav_rel = rel.with_name(stem + ".wav")
                 with os.fdopen(fd, "rb") as src:
                     if (st.st_dev, st.st_ino) != ident:
                         raise PackageRefused(f"{rel} changed during packaging")
-                    info = zipfile.ZipInfo(str(rel), time.localtime(st.st_mtime)[:6])
+                    info = zipfile.ZipInfo(str(wav_rel), time.localtime(st.st_mtime)[:6])
                     info.compress_type = zipfile.ZIP_STORED
                     info.external_attr = 0o644 << 16
-                    with z.open(info, "w", force_zip64=True) as dst:
-                        shutil.copyfileobj(src, dst)
-                z.writestr(str(rel.with_suffix(".json")), raw,
+                    if rel.name.endswith(F16_SUFFIX):
+                        try:
+                            iq, rate = decode_f16_slot(src.read(WAV_CAP + 1), json.loads(raw),
+                                                       WAV_CAP)
+                        except ValueError as e:
+                            raise PackageRefused(f"{rel} will not decode: {e}")
+                        z.writestr(info, _iq_wav_bytes(iq, rate),
+                                   compress_type=zipfile.ZIP_STORED)
+                    else:
+                        with z.open(info, "w", force_zip64=True) as dst:
+                            shutil.copyfileobj(src, dst)
+                z.writestr(str(rel.with_name(stem + ".json")), raw,
                            compress_type=zipfile.ZIP_STORED)
             # Every decode with its classification (core.plausible), for an
             # analyst to filter by confidence.
@@ -536,7 +564,7 @@ def derive_wav(slot: Path, out: Path | None = None, archive_root: Path | None = 
     try:
         wfd, _ = _open_recording(root_fd, tuple(parts))
         wav_bytes = _read_capped(wfd, WAV_CAP, str(slot))
-        side_name = Path(parts[-1]).with_suffix(".json").name
+        side_name = slot_stem_of(parts[-1]) + ".json"
         try:
             sfd, _ = _open_recording(root_fd, tuple(parts[:-1]) + (side_name,))
         except _Missing:
@@ -558,8 +586,11 @@ def derive_wav(slot: Path, out: Path | None = None, archive_root: Path | None = 
                                  or not math.isfinite(scale_db)):
         raise ValueError(f"{side_name}: scale_db must be a finite number or null; "
                          f"it holds {scale_db!r:.40}")
-    iq, rate = read_iq_bytes(wav_bytes)
-    out = Path(out) if out else Path(Path(parts[-1]).stem + ".s16.wav")
+    if parts[-1].endswith(F16_SUFFIX):
+        iq, rate = decode_f16_slot(wav_bytes, side, WAV_CAP)
+    else:
+        iq, rate = read_iq_bytes(wav_bytes)
+    out = Path(out) if out else Path(slot_stem_of(parts[-1]) + ".s16.wav")
     if os.path.islink(out):
         raise ValueError(f"{out} is a symlink; refusing to write through it")
     real_out = Path(os.path.realpath(out))          # the whole path, last component included
@@ -1091,6 +1122,20 @@ def _file_size(path: Path) -> int:
         return 0
 
 
+def _package_size(slot: Path) -> int:
+    """Bytes the slot takes in a package.  An F16 slot becomes a 32-bit float WAV with twice the
+    decoded bytes plus a 46-byte header, so its size on disk understates it."""
+    if slot.name.endswith(F16_SUFFIX):
+        try:
+            from meteor_scatter.core.archive import _zstd
+            n = _zstd().frame_content_size(slot.read_bytes()[:64])
+            if n >= 0:
+                return 46 + 2 * n
+        except Exception:      # unreadable or no zstandard: fall back to the file size
+            pass
+    return _file_size(slot)
+
+
 def cmd_totals(args) -> int:
     """Count the kept recordings per band and UTC day, with their bytes (kept file plus JSON
     sidecar), and set the total against Zenodo's per-record limit."""
@@ -1107,7 +1152,7 @@ def cmd_totals(args) -> int:
             day = wav.parent.name
             c = cells.setdefault((band, day), [0, 0])
             c[0] += 1
-            c[1] += _file_size(wav) + _file_size(side)
+            c[1] += _package_size(wav) + _file_size(side)
     except (PackageRefused, OSError, ValueError) as e:
         print(f"msqp totals: {e}", file=sys.stderr)
         return 2
@@ -1201,7 +1246,7 @@ def add_subparsers(sub_msqp: argparse.ArgumentParser, *, common=None) -> None:
                     "peak-normalised where scale_db is null, as 16-bit PCM.  The sidecar "
                     "(<slot>.json) must sit beside the slot.  The slot and sidecar open without following "
                     "links.  With --instance, the output may not lie inside the archive.")
-    wv.add_argument("slot", help="kept slot (<stem>.wav holding I/Q); with --instance, a path "
+    wv.add_argument("slot", help="kept slot (<stem>.wav or <stem>.iq16.zst holding I/Q); with --instance, a path "
                                  "relative to that instance's archive also works")
     wv.add_argument("--instance", default=None,
                     help="instance whose archive holds the slot (selects "

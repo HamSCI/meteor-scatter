@@ -72,10 +72,29 @@ def _is_slot(p: Path) -> bool:
     return p.name.endswith(".wav") or p.name.endswith(F16_SUFFIX)
 
 
+def slot_stem_of(name: str) -> str:
+    """The slot's stem from its file name: <stem>.wav or <stem>.iq16.zst."""
+    return name[: -len(F16_SUFFIX)] if name.endswith(F16_SUFFIX) else Path(name).stem
+
+
 def _sidecar_path(slot: Path) -> Path:
-    name = slot.name
-    stem = name[: -len(F16_SUFFIX)] if name.endswith(F16_SUFFIX) else slot.stem
-    return slot.with_name(stem + ".json")
+    return slot.with_name(slot_stem_of(slot.name) + ".json")
+
+
+def decode_f16_slot(data: bytes, side: dict, max_bytes: int | None = None) -> Tuple[np.ndarray, int]:
+    """(complex64 I/Q, sample rate) from the bytes of an <stem>.iq16.zst and its parsed sidecar.
+    ValueError when the sidecar lacks what the slot needs or the payload is not what it says."""
+    try:
+        dtype, rate = side["dtype"], int(side["sample_rate"])
+        scale = float(side.get("scale", 1.0))
+    except (KeyError, TypeError, ValueError) as e:
+        raise ValueError(f"unreadable sidecar ({e.__class__.__name__}: {e})") from e
+    zstd = _zstd()
+    try:
+        raw = zstd.ZstdDecompressor().decompress(data, max_output_size=max_bytes or 0)
+    except zstd.ZstdError as e:
+        raise ValueError(f"not a zstd payload ({e})") from e
+    return iq_codec.decode_iq(raw, dtype, scale), rate
 
 
 def read_slot_iq(path: Path) -> Tuple[np.ndarray, int]:
@@ -87,12 +106,9 @@ def read_slot_iq(path: Path) -> Tuple[np.ndarray, int]:
         return read_iq_bytes(path.read_bytes())
     try:
         side = json.loads(_sidecar_path(path).read_text())
-        dtype, rate = side["dtype"], int(side["sample_rate"])
-        scale = float(side.get("scale", 1.0))
-    except (OSError, ValueError, KeyError) as e:
+    except (OSError, ValueError) as e:
         raise ValueError(f"{path.name}: unreadable sidecar ({e})") from e
-    raw = _zstd().ZstdDecompressor().decompress(path.read_bytes())
-    return iq_codec.decode_iq(raw, dtype, scale), rate
+    return decode_f16_slot(path.read_bytes(), side)
 
 
 def slot_day(slot_start_utc: float) -> date:
