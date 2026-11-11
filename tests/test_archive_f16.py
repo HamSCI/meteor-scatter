@@ -1,5 +1,6 @@
 """Decoded slots kept as F16 behind msqp.archive_dtype."""
 import json
+import sys
 from datetime import date
 from pathlib import Path
 
@@ -149,3 +150,23 @@ def test_config_archive_dtype():
     assert get_msqp({"msqp": {"archive_dtype": "f16"}})["archive_dtype"] == "f16"
     with pytest.raises(ValueError, match="archive_dtype"):
         get_msqp({"msqp": {"archive_dtype": "float16"}})
+
+
+@pytest.fixture
+def no_zstandard(monkeypatch):
+    monkeypatch.setitem(sys.modules, "zstandard", None)    # import raises ImportError
+
+
+def test_default_needs_no_zstandard(tmp_path, spool, no_zstandard):
+    import importlib
+    import meteor_scatter.core.archive as mod
+    importlib.reload(mod)                                   # module import must not need it
+    src = _slot_wav(spool, _iq())
+    original = src.read_bytes()
+    dest = mod.Archive(tmp_path / "arc", 90, 2).keep(src, 28145000, T0, {"k": 1})
+    assert dest.read_bytes() == original
+
+
+def test_f16_without_zstandard_says_how_to_fix(tmp_path, no_zstandard):
+    with pytest.raises(RuntimeError, match="uv sync"):
+        Archive(tmp_path / "arc", 90, 2, archive_dtype="f16")

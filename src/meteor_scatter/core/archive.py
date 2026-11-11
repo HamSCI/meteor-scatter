@@ -18,7 +18,6 @@ from pathlib import Path
 from typing import Tuple
 
 import numpy as np
-import zstandard
 
 from meteor_scatter.core import iq_codec
 from meteor_scatter.core.iq import read_iq_bytes
@@ -55,6 +54,19 @@ F16_SUFFIX = ".iq16.zst"
 ARCHIVE_DTYPES = ("complex64", "f16")
 
 
+def _zstd():
+    """The zstandard module, imported on first use: a station that pulled this code without
+    reinstalling its venv still archives at the default dtype."""
+    try:
+        import zstandard
+    except ImportError as e:
+        raise RuntimeError(
+            "msqp.archive_dtype = \"f16\" needs the zstandard package, which this venv lacks: "
+            "reinstall meteor-scatter's environment (uv sync, or the sigmond install path), "
+            "or set archive_dtype = \"complex64\"") from e
+    return zstandard
+
+
 def _is_slot(p: Path) -> bool:
     """A kept slot's recording: <stem>.wav or <stem>.iq16.zst."""
     return p.name.endswith(".wav") or p.name.endswith(F16_SUFFIX)
@@ -79,7 +91,7 @@ def read_slot_iq(path: Path) -> Tuple[np.ndarray, int]:
         scale = float(side.get("scale", 1.0))
     except (OSError, ValueError, KeyError) as e:
         raise ValueError(f"{path.name}: unreadable sidecar ({e})") from e
-    raw = zstandard.ZstdDecompressor().decompress(path.read_bytes())
+    raw = _zstd().ZstdDecompressor().decompress(path.read_bytes())
     return iq_codec.decode_iq(raw, dtype, scale), rate
 
 
@@ -93,6 +105,8 @@ class Archive:
                  archive_dtype: str = "complex64"):
         if archive_dtype not in ARCHIVE_DTYPES:
             raise ValueError(f"archive_dtype must be one of {ARCHIVE_DTYPES}; got {archive_dtype!r}")
+        if archive_dtype == "f16":
+            _zstd()                             # fail at construction, not on the first decode
         self.archive_dtype = archive_dtype
         self.root = Path(root)
         self.max_days = int(max_days)
@@ -158,7 +172,7 @@ class Archive:
         tmp = side.with_suffix(".json.part")
         moved = False
         try:
-            part.write_bytes(zstandard.ZstdCompressor().compress(payload))
+            part.write_bytes(_zstd().ZstdCompressor().compress(payload))
             tmp.write_text(json.dumps({**sidecar, "dtype": iq_codec.DTYPE_F16,
                                        "scale": iq_codec.F16_SCALE, "sample_rate": int(rate)},
                                       indent=1, sort_keys=True))
