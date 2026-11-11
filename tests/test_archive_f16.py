@@ -170,3 +170,23 @@ def test_default_needs_no_zstandard(tmp_path, spool, no_zstandard):
 def test_f16_without_zstandard_says_how_to_fix(tmp_path, no_zstandard):
     with pytest.raises(RuntimeError, match="uv sync"):
         Archive(tmp_path / "arc", 90, 2, archive_dtype="f16")
+
+
+def test_codec_copy_blocked_encode_matches_reference(monkeypatch):
+    """Same blocked encode as hf-timestd: block boundaries change no byte."""
+    monkeypatch.setattr(iq_codec, "_BLOCK", 4)
+    assert iq_codec.encode_f16(PINNED_SAMPLES) == PINNED_BYTES
+    x = PINNED_SAMPLES.copy()
+    x[7] = 1 + 20j                       # overflow in the last block
+    assert iq_codec.encode_f16(x) is None
+    x[7] = np.inf + 1j                   # inf alone never falls back
+    ref = (x.view(np.float32) * np.float32(4096.0)).astype("<f2").tobytes()
+    assert iq_codec.encode_f16(x) == ref
+
+
+def test_codec_copy_decode_f32_is_zero_copy():
+    x = PINNED_SAMPLES.copy()
+    raw = x.tobytes()
+    got = iq_codec.decode_iq(raw, "complex64")
+    assert np.shares_memory(got, np.frombuffer(raw, dtype=np.uint8))
+    assert np.array_equal(got, x)

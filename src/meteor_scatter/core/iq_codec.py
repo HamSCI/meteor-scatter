@@ -21,6 +21,7 @@ DTYPE_F32 = "complex64"
 DTYPE_F16 = "complex-f16"
 
 _F16_MAX = 65504.0  # largest finite binary16 value
+_BLOCK = 1 << 20  # float32 components scaled and checked per step (4 MB)
 
 
 def encode_f16(samples: np.ndarray) -> Optional[bytes]:
@@ -28,24 +29,43 @@ def encode_f16(samples: np.ndarray) -> Optional[bytes]:
 
     Returns None when any finite scaled component exceeds the binary16 range.
     NaN and inf pass through unchanged and never trigger the fallback.
+
+    Works in blocks of ``_BLOCK`` components into one preallocated binary16
+    array, so a 600 s chunk needs the output plus a few MB, not several
+    full-size float32 temporaries.  The bytes equal
+    ``(x * F16_SCALE).astype("<f2")`` on the interleaved float32 view.
     """
-    interleaved = np.ascontiguousarray(samples, dtype=np.complex64).view(np.float32)
-    scaled = interleaved * np.float32(F16_SCALE)
-    finite = np.isfinite(scaled)
-    if np.any(np.abs(scaled[finite]) > _F16_MAX):
-        return None
-    return scaled.astype("<f2").tobytes()
+    interleaved = np.ascontiguousarray(samples, dtype=np.complex64).view(np.float32).reshape(-1)
+    out = np.empty(interleaved.size, dtype="<f2")
+    scale = np.float32(F16_SCALE)
+    scaled_buf = np.empty(min(_BLOCK, interleaved.size), dtype=np.float32)
+    for start in range(0, interleaved.size, _BLOCK):
+        block = interleaved[start:start + _BLOCK]
+        scaled = scaled_buf[:block.size]
+        np.multiply(block, scale, out=scaled)
+        big = np.abs(scaled) > _F16_MAX  # NaN compares False; inf compares True
+        if big.any() and np.isfinite(scaled[big]).any():
+            return None
+        out[start:start + block.size] = scaled
+    return out.tobytes()
 
 
 def decode_iq(raw: bytes, dtype: str, scale: float = 1.0) -> np.ndarray:
-    """Decode raw archive bytes to complex64, dividing out ``scale``."""
+    """Decode raw archive bytes to complex64, dividing out ``scale``.
+
+    complex64 at scale 1.0 comes back as a zero-copy, read-only view of
+    ``raw``; every other case returns a fresh, writable array.
+    """
     if dtype == DTYPE_F32:
         components = np.frombuffer(raw, dtype=np.float32)
+        if scale == 1.0:
+            return components.view(np.complex64)
     elif dtype == DTYPE_F16:
         components = np.frombuffer(raw, dtype="<f2")
     else:
         raise ValueError(f"unknown I/Q dtype: {dtype!r}")
-    values = components.astype(np.float32) / np.float32(scale)
+    values = components.astype(np.float32)
+    values /= np.float32(scale)
     return values.view(np.complex64)
 
 
