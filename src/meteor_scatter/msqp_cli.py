@@ -1149,13 +1149,17 @@ def _package_size(slot: Path) -> int:
     if slot.name.endswith(F16_SUFFIX):
         try:
             from meteor_scatter.core.archive import _zstd
+            zstd = _zstd()
+        except (ImportError, RuntimeError):
+            return _file_size(slot)
+        try:
             fd = os.open(slot, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
             with os.fdopen(fd, "rb") as f:
                 if stat.S_ISREG(os.fstat(f.fileno()).st_mode):
-                    n = _zstd().frame_content_size(f.read(64))
+                    n = zstd.frame_content_size(f.read(64))
                     if n >= 0:
                         return 46 + 2 * n
-        except (OSError, ValueError, ImportError, RuntimeError):
+        except (OSError, ValueError, zstd.ZstdError):
             pass
     return _file_size(slot)
 

@@ -161,3 +161,11 @@ def test_totals_do_not_follow_a_symlinked_iq16(tmp_path):
     link.symlink_to(real)
     assert _package_size(link) == link.lstat().st_size      # the link's own size, not 46 + 2n
     assert _package_size(real) > real.stat().st_size
+
+
+def test_totals_count_a_corrupt_iq16_at_its_size_on_disk(tmp_path):
+    from meteor_scatter.msqp_cli import _package_size
+    for i, junk in enumerate((b"not a zstd frame", b"", b"\x28\xb5")):
+        p = tmp_path / f"s{i}.iq16.zst"
+        p.write_bytes(junk)
+        assert _package_size(p) == len(junk)
