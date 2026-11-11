@@ -16,12 +16,13 @@ grid_square = "AA00aa"
 spool_dir   = "/var/lib/meteor-scatter"
 log_dir     = "/var/log/meteor-scatter"
 
-# Decoder.  meteor-scatter decodes with WSJT-X's `jt9` in MSK144 mode
-# (`jt9 --msk144 -p 15`).  The arch-specific binary is bundled in-repo at
-# bin/decoders/jt9-{x86,arm32,arm64}-v27 and resolved automatically; set
-# `decoder_jt9` only to override that resolution with an explicit path.
+# Decoder.  meteor-scatter decodes MSK144 with `jt9 --msk144 -p 15`.  No jt9
+# is bundled: it uses the first of sigmond's UberSDR jt9
+# (/usr/local/libexec/sigmond/decoders/ubersdr/jt9, MSK144 since madpsy
+# PR #4), sigmond's WSJT-X jt9, then jt9 on PATH, whose help lists --msk144
+# (core.decoder.resolve_jt9_binary).  Set `decoder_jt9` only to override that.
 decoder_kind = "jt9"
-# decoder_jt9 = "/opt/git/sigmond/meteor-scatter/bin/decoders/jt9-x86-v27"
+# decoder_jt9 = "/usr/local/libexec/sigmond/decoders/ubersdr/jt9"
 
 # Optional standalone fallback for chain-delay correction (contract v0.3 §8).
 # Overridden by RADIOD_<id>_CHAIN_DELAY_NS in coordination.env when present.
