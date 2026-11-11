@@ -1,8 +1,10 @@
 """Reporter-id spellings: one name, three forms.
 
     display   AC0G/B4      what a person types and reads
-    storage   AC0G=B4      file names, directory names, config keys
-    systemd   AC0G\\x3dB4  unit names, *.wants links, %i
+    storage   AC0G=B4      the identity (config keys; display() reverses it)
+    systemd   AC0G-B4      the instance key: unit names, %i and per-instance
+                           file names ('/' and '=' become '-', rob 2026-11-11;
+                           before that AC0G\\x3dB4, still read on input)
 
 A copy of the rules in sigmond's lib/sigmond/instance.py, which stays the
 original.  This client keeps its own copy so it runs on a host, or in a
@@ -35,10 +37,22 @@ def to_storage(text: str) -> str:
     return rid
 
 
+def to_key(text: str) -> str:
+    """Any spelling of a reporter id -> its instance key, the name units and
+    per-instance files carry: AC0G/B4, AC0G=B4, AC0G\\x3dB4 -> AC0G-B4.
+    Raises ValueError on text that is no reporter id."""
+    return to_storage(text).replace("=", "-")
+
+
 def systemd_instance(name: str) -> str:
-    """Storage form -> the instance as a unit name carries it.  '=' becomes
-    \\x3d; letters, digits and '-' stay (systemd-escape would turn '-' into
-    \\x2d and name a different unit)."""
+    """The instance as a unit name carries it.  A reporter id (storage form,
+    upper case) is its key -- '=' becomes '-', like radiod@AI6VN-1 (rob,
+    2026-11-11).  Any other name (a legacy radiod-keyed my-rx888) is escaped:
+    letters, digits and '-' stay (systemd-escape would turn '-' into \\x2d
+    and name a different unit)."""
+    raw = unescape_systemd_instance(name)
+    if _RID.fullmatch(raw):
+        return raw.replace("=", "-")
     return "".join(
         c if c in _UNIT_CHARS else "".join(f"\\x{b:02x}" for b in c.encode())
         for c in name)

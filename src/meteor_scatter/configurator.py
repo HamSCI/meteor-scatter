@@ -61,7 +61,7 @@ try:
 except ModuleNotFoundError:
     import tomli as tomllib  # type: ignore[no-redef]
 
-from ._reporter_id import display, systemd_instance, to_storage, unescape_systemd_instance
+from ._reporter_id import display, systemd_instance, to_key, to_storage, unescape_systemd_instance
 from .config import DEFAULT_CONFIG_PATH, DEFAULTS, get_msqp, load_config
 
 
@@ -474,10 +474,28 @@ def _stale_instances(keep_id: str, etc_dir: Path) -> list:
     for inst in sorted(found):
         if inst == keep:
             continue
-        if (etc_dir / f"{inst}.toml").exists() or (etc_dir / "env" / f"{inst}.env").exists():
+        # Files carry the instance key (AC0G-B4) since 2026-11-11; an
+        # instance not yet moved still has AC0G=B4.toml.
+        stems = {inst}
+        try:
+            stems.add(to_key(inst))
+        except ValueError:
+            pass
+        if any((etc_dir / f"{st}.toml").exists() or (etc_dir / "env" / f"{st}.env").exists()
+               for st in stems):
             continue
         stale.append(inst)
     return stale
+
+
+def _unit_spelling(inst: str) -> str:
+    """The instance exactly as the enabled link spells it (AC0G\\x3dB5 for a
+    not-yet-moved unit, AC0G-B5 for a moved one), so systemctl gets the unit
+    that is really enabled rather than the key it would have today."""
+    return "".join(
+        c if (c.isascii() and (c.isalnum() or c in ":-_.")) else
+        "".join(f"\\x{b:02x}" for b in c.encode())
+        for c in inst)
 
 
 def _retire_stale_instances(keep_id: str, etc_dir: Path, *, interactive: bool) -> None:
@@ -485,7 +503,7 @@ def _retire_stale_instances(keep_id: str, etc_dir: Path, *, interactive: bool) -
     stale = _stale_instances(keep_id, etc_dir)
     sctl = shutil.which("systemctl")
     for inst in stale:
-        unit = f"meteor-scatter@{systemd_instance(inst)}.service"   # for systemctl
+        unit = f"meteor-scatter@{_unit_spelling(inst)}.service"     # for systemctl
         label = f"meteor-scatter@{display(inst)}"                   # for a person
         if not interactive or not sctl:
             _info(f"⚠ {label} is enabled but no config names it any more; "
@@ -1204,17 +1222,21 @@ def _env_file_path(instance: str) -> Path:
     """The env file for an instance named in any spelling.
 
     A reporter id in any spelling (AC0G/B4, AC0G=B4, AC0G\\x3dB4, ac0g/b4)
-    names AC0G=B4.env.  A radiod id, which is no reporter id
+    names AC0G-B4.env (the instance key).  A radiod id, which is no reporter id
     (bee1-status.local), names its own file.  One fallback for a legacy
     instance: when the storage-form file is absent and a file named
     exactly as typed exists (my-rx888.env), use it and say so on stderr.
     """
     exact = unescape_systemd_instance(instance.strip())
     try:
-        stem = to_storage(instance)
+        storage = to_storage(instance)
     except ValueError:
         return _ENV_DIR / f"{exact}.env"
+    stem = to_key(instance)            # files carry the key: AC0G-B4.env
     path = _ENV_DIR / f"{stem}.env"
+    pre_key = _ENV_DIR / f"{storage}.env"     # AC0G=B4.env, not yet moved
+    if not path.exists() and pre_key.exists():
+        return pre_key
     legacy = _ENV_DIR / f"{exact}.env"
     if exact != stem and not path.exists() and legacy.exists():
         print(f"legacy instance name {exact}; run: smd admin instance migrate",

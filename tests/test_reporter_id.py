@@ -28,10 +28,13 @@ class VectorTableTests(unittest.TestCase):
         for v in VECTORS["reporter_ids"]:
             with self.subTest(input=v["input"]):
                 self.assertEqual(to_storage(v["input"]), v["storage"])
+                # Units and per-instance files carry the key (AC0G-B4).
                 self.assertEqual(systemd_instance(v["storage"]), v["systemd"])
-                self.assertEqual(unescape_systemd_instance(v["systemd"]), v["storage"])
+                # The pre-key unit spelling (AC0G\\x3dB4) still reads back.
+                self.assertEqual(unescape_systemd_instance(v["legacy_systemd"]), v["storage"])
+                self.assertEqual(to_storage(v["legacy_systemd"]), v["storage"])
                 self.assertEqual(display(v["storage"]), v["display"])
-                self.assertEqual(display(v["systemd"]), v["display"])
+                self.assertEqual(display(v["legacy_systemd"]), v["display"])
 
     def test_unit_names_escape_only_what_systemd_must(self):
         for v in VECTORS["escape_only"]:

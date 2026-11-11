@@ -457,13 +457,15 @@ def _check_instance_matches(instance, reporter, source, *, per_instance: bool) -
     """Refuse when --instance names a reporter id other than the one the environment gives.
     An instance names a reporter id when it holds "=" or "/", or when it selected a
     per-instance config; a legacy instance named after its radiod names none."""
-    from meteor_scatter._reporter_id import to_storage
+    from meteor_scatter._reporter_id import to_key
     if not instance or not reporter or not (per_instance or "=" in instance or "/" in instance):
         return
 
+    # Compare instance keys: the unit's %i is the key (AI6VN-1) while the
+    # reporter is the true id (AI6VN/1) -- the same instance.
     def norm(x):
         try:
-            return to_storage(x)
+            return to_key(x)
         except ValueError:
             return x
     if norm(instance) != norm(reporter):

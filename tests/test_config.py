@@ -391,9 +391,11 @@ class UnitEnvironmentTests(unittest.TestCase):
 
     def test_unit_files_in_unit_order(self):
         from meteor_scatter.config import unit_environment_files
+        # The unit is named by the instance key (AC0G-B4): %i is AC0G-B4 and
+        # systemd's %I turns its dash into a slash (rob, 2026-11-11).
         self.assertEqual(unit_environment_files("AC0G\\x3dB4"),
-                         [self.coord, self.envdir / "AC0G\\x3dB4.env",
-                          self.envdir / "AC0G=B4.env"])
+                         [self.coord, self.envdir / "AC0G-B4.env",
+                          self.envdir / "AC0G" / "B4.env"])
         self.assertEqual(unit_environment_files("AC0G/B4"),
                          unit_environment_files("AC0G=B4"))
         # %I turns a dash into a slash, as systemd does
@@ -409,10 +411,10 @@ class UnitEnvironmentTests(unittest.TestCase):
     def test_later_file_overrides(self):
         from meteor_scatter.config import resolve_reporter_id
         self.coord.write_text("STATION_REPORTER_ID=AC0G/B4\n")
-        (self.envdir / "AC0G=ND.env").write_text("STATION_REPORTER_ID=AC0G/ND\n")
+        (self.envdir / "AC0G-ND.env").write_text("STATION_REPORTER_ID=AC0G/ND\n")
         rid, src = resolve_reporter_id({}, instance="AC0G=ND")
         self.assertEqual(rid, "AC0G/ND")
-        self.assertTrue(src.endswith("AC0G=ND.env"))
+        self.assertTrue(src.endswith("AC0G-ND.env"))
 
     def test_variable_in_the_environment_wins_and_files_are_not_read(self):
         from meteor_scatter.config import resolve_reporter_id

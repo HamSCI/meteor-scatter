@@ -450,6 +450,11 @@ class StrayInstanceTests(unittest.TestCase):
         self.assertEqual(configurator._stale_instances("127.0.0.1", self.etc),
                          ["192.168.0.1"])
 
+    def test_a_moved_instance_with_a_key_named_config_is_not_stale(self):
+        self._enable("AC0G-B4")
+        (self.etc / "AC0G-B4.toml").write_text("")
+        self.assertEqual(configurator._stale_instances("127.0.0.1", self.etc), [])
+
     def test_a_live_instance_is_never_stale_under_any_spelling(self):
         # M2: on AC0G-B4 the link reads meteor-scatter@AC0G\\x3dB4.service and
         # the config AC0G=B4.toml; init offered to disable the live instance.
@@ -490,8 +495,9 @@ class StrayInstanceTests(unittest.TestCase):
         # M4
         for typed in ("AC0G\\x3dB4", "AC0G/B4", "AC0G=B4", "ac0g/b4"):
             with self.subTest(typed=typed):
+                # The instance key (rob, 2026-11-11).
                 self.assertEqual(configurator._env_file_path(typed),
-                                 configurator._ENV_DIR / "AC0G=B4.env")
+                                 configurator._ENV_DIR / "AC0G-B4.env")
         self.assertEqual(configurator._env_file_path("bee1-status.local"),
                          configurator._ENV_DIR / "bee1-status.local.env")
 
