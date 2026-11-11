@@ -64,7 +64,11 @@ def test_package_mixed_wav_and_iq16(tmp_path):
     # F16 keeps 11 significant bits: error at most 2^-11 of each value, plus the subnormal floor.
     assert np.all(np.abs(got16.real - iq16.real) <= np.abs(iq16.real) * 2 ** -11 + 2 ** -24 / 4096)
     assert np.all(np.abs(got16.imag - iq16.imag) <= np.abs(iq16.imag) * 2 ** -11 + 2 ** -24 / 4096)
-    assert side16["dtype"] == "complex-f16" and side16["scale_db"] == SCALE_DB
+    assert side16["dtype"] == "complex64" and "scale" not in side16
+    assert side16["stored_dtype"] == "complex-f16" and side16["stored_scale"] == 4096.0
+    assert side16["scale_db"] == SCALE_DB
+    station = json.loads(p16.with_name("261213_235930.json").read_text())
+    assert station["dtype"] == "complex-f16" and station["scale"] == 4096.0   # archive untouched
     assert "dtype" not in side32
     assert "<stem>.wav" in (r.dir / "README.txt").read_text()
 
@@ -100,3 +104,60 @@ def test_totals_count_an_f16_slot_at_its_package_size(tmp_path):
     p16 = _keep(Archive(tmp_path / "a16", 90, 2, archive_dtype="f16"), tmp_path, T_F16, iq)
     p32 = _keep(Archive(tmp_path / "a32", 90, 2), tmp_path, T_F16, iq)
     assert _package_size(p16) == p32.stat().st_size
+
+
+def _wav_args(slot, out):
+    return argparse.Namespace(slot=str(slot), instance=None, output=str(out))
+
+
+def test_package_skips_a_corrupt_iq16_and_keeps_the_good_slot(tmp_path):
+    f16 = Archive(tmp_path / "archive", 90, 2, archive_dtype="f16")
+    bad = _keep(f16, tmp_path, T_F16, _iq(5))
+    _keep(f16, tmp_path, T_F16 + 30, _iq(6))
+    bad.write_bytes(b"not a zstd frame")
+    r = build_package(f16, CFG, "AC0G/B4", "EM38ww", date(2026, 12, 13), date(2026, 12, 14),
+                      tmp_path / "msqp", "v1")
+    assert r.files == 1 and len(r.skipped) == 1 and "261213_235930" in r.skipped[0]
+    with zipfile.ZipFile(r.zip_path) as z:
+        assert [n for n in z.namelist() if n.endswith(".wav")] == ["6m/20261214/261214_000000.wav"]
+
+
+def test_missing_scale_skips_in_package_and_refuses_in_wav(tmp_path):
+    f16 = Archive(tmp_path / "archive", 90, 2, archive_dtype="f16")
+    bad = _keep(f16, tmp_path, T_F16, _iq(7))
+    _keep(f16, tmp_path, T_F16 + 30, _iq(8))
+    side_path = bad.with_name("261213_235930.json")
+    side = json.loads(side_path.read_text())
+    del side["scale"]
+    side_path.write_text(json.dumps(side))
+    r = build_package(f16, CFG, "AC0G/B4", "EM38ww", date(2026, 12, 13), date(2026, 12, 14),
+                      tmp_path / "msqp", "v1")
+    assert r.files == 1 and "scale" in r.skipped[0]
+    err = io.StringIO()
+    with redirect_stderr(err), redirect_stdout(io.StringIO()):
+        rc = cmd_wav(_wav_args(bad, tmp_path / "o.wav"))
+    assert rc == 2 and "scale" in err.getvalue() and not (tmp_path / "o.wav").exists()
+
+
+def test_decode_refuses_a_frame_with_no_size_or_too_big(tmp_path):
+    import pytest
+    import zstandard
+    from meteor_scatter.core.archive import decode_f16_slot
+    side = {"dtype": "complex-f16", "scale": 4096.0, "sample_rate": 12000}
+    payload = b"\0" * 4000
+    unsized = zstandard.ZstdCompressor(write_content_size=False).compress(payload)
+    with pytest.raises(ValueError, match="no content size"):
+        decode_f16_slot(unsized, side)
+    sized = zstandard.ZstdCompressor().compress(payload)
+    with pytest.raises(ValueError, match="cap"):
+        decode_f16_slot(sized, side, max_bytes=100)
+    assert len(decode_f16_slot(sized, side)[0]) == 1000
+
+
+def test_totals_do_not_follow_a_symlinked_iq16(tmp_path):
+    from meteor_scatter.msqp_cli import _package_size
+    real = _keep(Archive(tmp_path / "a16", 90, 2, archive_dtype="f16"), tmp_path, T_F16, _iq(9))
+    link = tmp_path / "link.iq16.zst"
+    link.symlink_to(real)
+    assert _package_size(link) == link.lstat().st_size      # the link's own size, not 46 + 2n
+    assert _package_size(real) > real.stat().st_size

@@ -81,19 +81,31 @@ def _sidecar_path(slot: Path) -> Path:
     return slot.with_name(slot_stem_of(slot.name) + ".json")
 
 
-def decode_f16_slot(data: bytes, side: dict, max_bytes: int | None = None) -> Tuple[np.ndarray, int]:
+F16_MAX_BYTES = 512 * 1024 * 1024      # decoded size cap; 15 s of 4-byte samples is 0.7 MB
+
+
+def decode_f16_slot(data: bytes, side: dict, max_bytes: int = F16_MAX_BYTES) -> Tuple[np.ndarray, int]:
     """(complex64 I/Q, sample rate) from the bytes of an <stem>.iq16.zst and its parsed sidecar.
-    ValueError when the sidecar lacks what the slot needs or the payload is not what it says."""
+    ValueError when the sidecar lacks what the slot needs, or the payload is not what it says,
+    declares no size, or would decode to more than ``max_bytes``."""
     try:
         dtype, rate = side["dtype"], int(side["sample_rate"])
-        scale = float(side.get("scale", 1.0))
+        scale = float(side["scale"])      # never a default: a wrong scale rescales every sample
     except (KeyError, TypeError, ValueError) as e:
-        raise ValueError(f"unreadable sidecar ({e.__class__.__name__}: {e})") from e
+        raise ValueError(f"unreadable sidecar ({e.__class__.__name__}: {e}); "
+                         "an F16 slot's sidecar needs dtype, scale and sample_rate") from e
     zstd = _zstd()
     try:
-        raw = zstd.ZstdDecompressor().decompress(data, max_output_size=max_bytes or 0)
+        size = zstd.frame_content_size(data)
+        if size < 0:
+            raise ValueError("the zstd frame declares no content size")
+        if size > max_bytes:
+            raise ValueError(f"the zstd frame declares {size} bytes, over the {max_bytes} cap")
+        raw = zstd.ZstdDecompressor().decompress(data, max_output_size=size)
     except zstd.ZstdError as e:
         raise ValueError(f"not a zstd payload ({e})") from e
+    except MemoryError as e:
+        raise ValueError("the zstd payload is too large to decode") from e
     return iq_codec.decode_iq(raw, dtype, scale), rate
 
 

@@ -211,6 +211,7 @@ def _check_recording(root_fd: int, parts):
     is_f16 = parts[-1].endswith(F16_SUFFIX)
     with os.fdopen(fd, "rb") as f:
         head = b"" if is_f16 else f.read(HEADER_PEEK)
+        payload = f.read(WAV_CAP + 1) if is_f16 else b""
     fd, _ = _open_recording(root_fd, parts[:-1] + (slot_stem_of(parts[-1]) + ".json",))
     with os.fdopen(fd, "rb") as f:
         raw = f.read()
@@ -232,6 +233,12 @@ def _check_recording(root_fd: int, parts):
     if is_f16:
         if side.get("capture", "usb") != "iq" or side.get("dtype") != "complex-f16":
             raise ValueError("an .iq16.zst slot's sidecar must say capture iq, dtype complex-f16")
+        if len(payload) > WAV_CAP:
+            raise ValueError(f"slot is larger than {WAV_CAP} bytes")
+        try:
+            decode_f16_slot(payload, side, WAV_CAP)       # a corrupt slot is skipped here
+        except Exception as e:
+            raise ValueError(f"F16 slot will not decode ({e})")
     else:
         _check_kind(side, head)
     try:
@@ -319,6 +326,17 @@ def _iq_wav_bytes(iq, rate: int) -> bytes:
         return p.read_bytes()
 
 
+def _packaged_f16_sidecar(raw: bytes) -> bytes:
+    """The sidecar for the float32 WAV that replaces an F16 slot: it describes the WAV, and
+    notes how the station stored the slot."""
+    side = json.loads(raw)
+    stored_scale = side.pop("scale")
+    side["stored_dtype"] = side["dtype"]
+    side["stored_scale"] = stored_scale
+    side["dtype"] = "complex64"
+    return json.dumps(side, indent=1).encode()
+
+
 def _package(archive, arch_fd, recs, cfg, callsign, grid, first, last, out_root, version):
     valid, lines, per, flagged, bands, skipped = [], [], {}, [], [], []
     has_iq = False
@@ -397,6 +415,7 @@ def _package(archive, arch_fd, recs, cfg, callsign, grid, first, last, out_root,
                             raise PackageRefused(f"{rel} will not decode: {e}")
                         z.writestr(info, _iq_wav_bytes(iq, rate),
                                    compress_type=zipfile.ZIP_STORED)
+                        raw = _packaged_f16_sidecar(raw)
                     else:
                         with z.open(info, "w", force_zip64=True) as dst:
                             shutil.copyfileobj(src, dst)
@@ -1117,21 +1136,26 @@ TOTALS_DEFAULT_DAYS = 14
 
 def _file_size(path: Path) -> int:
     try:  # a recording whose sidecar is missing or unreadable adds 0 bytes, not an error
-        return path.stat().st_size
+        return path.lstat().st_size
     except OSError:
         return 0
 
 
 def _package_size(slot: Path) -> int:
     """Bytes the slot takes in a package.  An F16 slot becomes a 32-bit float WAV with twice the
-    decoded bytes plus a 46-byte header, so its size on disk understates it."""
+    decoded bytes plus a 46-byte header, so its size on disk understates it.  The frame header
+    is read from the file opened without following a link; anything else falls back to the
+    file size."""
     if slot.name.endswith(F16_SUFFIX):
         try:
             from meteor_scatter.core.archive import _zstd
-            n = _zstd().frame_content_size(slot.read_bytes()[:64])
-            if n >= 0:
-                return 46 + 2 * n
-        except Exception:      # unreadable or no zstandard: fall back to the file size
+            fd = os.open(slot, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            with os.fdopen(fd, "rb") as f:
+                if stat.S_ISREG(os.fstat(f.fileno()).st_mode):
+                    n = _zstd().frame_content_size(f.read(64))
+                    if n >= 0:
+                        return 46 + 2 * n
+        except (OSError, ValueError, ImportError, RuntimeError):
             pass
     return _file_size(slot)
 
