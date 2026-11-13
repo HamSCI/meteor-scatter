@@ -204,7 +204,7 @@ class ChTailer:
         # Per-row flag that tells the wsprdaemon server's
         # pskreporter_forwarder to post the row.  recorder.py passes True
         # only in "deposit" delivery mode (the route sigmond writes); in
-        # "direct" (the code default) and "off" it passes False.
+        # "direct" (explicit config only) and "off" it passes False.
         self._forward_to_pskreporter = bool(forward_to_pskreporter)
 
         # WSJT-X compound-callsign hash table.  Per-radiod (shared

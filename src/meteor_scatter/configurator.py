@@ -1201,10 +1201,10 @@ def add_show_apply_subparsers(cfg_sub: argparse._SubParsersAction,
 # meteor-scatter reads its per-instance env file via systemd's
 # EnvironmentFile=-/etc/meteor-scatter/env/%i.env directive (where %i is
 # the radiod_id of the [[radiod]] block this instance serves).  It holds
-# METEOR_SCATTER_DELIVERY_MODE, which core/recorder.py reads: "direct"
-# when unset (an in-process sender posts to pskreporter.info), "deposit"
-# (rows ride the wsprdaemon tar flagged forward_to_pskreporter; the
-# server forwards them), or "off" (no sender, rows unflagged).  Sigmond
+# METEOR_SCATTER_DELIVERY_MODE, which core/recorder.py reads: "deposit"
+# when unset (rows ride the wsprdaemon tar flagged forward_to_pskreporter;
+# the server forwards them), "off" (no sender, rows unflagged), or "direct"
+# (an in-process sender posts to pskreporter.info; explicit config only).  Sigmond
 # writes "deposit" (`smd config upload meteor-scatter <id> --on`), and its
 # routing step moves running instances there.  The wizard manages no keys
 # here.
@@ -1216,7 +1216,7 @@ _ENV_DIR = Path("/etc/meteor-scatter/env")
 
 # Keys the wizard / `env apply` will write.  Empty: `env apply` rejects
 # every payload key, METEOR_SCATTER_DELIVERY_MODE included, although the
-# daemon reads that key (default "direct").  Sigmond writes it instead
+# daemon reads that key (default "deposit").  Sigmond writes it instead
 # (`smd config upload meteor-scatter <id> --on` writes "deposit").
 _ENV_WRITABLE_KEYS: "set[str]" = set()
 

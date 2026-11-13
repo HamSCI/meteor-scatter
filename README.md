@@ -101,8 +101,8 @@ writes there. Sigmond seeds layer 3 from `deploy.toml
 `smd config upload meteor-scatter <id> --on` writes `deposit`, and
 sigmond's routing step (`smd sink upload`, `smd update --apply`) moves
 running instances to `deposit` too. With the key unset the daemon reads
-`direct` and posts to pskreporter.info itself; no sigmond verb writes
-that value any more.
+`deposit`. `direct`, which posts to pskreporter.info from the station,
+runs only when someone sets it by hand; no sigmond verb writes it.
 
 ⚠ `meteor-scatter env apply` manages **no** keys in this build
 (`_ENV_WRITABLE_KEYS` is empty), so the wizard's *Delivery* menu item
@@ -216,8 +216,8 @@ provenance and reporter identity on every row; stage rows into
 `psk.spots`, flagged `forward_to_pskreporter` in `deposit` mode, so
 that they ride wspr-recorder's tar to wsprdaemon.org and the server
 forwards them to pskreporter.info. `deposit` is the route sigmond
-writes. The code still holds the older modes: `direct`, its default when
-the key is unset, POSTs to pskreporter.info through hs-uploader's
+writes. The code still holds the older modes, reachable only by explicit
+config: `direct` POSTs to pskreporter.info through hs-uploader's
 `PskReporterTcp` transport, and `off` leaves the rows unflagged for the
 station's hs-uploader daemon. `meteor-scatter msqp` keeps and packages the MSQP archive
 (see [docs/OPERATIONS.md](docs/OPERATIONS.md), "MSQP"); `[msqp]

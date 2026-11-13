@@ -680,9 +680,9 @@ class MeteorScatterRecorder:
 
     @staticmethod
     def _delivery_mode() -> str:
-        """Resolved METEOR_SCATTER_DELIVERY_MODE (default "direct").
+        """Resolved METEOR_SCATTER_DELIVERY_MODE (default "deposit").
 
-        "direct"  — in-process HsPskReporterUploader POSTs to PSKReporter
+        "direct"  — only by explicit config.  In-process HsPskReporterUploader POSTs to PSKReporter
                     from this host; rows carry forward_to_pskreporter=False
                     so the wsprdaemon server does not double-post.
         "deposit" — sink-only here; rows carry forward_to_pskreporter=True
@@ -694,7 +694,7 @@ class MeteorScatterRecorder:
                     nothing publishes; rows still ride the tar.
         """
         return (
-            os.environ.get("METEOR_SCATTER_DELIVERY_MODE") or "direct"
+            os.environ.get("METEOR_SCATTER_DELIVERY_MODE") or "deposit"
         ).strip().lower()
 
     def _start_uploaders(self) -> None:
@@ -706,8 +706,8 @@ class MeteorScatterRecorder:
         # The SqliteSource is selected when sigmond's sink is present;
         # else it falls back to the per-slot spool FileTreeSource.
         #
-        # METEOR_SCATTER_DELIVERY_MODE controls this: "direct" (default)
-        # runs the uploader; "deposit"/"off"/"none" leaves spots in the
+        # METEOR_SCATTER_DELIVERY_MODE controls this: "direct" (explicit
+        # config only) runs the uploader; "deposit" (default)/"off"/"none" leaves spots in the
         # sink only (deposit → the server forwards; see _delivery_mode).
         mode = self._delivery_mode()
         if mode in ("deposit", "off", "none", "disabled"):
