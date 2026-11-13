@@ -27,18 +27,17 @@ meteor-scatter daemon (one per radiod)
   ├─ per-radiod:  <radiod_id>-msk144.log   (normalized decode lines)
   └─ ChTailer → callhash resolution → cycle batcher
        → sigmond.hamsci_sink.Writer → psk.spots (per-row mode="msk144")
-            └─ pskreporter.info, posted by the station's hs-uploader daemon
-               (delivery mode "off", which sigmond seeds), the in-process
-               sender ("direct", the daemon's own default), or
-               wsprdaemon.org's forwarder ("deposit")
+            └─ wspr-recorder's per-cycle tar → wsprdaemon.org
+                 → pskreporter.info, forwarded by the server
+                   (delivery mode "deposit", which sigmond writes)
 ```
 
 Two details that are easy to assume wrong:
 
 * **The sink target is `psk.spots`, not `msk144.spots`.** MSK144 is a
   value of the per-row `mode` column in the same table psk-recorder's
-  FT8/FT4 rows use, so one PSKReporter pipeline
-  (`mode IN (ft8, ft4, msk144)`) delivers all three.
+  FT8/FT4 rows use, so the same per-cycle wsprdaemon tar carries all
+  three, and the same server forwarder posts them to pskreporter.info.
 * **The default T/R period is 15 s**, MSK144's nominal period and the
   slot length the Meteor Scatter QSO Party (MSQP) records.
   `[radiod.msk144].tr_period_sec` overrides it (WSJT-X also offers
@@ -97,15 +96,21 @@ meteor-scatter's operator-facing config spans **three persistence layers**:
 | **Per-instance env** | `/etc/meteor-scatter/env/<instance>.env` | sigmond seeds it; edit by hand | `METEOR_SCATTER_DELIVERY_MODE`, `METEOR_SCATTER_DIRECT_DEDUP`, `METEOR_SCATTER_LOG_LEVEL` |
 
 The wizard manages layer 1; it reads layer 2 for pre-fills and never
-writes there. Layer 3 is seeded by sigmond from `deploy.toml
-[contract.instance_env]` (`METEOR_SCATTER_DELIVERY_MODE = "off"` on a
-host whose hs-uploader daemon owns egress).
+writes there. Sigmond seeds layer 3 from `deploy.toml
+[contract.instance_env]` (`METEOR_SCATTER_DELIVERY_MODE = "off"`), then
+`smd config upload meteor-scatter <id> --on` writes `deposit`, and
+sigmond's routing step (`smd sink upload`, `smd update --apply`) moves
+running instances to `deposit` too. With the key unset the daemon reads
+`direct` and posts to pskreporter.info itself; no sigmond verb writes
+that value any more.
 
 ⚠ `meteor-scatter env apply` manages **no** keys in this build
 (`_ENV_WRITABLE_KEYS` is empty), so the wizard's *Delivery* menu item
 fails and layer 3 must be edited directly. `env show` works. On a
-sigmond host, `smd config upload meteor-scatter <id> --on --via
-deposit|direct|off` sets `METEOR_SCATTER_DELIVERY_MODE` for you.
+sigmond host, `smd config upload meteor-scatter <id> --on` sets
+`METEOR_SCATTER_DELIVERY_MODE=deposit` for you; it refuses `--via direct`
+and `--via off`, because every MSK144 spot goes to wsprdaemon.org, which
+forwards it to pskreporter.info.
 
 #### Interactive wizard (default)
 
@@ -208,10 +213,13 @@ slot-align audio to the configured MSK144 T/R period; write one mono
 delta; normalize each decode into a per-radiod spot log; resolve
 compound-call hashes through the shared callhash table; stamp timing
 provenance and reporter identity on every row; stage rows into
-`psk.spots`; and — in `direct` delivery mode — POST them to
-pskreporter.info through hs-uploader's `PskReporterTcp` transport.
-In `off` mode, which sigmond seeds for each new instance, the station's
-hs-uploader daemon posts them instead. `meteor-scatter msqp` keeps and packages the MSQP archive
+`psk.spots`, flagged `forward_to_pskreporter` in `deposit` mode, so
+that they ride wspr-recorder's tar to wsprdaemon.org and the server
+forwards them to pskreporter.info. `deposit` is the route sigmond
+writes. The code still holds the older modes: `direct`, its default when
+the key is unset, POSTs to pskreporter.info through hs-uploader's
+`PskReporterTcp` transport, and `off` leaves the rows unflagged for the
+station's hs-uploader daemon. `meteor-scatter msqp` keeps and packages the MSQP archive
 (see [docs/OPERATIONS.md](docs/OPERATIONS.md), "MSQP"); `[msqp]
 archive_dtype = "f16"` keeps `capture = "iq"` slots at half size.
 

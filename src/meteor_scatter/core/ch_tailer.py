@@ -201,10 +201,10 @@ class ChTailer:
         # Phase A/B behaviour, kept so single-tailer tests don't need
         # to spin up a batcher.
         self._cycle_batcher = cycle_batcher
-        # Vestigial per-row flag from the PSKReporter delivery model
-        # (always False in this deposit-only build — recorder.py passes
-        # forward_flag=False).  Retained on the row for schema parity with
-        # the wspr/psk siblings; the wsprdaemon upload path ignores it.
+        # Per-row flag that tells the wsprdaemon server's
+        # pskreporter_forwarder to post the row.  recorder.py passes True
+        # only in "deposit" delivery mode (the route sigmond writes); in
+        # "direct" (the code default) and "off" it passes False.
         self._forward_to_pskreporter = bool(forward_to_pskreporter)
 
         # WSJT-X compound-callsign hash table.  Per-radiod (shared

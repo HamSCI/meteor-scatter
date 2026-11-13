@@ -1200,21 +1200,24 @@ def add_show_apply_subparsers(cfg_sub: argparse._SubParsersAction,
 #
 # meteor-scatter reads its per-instance env file via systemd's
 # EnvironmentFile=-/etc/meteor-scatter/env/%i.env directive (where %i is
-# the radiod_id of the [[radiod]] block this instance serves).  The file
-# is where upload-destination knobs will live once the wsprdaemon.org
-# transport is wired (Phase 3); in the current deposit-only build there
-# are no managed upload knobs, so the wizard manages no keys here yet.
+# the radiod_id of the [[radiod]] block this instance serves).  It holds
+# METEOR_SCATTER_DELIVERY_MODE, which core/recorder.py reads: "direct"
+# when unset (an in-process sender posts to pskreporter.info), "deposit"
+# (rows ride the wsprdaemon tar flagged forward_to_pskreporter; the
+# server forwards them), or "off" (no sender, rows unflagged).  Sigmond
+# writes "deposit" (`smd config upload meteor-scatter <id> --on`), and its
+# routing step moves running instances there.  The wizard manages no keys
+# here.
 # Sigmond's coordination.env (/etc/sigmond/coordination.env) is host-wide
 # and sigmond-owned; the wizard reads from it (e.g. for the SQLite sink
 # path) but never writes there.
 
 _ENV_DIR = Path("/etc/meteor-scatter/env")
 
-# Keys the wizard / `env apply` will write.  Empty in the deposit-only
-# build — the PSKReporter-era delivery knobs were removed with the
-# uploader, and the wsprdaemon.org upload knobs don't exist yet (Phase 3
-# will repopulate this set).  `env apply` therefore rejects any payload
-# key until then, so a stale knob can't silently do nothing.
+# Keys the wizard / `env apply` will write.  Empty: `env apply` rejects
+# every payload key, METEOR_SCATTER_DELIVERY_MODE included, although the
+# daemon reads that key (default "direct").  Sigmond writes it instead
+# (`smd config upload meteor-scatter <id> --on` writes "deposit").
 _ENV_WRITABLE_KEYS: "set[str]" = set()
 
 

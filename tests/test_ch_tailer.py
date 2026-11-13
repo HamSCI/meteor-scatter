@@ -308,8 +308,8 @@ class TestChTailer(unittest.TestCase):
                 self.assertEqual(row["mode"], "msk144")
 
     def test_forward_flag_passes_through_unchanged(self):
-        """forward_to_pskreporter is a vestigial per-row flag (always False
-        in the deposit-only build); it passes through to the row unchanged."""
+        """forward_to_pskreporter (True only in "deposit" delivery mode)
+        passes through to the row unchanged."""
         import tempfile
         with tempfile.TemporaryDirectory() as td:
             log_path = Path(td) / "test.log"

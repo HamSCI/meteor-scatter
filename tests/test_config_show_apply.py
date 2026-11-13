@@ -523,10 +523,9 @@ def _env_apply(payload, tmp_path: Path, monkeypatch, *,
         sys.stdin = old_stdin
 
 
-# The deposit-only build manages NO env keys (the PSKReporter-era
-# delivery knobs were removed with the uploader; the wsprdaemon.org
-# upload knobs arrive in Phase 3).  `env apply` therefore rejects any
-# payload key, so a stale knob can't silently do nothing.
+# `env apply` manages NO env keys and rejects any payload key.  The
+# daemon's one delivery key, METEOR_SCATTER_DELIVERY_MODE, is written by
+# sigmond (`smd config upload meteor-scatter <id> --on` writes "deposit").
 
 def test_env_apply_rejects_any_key(tmp_path: Path, monkeypatch, capsys) -> None:
     rv = _env_apply({"METEOR_SCATTER_ANYTHING": "value"}, tmp_path, monkeypatch)

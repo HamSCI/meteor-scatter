@@ -167,9 +167,9 @@ def main():
 
     # Top-level `env show` / `env apply` for per-instance env files at
     # /etc/meteor-scatter/env/<radiod_id>.env -- start-time knobs the
-    # systemd unit's EnvironmentFile= consumes.  No managed keys yet in
-    # this deposit-only build; the wsprdaemon.org upload knobs arrive
-    # with the upload transport (Phase 3).
+    # systemd unit's EnvironmentFile= consumes.  `env apply` manages no
+    # keys; METEOR_SCATTER_DELIVERY_MODE (default "direct") is written by
+    # sigmond, which sets "deposit".
     _cfg.add_env_subparsers(subparsers, common=_add_common)
 
     # Meteor Scatter QSO Party archive: calibrate (package and draft follow).
