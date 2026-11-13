@@ -27,7 +27,10 @@ meteor-scatter daemon (one per radiod)
   ├─ per-radiod:  <radiod_id>-msk144.log   (normalized decode lines)
   └─ ChTailer → callhash resolution → cycle batcher
        → sigmond.hamsci_sink.Writer → psk.spots (per-row mode="msk144")
-            └─ hs-uploader → pskreporter.info   (direct mode only)
+            └─ pskreporter.info, posted by the station's hs-uploader daemon
+               (delivery mode "off", which sigmond seeds), the in-process
+               sender ("direct", the daemon's own default), or
+               wsprdaemon.org's forwarder ("deposit")
 ```
 
 Two details that are easy to assume wrong:
@@ -36,10 +39,11 @@ Two details that are easy to assume wrong:
   value of the per-row `mode` column in the same table psk-recorder's
   FT8/FT4 rows use, so one PSKReporter pipeline
   (`mode IN (ft8, ft4, msk144)`) delivers all three.
-* **The default T/R period is 30 s**, matching a stock WSJT-X MSK144
-  install. `[radiod.msk144].tr_period_sec` overrides it (WSJT-X also
-  offers 5/10/15 s; 15 s is the 2 m VHF meteor-ping convention). That one
-  number is the slot length, the decode cadence and `jt9 -p`.
+* **The default T/R period is 15 s**, MSK144's nominal period and the
+  slot length the Meteor Scatter QSO Party (MSQP) records.
+  `[radiod.msk144].tr_period_sec` overrides it (WSJT-X also offers
+  5/10/30 s). That one number is the slot length, the decode cadence and
+  `jt9 -p`.
 
 Compound callsigns are recovered through the shared [callhash][callhash]
 library: the cross-mode table substitutes plaintext back for `<call>`
@@ -55,9 +59,13 @@ every MSK144 frequency configured on that radiod.
 Prerequisites:
 - A working `radiod@<id>.service` from [ka9q/ka9q-radio][ka9q], reachable
   by its mDNS status name, covering the bands you want (6 m included).
-- `jt9` (WSJT-X 3.0.2) at `/usr/local/bin/jt9`. On a sigmond host
-  `smd` builds it from pinned source; **no decoder binaries ship in this
-  repo**.
+- A `jt9` that decodes MSK144. The daemon takes the first candidate whose
+  help lists `--msk144`: a config override (`paths.decoder_jt9`), sigmond's
+  UberSDR build at `/usr/local/libexec/sigmond/decoders/ubersdr/jt9`,
+  sigmond's WSJT-X build at `/usr/local/libexec/sigmond/decoders/wsjtx/jt9`,
+  then `jt9` on PATH. With none, it refuses to start and names what it
+  tried. On a sigmond host `smd` builds both from pinned source; **no
+  decoder binaries ship in this repo**.
 
 Then:
 
@@ -95,7 +103,9 @@ host whose hs-uploader daemon owns egress).
 
 ⚠ `meteor-scatter env apply` manages **no** keys in this build
 (`_ENV_WRITABLE_KEYS` is empty), so the wizard's *Delivery* menu item
-fails and layer 3 must be edited directly. `env show` works.
+fails and layer 3 must be edited directly. `env show` works. On a
+sigmond host, `smd config upload meteor-scatter <id> --on --via
+deposit|direct|off` sets `METEOR_SCATTER_DELIVERY_MODE` for you.
 
 #### Interactive wizard (default)
 
@@ -200,6 +210,10 @@ compound-call hashes through the shared callhash table; stamp timing
 provenance and reporter identity on every row; stage rows into
 `psk.spots`; and — in `direct` delivery mode — POST them to
 pskreporter.info through hs-uploader's `PskReporterTcp` transport.
+In `off` mode, which sigmond seeds for each new instance, the station's
+hs-uploader daemon posts them instead. `meteor-scatter msqp` keeps and packages the MSQP archive
+(see [docs/OPERATIONS.md](docs/OPERATIONS.md), "MSQP"); `[msqp]
+archive_dtype = "f16"` keeps `capture = "iq"` slots at half size.
 
 **Does not:** decode FT8 or FT4 (that is [psk-recorder][psk]);
 reimplement the MSK144 decoder (it shells out to WSJT-X's `jt9`);
